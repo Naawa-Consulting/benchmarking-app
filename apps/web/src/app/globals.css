@@ -1,0 +1,15 @@
+﻿@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-mesh text-ink;
+}
+
+.main-surface {
+  @apply bg-white/80 backdrop-blur border border-mist shadow-sm;
+}

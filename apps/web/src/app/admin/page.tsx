@@ -1,0 +1,1399 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+
+import {
+  ApiResult,
+  coverageRulesDetailed,
+  getApiBaseUrl,
+  getQuestionsDetailed,
+  getJourneyStatusDetailed,
+  getRulesDetailed,
+  getStudyRuleScopeDetailed,
+  getStudiesDetailed,
+  pingHealthDetailed,
+  runRulesDetailed,
+  ensureJourneyDetailed,
+  saveStudyRuleScopeDetailed,
+  saveRulesDetailed,
+} from "../../lib/api";
+import { QuestionItem, RuleCoverage, Study, StudyRuleScope } from "../../lib/types";
+
+type ActionState = "idle" | "loading" | "success" | "error";
+
+type RulesPayload = {
+  version: number;
+  stage_rules: Array<Record<string, unknown>>;
+  brand_extractors: Array<Record<string, unknown>>;
+  ignore_rules: Array<Record<string, unknown>>;
+  defaults?: Record<string, unknown>;
+};
+
+type StageRuleForm = {
+  id: string;
+  stage: string;
+  question_text_regex: string;
+  var_code_regex: string;
+  priority: number;
+};
+
+type BrandExtractorForm = {
+  id: string;
+  applies_if_question_text_regex: string;
+  extract_regex: string;
+  extract_group: number;
+  normalize: boolean;
+};
+
+type IgnoreRuleForm = {
+  id: string;
+  question_text_regex: string;
+  var_code_regex: string;
+};
+
+const STAGES = [
+  "awareness",
+  "consideration",
+  "purchase",
+  "satisfaction",
+  "loyalty",
+  "none",
+];
+
+function formatJson(result: ApiResult | null) {
+  if (!result) return "No response yet.";
+  return JSON.stringify(
+    {
+      ok: result.ok,
+      status: result.status,
+      url: result.url,
+      data: result.data,
+      error: result.error,
+    },
+    null,
+    2
+  );
+}
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function createRuleId(prefix: string, existing: Array<Record<string, unknown>>) {
+  const next = existing.length + 1;
+  return `${prefix}_${String(next).padStart(3, "0")}`;
+}
+
+function safeRegexMatch(pattern: string | null | undefined, text: string) {
+  if (!pattern) return false;
+  try {
+    const regex = new RegExp(pattern, "iu");
+    return regex.test(text);
+  } catch {
+    return false;
+  }
+}
+
+function computeQuestionStatus(questions: QuestionItem[], rules: RulesPayload) {
+  const ignoreRules = rules.ignore_rules || [];
+  const stageRules = rules.stage_rules || [];
+
+  return questions.map((item) => {
+    const questionText = item.question_text || "";
+    const combined = `${item.var_code} ${questionText}`.trim();
+
+    const ignored = ignoreRules.some((rule) =>
+      safeRegexMatch(rule.question_text_regex as string, questionText) ||
+      safeRegexMatch(rule.var_code_regex as string, item.var_code)
+    );
+
+    if (ignored) {
+      return { ...item, stage_mapped: false, brand_mapped: false, status: "ignored" as const };
+    }
+
+    const matched = stageRules.some((rule) =>
+      safeRegexMatch(rule.question_text_regex as string, questionText) ||
+      safeRegexMatch(rule.var_code_regex as string, item.var_code) ||
+      safeRegexMatch(rule.question_text_regex as string, combined)
+    );
+
+    return {
+      ...item,
+      stage_mapped: matched,
+      brand_mapped: false,
+      status: matched ? "mapped" : "unmapped",
+    } as const;
+  });
+}
+
+export default function RulesStudioPage() {
+  const apiBaseUrl = getApiBaseUrl();
+
+  const [apiStatus, setApiStatus] = useState<"ok" | "error" | "idle">("idle");
+  const [apiResult, setApiResult] = useState<ApiResult | null>(null);
+
+  const [studies, setStudies] = useState<Study[]>([]);
+  const [selectedStudyId, setSelectedStudyId] = useState<string>("");
+
+  const [questions, setQuestions] = useState<QuestionItem[]>([]);
+  const [questionsState, setQuestionsState] = useState<ActionState>("idle");
+
+  const [rulesState, setRulesState] = useState<ActionState>("idle");
+  const [rulesPayload, setRulesPayload] = useState<RulesPayload | null>(null);
+  const [rulesJson, setRulesJson] = useState<string>("");
+  const [rulesError, setRulesError] = useState<string | null>(null);
+
+  const [coverageState, setCoverageState] = useState<ActionState>("idle");
+  const [publishState, setPublishState] = useState<ActionState>("idle");
+  const [publishDetails, setPublishDetails] = useState<ApiResult | null>(null);
+  const [publishStatus, setPublishStatus] = useState<{ raw_ready: boolean; mapping_ready: boolean; curated_ready: boolean } | null>(null);
+  const [showPublishDetails, setShowPublishDetails] = useState(false);
+
+  const [coverageData, setCoverageData] = useState<RuleCoverage | null>(null);
+  const [scopeState, setScopeState] = useState<ActionState>("idle");
+  const [ruleScope, setRuleScope] = useState<StudyRuleScope | null>(null);
+  const [scopeError, setScopeError] = useState<string | null>(null);
+
+  const [runState, setRunState] = useState<ActionState>("idle");
+  const [runResult, setRunResult] = useState<ApiResult | null>(null);
+
+  const [lastResponse, setLastResponse] = useState<ApiResult | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
+
+  const [activeTab, setActiveTab] = useState<"questions" | "builder" | "advanced">("questions");
+
+  const [searchText, setSearchText] = useState("");
+  const [filterConoce, setFilterConoce] = useState(false);
+  const [filterCompra, setFilterCompra] = useState(false);
+  const [filterUnmapped, setFilterUnmapped] = useState(false);
+
+  const [stageForm, setStageForm] = useState<StageRuleForm>({
+    id: "",
+    stage: "awareness",
+    question_text_regex: "",
+    var_code_regex: "",
+    priority: 100,
+  });
+
+  const [brandForm, setBrandForm] = useState<BrandExtractorForm>({
+    id: "",
+    applies_if_question_text_regex: "",
+    extract_regex: "\\?\\s*(.+)$",
+    extract_group: 1,
+    normalize: true,
+  });
+  const [brandPosition, setBrandPosition] = useState<"end" | "start">("end");
+
+  const [ignoreForm, setIgnoreForm] = useState<IgnoreRuleForm>({
+    id: "",
+    question_text_regex: "",
+    var_code_regex: "",
+  });
+  const [editingRule, setEditingRule] = useState<{ type: "stage" | "brand" | "ignore"; id: string } | null>(null);
+
+  const questionStatuses = useMemo(() => {
+    if (questions.some((item) => item.stage_mapped !== undefined || item.brand_mapped !== undefined)) {
+      return questions.map((item) => ({
+        ...item,
+        status: item.stage_mapped ? "mapped" : "unmapped",
+      })) as Array<QuestionItem & { status: "mapped" | "unmapped" | "ignored" }>;
+    }
+    if (!rulesPayload) return questions.map((item) => ({ ...item, status: "unmapped" as const }));
+    return computeQuestionStatus(questions, rulesPayload);
+  }, [questions, rulesPayload]);
+
+  const filteredQuestions = useMemo(() => {
+    return questionStatuses.filter((item) => {
+      const questionText = item.question_text || "";
+      const matchesSearch =
+        !searchText ||
+        item.var_code.toLowerCase().includes(searchText.toLowerCase()) ||
+        questionText.toLowerCase().includes(searchText.toLowerCase());
+
+      const matchesConoce = !filterConoce || questionText.toLowerCase().includes("conoce");
+      const matchesCompra = !filterCompra || questionText.toLowerCase().includes("compra");
+      const matchesUnmapped = !filterUnmapped || !item.stage_mapped;
+
+      return matchesSearch && matchesConoce && matchesCompra && matchesUnmapped;
+    });
+  }, [questionStatuses, searchText, filterConoce, filterCompra, filterUnmapped]);
+
+  useEffect(() => {
+    const ping = async () => {
+      const result = await pingHealthDetailed();
+      setApiResult(result);
+      setApiStatus(result.ok ? "ok" : "error");
+    };
+
+    ping();
+  }, []);
+
+  useEffect(() => {
+    const loadStudies = async () => {
+      const result = await getStudiesDetailed(true);
+      if (result.ok && result.data) {
+        const payload = result.data as { studies?: Study[] } | Study[];
+        const items = Array.isArray(payload) ? payload : payload.studies || [];
+        setStudies(items);
+        const nonDemo = items.find((item) => item.source !== "demo");
+        setSelectedStudyId(nonDemo?.id || items[0]?.id || "");
+      }
+    };
+
+    loadStudies();
+  }, []);
+
+  useEffect(() => {
+    const loadRules = async () => {
+      setRulesState("loading");
+      const result = await getRulesDetailed();
+      setLastResponse(result);
+      if (result.ok && result.data) {
+        const payload = result.data as RulesPayload;
+        setRulesPayload(payload);
+        setRulesJson(JSON.stringify(payload, null, 2));
+        setRulesState("success");
+        setRulesError(null);
+      } else {
+        setRulesState("error");
+      }
+    };
+
+    loadRules();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedStudyId) return;
+
+    const loadQuestions = async () => {
+      setQuestionsState("loading");
+      const result = await getQuestionsDetailed(selectedStudyId, true, 1000);
+      setLastResponse(result);
+      if (result.ok && result.data && typeof result.data === "object") {
+        const data = result.data as { items?: QuestionItem[] };
+        setQuestions(Array.isArray(data.items) ? data.items : []);
+        setQuestionsState("success");
+      } else {
+        setQuestions([]);
+        setQuestionsState("error");
+      }
+    };
+
+    const loadCoverage = async () => {
+      setCoverageState("loading");
+      const result = await coverageRulesDetailed(selectedStudyId);
+      setLastResponse(result);
+      if (result.ok && result.data) {
+        setCoverageData(result.data as RuleCoverage);
+        setCoverageState("success");
+      } else {
+        setCoverageData(null);
+        setCoverageState("error");
+      }
+    };
+
+    loadQuestions();
+    loadCoverage();
+  }, [selectedStudyId]);
+
+  useEffect(() => {
+    if (!selectedStudyId || !rulesPayload) return;
+    loadScope(selectedStudyId);
+  }, [selectedStudyId, rulesPayload]);
+
+  const handleUseAsPattern = (question: QuestionItem) => {
+    const questionText = question.question_text || "";
+    const escaped = escapeRegex(questionText).replace(/\s+/g, "\\s+");
+    setStageForm((prev) => ({
+      ...prev,
+      question_text_regex: escaped,
+    }));
+    setActiveTab("builder");
+  };
+
+  const handleAddStageRule = () => {
+    if (!rulesPayload) return;
+    const next = { ...stageForm };
+    if (!next.id) {
+      next.id = createRuleId("stage", rulesPayload.stage_rules);
+    }
+    const stageRules = [...rulesPayload.stage_rules.filter((rule) => rule.id !== next.id), next];
+    const updated = { ...rulesPayload, stage_rules: stageRules };
+    setRulesPayload(updated);
+    setRulesJson(JSON.stringify(updated, null, 2));
+    setEditingRule(null);
+  };
+
+  const handleAddBrandExtractor = () => {
+    if (!rulesPayload) return;
+    const next = { ...brandForm };
+    if (!next.id) {
+      next.id = createRuleId("brand_extractor", rulesPayload.brand_extractors);
+    }
+    const extractors = [
+      ...rulesPayload.brand_extractors.filter((rule) => rule.id !== next.id),
+      next,
+    ];
+    const updated = { ...rulesPayload, brand_extractors: extractors };
+    setRulesPayload(updated);
+    setRulesJson(JSON.stringify(updated, null, 2));
+    setEditingRule(null);
+  };
+
+  const handleAddIgnoreRule = () => {
+    if (!rulesPayload) return;
+    const next = { ...ignoreForm };
+    if (!next.id) {
+      next.id = createRuleId("ignore", rulesPayload.ignore_rules);
+    }
+    const ignores = [...rulesPayload.ignore_rules.filter((rule) => rule.id !== next.id), next];
+    const updated = { ...rulesPayload, ignore_rules: ignores };
+    setRulesPayload(updated);
+    setRulesJson(JSON.stringify(updated, null, 2));
+    setEditingRule(null);
+  };
+
+  const handleEditRule = (type: "stage" | "brand" | "ignore", rule: Record<string, unknown>) => {
+    const id = String(rule.id || "");
+    setEditingRule({ type, id });
+    if (type === "stage") {
+      setStageForm({
+        id,
+        stage: String(rule.stage || "awareness"),
+        question_text_regex: String(rule.question_text_regex || ""),
+        var_code_regex: String(rule.var_code_regex || ""),
+        priority: Number(rule.priority || 100),
+      });
+      setActiveTab("builder");
+      return;
+    }
+    if (type === "brand") {
+      const extractRegex = String(rule.extract_regex || "\\?\\s*(.+)$");
+      const nextPosition = extractRegex.startsWith("^") ? "start" : "end";
+      setBrandPosition(nextPosition);
+      setBrandForm({
+        id,
+        applies_if_question_text_regex: String(rule.applies_if_question_text_regex || ""),
+        extract_regex: extractRegex,
+        extract_group: Number(rule.extract_group || 1),
+        normalize: Boolean(rule.normalize !== false),
+      });
+      setActiveTab("builder");
+      return;
+    }
+    setIgnoreForm({
+      id,
+      question_text_regex: String(rule.question_text_regex || ""),
+      var_code_regex: String(rule.var_code_regex || ""),
+    });
+    setActiveTab("builder");
+  };
+
+  const handleCancelEdit = () => {
+    setEditingRule(null);
+  };
+
+  const handleDeleteRule = (type: "stage" | "brand" | "ignore", id: string) => {
+    if (!rulesPayload) return;
+    if (type === "stage") {
+      const updated = {
+        ...rulesPayload,
+        stage_rules: rulesPayload.stage_rules.filter((rule) => rule.id !== id),
+      };
+      setRulesPayload(updated);
+      setRulesJson(JSON.stringify(updated, null, 2));
+      return;
+    }
+    if (type === "brand") {
+      const updated = {
+        ...rulesPayload,
+        brand_extractors: rulesPayload.brand_extractors.filter((rule) => rule.id !== id),
+      };
+      setRulesPayload(updated);
+      setRulesJson(JSON.stringify(updated, null, 2));
+      return;
+    }
+    const updated = {
+      ...rulesPayload,
+      ignore_rules: rulesPayload.ignore_rules.filter((rule) => rule.id !== id),
+    };
+    setRulesPayload(updated);
+    setRulesJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleSaveRules = async () => {
+    setRulesState("loading");
+    try {
+      const parsed = JSON.parse(rulesJson) as RulesPayload;
+      const result = await saveRulesDetailed(parsed);
+      setRulesPayload(parsed);
+      setLastResponse(result);
+      setRulesState(result.ok ? "success" : "error");
+      setRulesError(null);
+    } catch (error) {
+      setRulesError(error instanceof Error ? error.message : "Invalid JSON");
+      setRulesState("error");
+    }
+  };
+
+  const handleReloadRules = async () => {
+    setRulesState("loading");
+    const result = await getRulesDetailed();
+    setLastResponse(result);
+    if (result.ok && result.data) {
+      const payload = result.data as RulesPayload;
+      setRulesPayload(payload);
+      setRulesJson(JSON.stringify(payload, null, 2));
+      setRulesState("success");
+      setRulesError(null);
+    } else {
+      setRulesState("error");
+    }
+  };
+
+  const handleRecomputeCoverage = async () => {
+    if (!selectedStudyId) return;
+    setCoverageState("loading");
+    const result = await coverageRulesDetailed(selectedStudyId);
+    setLastResponse(result);
+    if (result.ok && result.data) {
+      setCoverageData(result.data as RuleCoverage);
+      setCoverageState("success");
+    } else {
+      setCoverageData(null);
+      setCoverageState("error");
+    }
+  };
+
+  const buildDefaultScope = (payload: RulesPayload, studyId: string): StudyRuleScope => {
+    return {
+      study_id: studyId,
+      enabled_stage_rules: payload.stage_rules.map((rule) => String(rule.id)),
+      enabled_brand_extractors: payload.brand_extractors.map((rule) => String(rule.id)),
+      enabled_ignore_rules: payload.ignore_rules.map((rule) => String(rule.id)),
+    };
+  };
+
+  const loadScope = async (studyId: string) => {
+    if (!studyId) return;
+    setScopeState("loading");
+    const result = await getStudyRuleScopeDetailed(studyId);
+    setLastResponse(result);
+    if (result.ok && result.data) {
+      setRuleScope(result.data as StudyRuleScope);
+      setScopeState("success");
+      setScopeError(null);
+    } else if (rulesPayload) {
+      setRuleScope(buildDefaultScope(rulesPayload, studyId));
+      setScopeState("error");
+      setScopeError("Failed to load scope, using defaults.");
+    } else {
+      setScopeState("error");
+    }
+  };
+
+  const handleToggleScope = (type: "stage" | "brand" | "ignore", id: string) => {
+    if (!ruleScope) return;
+    const key =
+      type === "stage"
+        ? "enabled_stage_rules"
+        : type === "brand"
+        ? "enabled_brand_extractors"
+        : "enabled_ignore_rules";
+    const current = new Set(ruleScope[key]);
+    if (current.has(id)) {
+      current.delete(id);
+    } else {
+      current.add(id);
+    }
+    setRuleScope({ ...ruleScope, [key]: Array.from(current) } as StudyRuleScope);
+  };
+
+  const handleEnableAllScope = () => {
+    if (!rulesPayload || !selectedStudyId) return;
+    setRuleScope(buildDefaultScope(rulesPayload, selectedStudyId));
+  };
+
+  const handleDisableAllScope = () => {
+    if (!selectedStudyId) return;
+    setRuleScope({
+      study_id: selectedStudyId,
+      enabled_stage_rules: [],
+      enabled_brand_extractors: [],
+      enabled_ignore_rules: [],
+    });
+  };
+
+  const handleSaveScope = async () => {
+    if (!selectedStudyId || !ruleScope) return;
+    setScopeState("loading");
+    const result = await saveStudyRuleScopeDetailed(selectedStudyId, ruleScope);
+    setLastResponse(result);
+    if (result.ok) {
+      setScopeState("success");
+      setScopeError(null);
+      handleRecomputeCoverage();
+      const questionsResult = await getQuestionsDetailed(selectedStudyId, true, 1000);
+      if (questionsResult.ok && questionsResult.data && typeof questionsResult.data === "object") {
+        const data = questionsResult.data as { items?: QuestionItem[] };
+        setQuestions(Array.isArray(data.items) ? data.items : []);
+      }
+    } else {
+      setScopeState("error");
+      setScopeError(result.error || "Failed to save scope.");
+    }
+  };
+
+  const handlePublish = async (force: boolean) => {
+    if (!selectedStudyId) return;
+    setPublishState("loading");
+    const result = await ensureJourneyDetailed(selectedStudyId, force);
+    setPublishDetails(result);
+    setPublishState(result.ok ? "success" : "error");
+    if (result.ok) {
+      handleRecomputeCoverage();
+      refreshPublishStatus();
+    }
+  };
+
+  const refreshPublishStatus = async () => {
+    if (!selectedStudyId) return;
+    const result = await getJourneyStatusDetailed(selectedStudyId);
+    if (result.ok && result.data && typeof result.data === "object") {
+      const data = result.data as { raw_ready?: boolean; mapping_ready?: boolean; curated_ready?: boolean };
+      setPublishStatus({
+        raw_ready: Boolean(data.raw_ready),
+        mapping_ready: Boolean(data.mapping_ready),
+        curated_ready: Boolean(data.curated_ready),
+      });
+    }
+  };
+  const handleRunRules = async () => {
+    if (!selectedStudyId) return;
+    setRunState("loading");
+    const result = await runRulesDetailed(selectedStudyId);
+    setRunResult(result);
+    setLastResponse(result);
+    setRunState(result.ok ? "success" : "error");
+    if (result.ok) {
+      handleRecomputeCoverage();
+    }
+  };
+
+  return (
+    <main className="space-y-6">
+      <section className="main-surface rounded-3xl p-6">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-3xl font-semibold">Rules Studio</h2>
+            <p className="mt-2 text-slate">
+              Build mapping rules from questions (stage + brand extraction).
+            </p>
+          </div>
+          <div className="flex items-center gap-2 rounded-full border border-ink/10 bg-white px-4 py-2 text-xs">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                apiStatus === "ok"
+                  ? "bg-emerald-500"
+                  : apiStatus === "error"
+                  ? "bg-red-500"
+                  : "bg-slate-300"
+              }`}
+            />
+            <span className="text-slate">{apiBaseUrl}</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-6 lg:grid-cols-[0.35fr_0.65fr]">
+        <aside className="space-y-6">
+          <div className="main-surface rounded-3xl p-6 space-y-4">
+            <div>
+              <p className="text-sm font-medium text-slate">Study</p>
+              <select
+                className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-4 py-2"
+                value={selectedStudyId}
+                onChange={(event) => setSelectedStudyId(event.target.value)}
+              >
+                {studies.map((study) => (
+                  <option key={study.id} value={study.id}>
+                    {study.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <p className="text-sm font-medium text-slate">Search questions</p>
+              <input
+                className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-4 py-2 text-sm"
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+                placeholder="Filter by keyword or var_code"
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                className={`rounded-full border px-3 py-1 text-xs ${
+                  filterConoce
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700"
+                    : "border-ink/10"
+                }`}
+                onClick={() => setFilterConoce((prev) => !prev)}
+                type="button"
+              >
+                Contains: conoce
+              </button>
+              <button
+                className={`rounded-full border px-3 py-1 text-xs ${
+                  filterCompra
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700"
+                    : "border-ink/10"
+                }`}
+                onClick={() => setFilterCompra((prev) => !prev)}
+                type="button"
+              >
+                Contains: compra
+              </button>
+              <button
+                className={`rounded-full border px-3 py-1 text-xs ${
+                  filterUnmapped
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700"
+                    : "border-ink/10"
+                }`}
+                onClick={() => setFilterUnmapped((prev) => !prev)}
+                type="button"
+              >
+                Unmapped only
+              </button>
+            </div>
+          </div>
+
+          <div className="main-surface rounded-3xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Coverage</h3>
+              <span className="text-xs text-slate">{coverageState}</span>
+            </div>
+            <div className="grid gap-3 text-sm">
+              <div className="rounded-2xl border border-ink/10 bg-white p-3">
+                <p className="text-xs text-slate">Mapped</p>
+                <p className="text-xl font-semibold text-ink">
+                  {coverageData?.mapped_rows ?? "-"}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-ink/10 bg-white p-3">
+                <p className="text-xs text-slate">Unmapped</p>
+                <p className="text-xl font-semibold text-ink">
+                  {coverageData?.unmapped_rows ?? "-"}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-ink/10 bg-white p-3">
+                <p className="text-xs text-slate">Ignored</p>
+                <p className="text-xl font-semibold text-ink">
+                  {coverageData?.ignored_rows ?? "-"}
+                </p>
+              </div>
+            </div>
+            <button
+              className="rounded-full border border-ink/10 px-4 py-2 text-xs font-medium"
+              onClick={handleRecomputeCoverage}
+              type="button"
+            >
+              Recompute coverage
+            </button>
+          </div>
+
+          <div className="main-surface rounded-3xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Rule Scope for this Study</h3>
+              <span className="text-xs text-slate">{scopeState}</span>
+            </div>
+            {scopeError && <p className="text-xs text-amber-600">{scopeError}</p>}
+            <div className="space-y-3 text-xs">
+              <div>
+                <p className="text-xs font-semibold text-slate">Stage Rules</p>
+                <div className="mt-2 space-y-2">
+                  {rulesPayload?.stage_rules?.map((rule) => {
+                    const id = String(rule.id);
+                    const checked = ruleScope
+                      ? ruleScope.enabled_stage_rules.includes(id)
+                      : true;
+                    return (
+                      <label key={id} className="flex items-start gap-2 rounded-xl border border-ink/10 bg-white px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => handleToggleScope("stage", id)}
+                        />
+                        <span>
+                          <span className="block text-ink">{id}</span>
+                          <span className="block text-[10px] text-slate">
+                            {String(rule.stage)} · {String(rule.question_text_regex || "-")}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-slate">Brand Extractors</p>
+                <div className="mt-2 space-y-2">
+                  {rulesPayload?.brand_extractors?.map((rule) => {
+                    const id = String(rule.id);
+                    const checked = ruleScope
+                      ? ruleScope.enabled_brand_extractors.includes(id)
+                      : true;
+                    return (
+                      <label key={id} className="flex items-start gap-2 rounded-xl border border-ink/10 bg-white px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => handleToggleScope("brand", id)}
+                        />
+                        <span>
+                          <span className="block text-ink">{id}</span>
+                          <span className="block text-[10px] text-slate">
+                            {String(rule.applies_if_question_text_regex || "-")}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-slate">Ignore Rules</p>
+                <div className="mt-2 space-y-2">
+                  {rulesPayload?.ignore_rules?.map((rule) => {
+                    const id = String(rule.id);
+                    const checked = ruleScope
+                      ? ruleScope.enabled_ignore_rules.includes(id)
+                      : true;
+                    return (
+                      <label key={id} className="flex items-start gap-2 rounded-xl border border-ink/10 bg-white px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => handleToggleScope("ignore", id)}
+                        />
+                        <span>
+                          <span className="block text-ink">{id}</span>
+                          <span className="block text-[10px] text-slate">
+                            {String(rule.question_text_regex || "-")}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="rounded-full border border-ink/10 px-4 py-2 text-xs font-medium"
+                onClick={handleEnableAllScope}
+                type="button"
+              >
+                Enable all
+              </button>
+              <button
+                className="rounded-full border border-ink/10 px-4 py-2 text-xs font-medium"
+                onClick={handleDisableAllScope}
+                type="button"
+              >
+                Disable all
+              </button>
+              <button
+                className="rounded-full bg-emerald-600 px-4 py-2 text-xs font-medium text-white"
+                onClick={handleSaveScope}
+                type="button"
+              >
+                Save scope
+              </button>
+            </div>
+          </div>
+
+          <div className="main-surface rounded-3xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Publish Journey Results</h3>
+              <span className="text-xs text-slate">{publishState}</span>
+            </div>
+            <p className="text-xs text-slate">
+              Build mapping and curated mart so Journey can display real results.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <span className="rounded-full border px-3 py-1 text-[10px]">
+                RAW: {publishStatus?.raw_ready ? "ready" : "missing"}
+              </span>
+              <span className="rounded-full border px-3 py-1 text-[10px]">
+                Mapping: {publishStatus?.mapping_ready ? "ready" : "missing"}
+              </span>
+              <span className="rounded-full border px-3 py-1 text-[10px]">
+                Curated: {publishStatus?.curated_ready ? "ready" : "missing"}
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="rounded-full bg-emerald-600 px-4 py-2 text-xs font-medium text-white"
+                onClick={() => handlePublish(false)}
+                type="button"
+              >
+                Build / Publish
+              </button>
+              <button
+                className="rounded-full border border-ink/10 px-4 py-2 text-xs font-medium"
+                onClick={() => handlePublish(true)}
+                type="button"
+              >
+                Rebuild (force)
+              </button>
+            </div>
+            <button
+              className="text-xs font-medium text-slate"
+              onClick={() => setShowPublishDetails((prev) => !prev)}
+              type="button"
+            >
+              {showPublishDetails ? "Hide" : "Last build details"}
+            </button>
+            {showPublishDetails && publishDetails && (
+              <pre className="max-h-48 overflow-auto rounded-2xl bg-black/90 p-3 text-[10px] text-white">
+                {formatJson(publishDetails)}
+              </pre>
+            )}
+          </div>
+        </aside>
+
+        <section className="space-y-6">
+          <div className="main-surface rounded-3xl p-6">
+            <div className="flex flex-wrap gap-2">
+              <button
+                className={`rounded-full px-4 py-2 text-sm ${
+                  activeTab === "questions"
+                    ? "bg-emerald-600 text-white"
+                    : "border border-ink/10 bg-white"
+                }`}
+                onClick={() => setActiveTab("questions")}
+                type="button"
+              >
+                Questions
+              </button>
+              <button
+                className={`rounded-full px-4 py-2 text-sm ${
+                  activeTab === "builder"
+                    ? "bg-emerald-600 text-white"
+                    : "border border-ink/10 bg-white"
+                }`}
+                onClick={() => setActiveTab("builder")}
+                type="button"
+              >
+                Rule Builder
+              </button>
+              <button
+                className={`rounded-full px-4 py-2 text-sm ${
+                  activeTab === "advanced"
+                    ? "bg-emerald-600 text-white"
+                    : "border border-ink/10 bg-white"
+                }`}
+                onClick={() => setActiveTab("advanced")}
+                type="button"
+              >
+                Advanced JSON
+              </button>
+            </div>
+          </div>
+
+          {activeTab === "questions" && (
+            <div className="main-surface rounded-3xl p-6">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xl font-semibold">Questions</h3>
+                <span className="text-xs text-slate">{questionsState}</span>
+              </div>
+              <div className="mt-4 space-y-3 text-sm">
+                {filteredQuestions.length === 0 ? (
+                  <p className="text-sm text-slate">No questions match the current filters.</p>
+                ) : (
+                  filteredQuestions.map((item) => (
+                    <div
+                      key={item.var_code}
+                      className="flex flex-col gap-2 rounded-2xl border border-ink/10 bg-white p-4"
+                    >
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs text-slate">{item.var_code}</p>
+                        <div className="flex items-center gap-2 text-[10px]">
+                          <span
+                            className={`rounded-full px-2 py-0.5 ${
+                              item.stage_mapped
+                                ? "bg-emerald-500/10 text-emerald-700"
+                                : "bg-slate-100 text-slate-500"
+                            }`}
+                          >
+                            Stage: {item.mapped_stage || "--"}
+                          </span>
+                          <span
+                            className={`rounded-full px-2 py-0.5 ${
+                              item.brand_mapped
+                                ? "bg-emerald-500/10 text-emerald-700"
+                                : "bg-slate-100 text-slate-500"
+                            }`}
+                          >
+                            Brand: {item.brand_mapped ? "ok" : "--"}
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-sm text-ink">
+                        {item.question_text || "(no question text)"}
+                      </p>
+                      <p className="text-xs text-slate">
+                        {item.value_preview
+                          ? `Values: ${
+                              item.value_preview.top_values.length
+                                ? item.value_preview.top_values
+                                    .map((value) => `${value.value} (${value.count})`)
+                                    .join(", ")
+                                : "n/a"
+                            } | distinct=${item.value_preview.distinct}`
+                          : "Values: n/a"}
+                      </p>
+                      <button
+                        className="self-start text-xs font-medium text-emerald-700"
+                        onClick={() => handleUseAsPattern(item)}
+                        type="button"
+                      >
+                        Use as pattern
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === "builder" && (
+            <div className="space-y-6">
+              <div className="main-surface rounded-3xl p-6 space-y-4">
+                <h3 className="text-xl font-semibold">Stage Rule</h3>
+                <div>
+                  <p className="text-xs text-slate">Rule name (id)</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={stageForm.id}
+                    onChange={(event) =>
+                      setStageForm((prev) => ({ ...prev, id: event.target.value }))
+                    }
+                    placeholder="stage_awareness_001"
+                  />
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <p className="text-xs text-slate">Stage</p>
+                    <select
+                      className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                      value={stageForm.stage}
+                      onChange={(event) =>
+                        setStageForm((prev) => ({ ...prev, stage: event.target.value }))
+                      }
+                    >
+                      {STAGES.map((stage) => (
+                        <option key={stage} value={stage}>
+                          {stage}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate">Priority</p>
+                    <input
+                      className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                      type="number"
+                      value={stageForm.priority}
+                      onChange={(event) =>
+                        setStageForm((prev) => ({
+                          ...prev,
+                          priority: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs text-slate">Question text regex</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={stageForm.question_text_regex}
+                    onChange={(event) =>
+                      setStageForm((prev) => ({
+                        ...prev,
+                        question_text_regex: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <p className="text-xs text-slate">Var code regex (optional)</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={stageForm.var_code_regex}
+                    onChange={(event) =>
+                      setStageForm((prev) => ({ ...prev, var_code_regex: event.target.value }))
+                    }
+                  />
+                </div>
+                <button
+                  className="rounded-full bg-emerald-600 px-5 py-2 text-sm font-medium text-white"
+                  onClick={handleAddStageRule}
+                  type="button"
+                >
+                  {editingRule?.type === "stage" ? "Update Stage Rule" : "Add/Update Stage Rule"}
+                </button>
+                {editingRule?.type === "stage" && (
+                  <button
+                    className="rounded-full border border-ink/10 px-5 py-2 text-sm font-medium"
+                    onClick={handleCancelEdit}
+                    type="button"
+                  >
+                    Cancel edit
+                  </button>
+                )}
+              </div>
+
+              <div className="main-surface rounded-3xl p-6 space-y-4">
+                <h3 className="text-xl font-semibold">Brand Extraction</h3>
+                <div>
+                  <p className="text-xs text-slate">Rule name (id)</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={brandForm.id}
+                    onChange={(event) =>
+                      setBrandForm((prev) => ({ ...prev, id: event.target.value }))
+                    }
+                    placeholder="brand_extractor_001"
+                  />
+                </div>
+                <div>
+                  <p className="text-xs text-slate">Applies if question regex</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={brandForm.applies_if_question_text_regex}
+                    onChange={(event) =>
+                      setBrandForm((prev) => ({
+                        ...prev,
+                        applies_if_question_text_regex: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div className="grid gap-3 md:grid-cols-[2fr_1fr]">
+                  <div>
+                    <p className="text-xs text-slate">Extract regex</p>
+                    <input
+                      className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                      value={brandForm.extract_regex}
+                      onChange={(event) =>
+                        setBrandForm((prev) => ({ ...prev, extract_regex: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate">Group</p>
+                    <input
+                      className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                      type="number"
+                      value={brandForm.extract_group}
+                      onChange={(event) =>
+                        setBrandForm((prev) => ({
+                          ...prev,
+                          extract_group: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs text-slate">Brand position</p>
+                  <select
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={brandPosition}
+                    onChange={(event) => {
+                      const next = event.target.value as "end" | "start";
+                      setBrandPosition(next);
+                      if (next === "start") {
+                        setBrandForm((prev) => ({
+                          ...prev,
+                          extract_regex: "^\\s*(.+?)\\s*[-:]",
+                          extract_group: 1,
+                        }));
+                      } else {
+                        setBrandForm((prev) => ({
+                          ...prev,
+                          extract_regex: "\\\\?\\\\s*(.+)$",
+                          extract_group: 1,
+                        }));
+                      }
+                    }}
+                  >
+                    <option value="end">End of question</option>
+                    <option value="start">Start of question</option>
+                  </select>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-slate">
+                  <input
+                    checked={brandForm.normalize}
+                    onChange={(event) =>
+                      setBrandForm((prev) => ({ ...prev, normalize: event.target.checked }))
+                    }
+                    type="checkbox"
+                  />
+                  Normalize brand labels
+                </label>
+                <button
+                  className="rounded-full bg-emerald-600 px-5 py-2 text-sm font-medium text-white"
+                  onClick={handleAddBrandExtractor}
+                  type="button"
+                >
+                  {editingRule?.type === "brand" ? "Update Brand Extractor" : "Add/Update Brand Extractor"}
+                </button>
+                {editingRule?.type === "brand" && (
+                  <button
+                    className="rounded-full border border-ink/10 px-5 py-2 text-sm font-medium"
+                    onClick={handleCancelEdit}
+                    type="button"
+                  >
+                    Cancel edit
+                  </button>
+                )}
+              </div>
+
+              <div className="main-surface rounded-3xl p-6 space-y-4">
+                <h3 className="text-xl font-semibold">Ignore Rule</h3>
+                <div>
+                  <p className="text-xs text-slate">Question text regex</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={ignoreForm.question_text_regex}
+                    onChange={(event) =>
+                      setIgnoreForm((prev) => ({
+                        ...prev,
+                        question_text_regex: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <p className="text-xs text-slate">Var code regex</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={ignoreForm.var_code_regex}
+                    onChange={(event) =>
+                      setIgnoreForm((prev) => ({
+                        ...prev,
+                        var_code_regex: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <button
+                  className="rounded-full bg-emerald-600 px-5 py-2 text-sm font-medium text-white"
+                  onClick={handleAddIgnoreRule}
+                  type="button"
+                >
+                  {editingRule?.type === "ignore" ? "Update Ignore Rule" : "Add Ignore Rule"}
+                </button>
+                {editingRule?.type === "ignore" && (
+                  <button
+                    className="rounded-full border border-ink/10 px-5 py-2 text-sm font-medium"
+                    onClick={handleCancelEdit}
+                    type="button"
+                  >
+                    Cancel edit
+                  </button>
+                )}
+              </div>
+
+              <div className="main-surface rounded-3xl p-6 space-y-4">
+                <h3 className="text-xl font-semibold">Rules Preview</h3>
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <p className="text-xs font-semibold text-slate">Stage Rules</p>
+                    <div className="mt-2 space-y-2">
+                      {rulesPayload?.stage_rules?.map((rule) => (
+                        <div
+                          key={String(rule.id)}
+                          className="flex items-center justify-between rounded-xl border border-ink/10 bg-white px-3 py-2"
+                        >
+                          <div>
+                            <p className="text-ink">{String(rule.id)}</p>
+                            <p className="text-slate">
+                              {String(rule.stage)} - {String(rule.question_text_regex || "-")}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <button
+                              className="text-xs font-medium text-emerald-700"
+                              onClick={() => handleEditRule("stage", rule)}
+                              type="button"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              className="text-xs font-medium text-red-600"
+                              onClick={() => handleDeleteRule("stage", String(rule.id))}
+                              type="button"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-slate">Brand Extractors</p>
+                    <div className="mt-2 space-y-2">
+                      {rulesPayload?.brand_extractors?.map((rule) => (
+                        <div
+                          key={String(rule.id)}
+                          className="flex items-center justify-between rounded-xl border border-ink/10 bg-white px-3 py-2"
+                        >
+                          <div>
+                            <p className="text-ink">{String(rule.id)}</p>
+                            <p className="text-slate">
+                              {String(rule.applies_if_question_text_regex || "-")}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <button
+                              className="text-xs font-medium text-emerald-700"
+                              onClick={() => handleEditRule("brand", rule)}
+                              type="button"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              className="text-xs font-medium text-red-600"
+                              onClick={() => handleDeleteRule("brand", String(rule.id))}
+                              type="button"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-slate">Ignore Rules</p>
+                    <div className="mt-2 space-y-2">
+                      {rulesPayload?.ignore_rules?.map((rule) => (
+                        <div
+                          key={String(rule.id)}
+                          className="flex items-center justify-between rounded-xl border border-ink/10 bg-white px-3 py-2"
+                        >
+                          <div>
+                            <p className="text-ink">{String(rule.id)}</p>
+                            <p className="text-slate">
+                              {String(rule.question_text_regex || "-")}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <button
+                              className="text-xs font-medium text-emerald-700"
+                              onClick={() => handleEditRule("ignore", rule)}
+                              type="button"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              className="text-xs font-medium text-red-600"
+                              onClick={() => handleDeleteRule("ignore", String(rule.id))}
+                              type="button"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="main-surface rounded-3xl p-6 space-y-4">
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    className="rounded-full border border-ink/10 px-5 py-2 text-sm font-medium"
+                    onClick={handleSaveRules}
+                    type="button"
+                  >
+                    Save Rules
+                  </button>
+                  <button
+                    className="rounded-full bg-emerald-600 px-5 py-2 text-sm font-medium text-white"
+                    onClick={handleRunRules}
+                    type="button"
+                    disabled={!selectedStudyId}
+                  >
+                    Run Rules -> Generate Mapping
+                  </button>
+                </div>
+                {runState === "success" && (
+                  <p className="text-xs text-emerald-700">Rules applied successfully.</p>
+                )}
+                {runState === "error" && (
+                  <p className="text-xs text-red-600">Rules run failed. Check details.</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === "advanced" && (
+            <div className="main-surface rounded-3xl p-6 space-y-4">
+              <h3 className="text-xl font-semibold">Rules JSON (Advanced)</h3>
+              <textarea
+                className="min-h-[260px] w-full rounded-2xl border border-ink/10 bg-white p-3 font-mono text-xs"
+                value={rulesJson}
+                onChange={(event) => setRulesJson(event.target.value)}
+              />
+              {rulesError && <p className="text-xs text-red-600">{rulesError}</p>}
+              <div className="flex flex-wrap gap-3">
+                <button
+                  className="rounded-full border border-ink/10 px-5 py-2 text-sm font-medium"
+                  onClick={handleReloadRules}
+                  type="button"
+                >
+                  Reload rules
+                </button>
+                <button
+                  className="rounded-full bg-emerald-600 px-5 py-2 text-sm font-medium text-white"
+                  onClick={handleSaveRules}
+                  type="button"
+                >
+                  Save rules
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="main-surface rounded-3xl p-6 space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-lg font-semibold">Last Response</h4>
+              <button
+                className="text-xs font-medium text-slate"
+                onClick={() => setShowDetails((prev) => !prev)}
+                type="button"
+              >
+                {showDetails ? "Hide" : "Details"}
+              </button>
+            </div>
+            {showDetails && (
+              <pre className="max-h-64 overflow-auto rounded-2xl bg-black/90 p-4 text-xs text-white">
+                {formatJson(lastResponse || apiResult || runResult)}
+              </pre>
+            )}
+          </div>
+        </section>
+      </section>
+    </main>
+  );
+}
