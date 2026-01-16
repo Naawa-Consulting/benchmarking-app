@@ -176,3 +176,20 @@ export function ensureJourneyDetailed(studyId: string, force = false) {
     method: "POST",
   });
 }
+
+export function getTaxonomyDetailed() {
+  return requestDetailed("/taxonomy");
+}
+
+export function getStudyClassificationDetailed(studyId: string) {
+  const params = new URLSearchParams({ study_id: studyId });
+  return requestDetailed(`/taxonomy/study?${params.toString()}`);
+}
+
+export function saveStudyClassificationDetailed(studyId: string, payload: unknown) {
+  const params = new URLSearchParams({ study_id: studyId });
+  return requestDetailed(`/taxonomy/study?${params.toString()}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.routers import analytics, health, ingest, mapping, marts, pipeline, questions, rules, studies
+from app.routers import analytics, health, ingest, mapping, marts, pipeline, questions, rules, studies, taxonomy
 
 
 def create_app() -> FastAPI:
@@ -29,6 +29,7 @@ def create_app() -> FastAPI:
     app.include_router(rules.router, tags=["rules"])
     app.include_router(questions.router, tags=["questions"])
     app.include_router(pipeline.router, tags=["pipeline"])
+    app.include_router(taxonomy.router, tags=["taxonomy"])
 
     return app
 

@@ -124,6 +124,7 @@ def run_rules(study_id: str = Query(..., description="Study id")) -> RuleCoverag
         mapped_rows=stats["mapped_rows"],
         unmapped_rows=stats["unmapped_rows"],
         ignored_rows=stats["ignored_rows"],
+        touchpoint_mapped_rows=stats.get("touchpoint_mapped_rows"),
         output_path=str(mapping_path),
         examples=stats["examples"],
     )
@@ -149,6 +150,7 @@ def rule_coverage(study_id: str = Query(..., description="Study id")) -> RuleCov
         mapped_rows=stats["mapped_rows"],
         unmapped_rows=stats["unmapped_rows"],
         ignored_rows=stats["ignored_rows"],
+        touchpoint_mapped_rows=stats.get("touchpoint_mapped_rows"),
         output_path=None,
         examples=stats["examples"],
     )

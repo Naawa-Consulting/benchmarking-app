@@ -142,9 +142,9 @@ export default function JourneyPage() {
               <thead>
                 <tr className="border-b border-ink/10 text-left">
                   <th className="py-2 font-semibold">Brand</th>
-                  <th className="py-2 text-right font-semibold">Awareness</th>
-                  <th className="py-2 text-right font-semibold">Consideration</th>
-                  <th className="py-2 text-right font-semibold">Purchase</th>
+                  <th className="py-2 text-right font-semibold">Brand Awareness</th>
+                  <th className="py-2 text-right font-semibold">Brand Consideration</th>
+                  <th className="py-2 text-right font-semibold">Brand Purchase</th>
                 </tr>
               </thead>
               <tbody>

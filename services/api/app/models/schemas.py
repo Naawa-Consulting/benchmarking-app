@@ -10,6 +10,9 @@ class Study(BaseModel):
     landing_file: str | None = None
     status: str | None = None
     error: str | None = None
+    sector: str | None = None
+    subsector: str | None = None
+    category: str | None = None
 
 
 class SeedResponse(BaseModel):
@@ -123,5 +126,6 @@ class RuleCoverageResponse(BaseModel):
     mapped_rows: int
     unmapped_rows: int
     ignored_rows: int
+    touchpoint_mapped_rows: int | None = None
     output_path: str | None = None
     examples: dict[str, list[RuleExample]]

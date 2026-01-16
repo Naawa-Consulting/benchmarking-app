@@ -19,6 +19,30 @@ def _slugify_landing(stem: str) -> str:
     return value.strip("_") or "study"
 
 
+def _classification_for_study(root: Path, study_id: str) -> dict[str, str | None]:
+    path = (
+        root
+        / "data"
+        / "warehouse"
+        / "taxonomy"
+        / "study_classification"
+        / f"study_id={study_id}.json"
+    )
+    if not path.exists():
+        return {"sector": None, "subsector": None, "category": None}
+    try:
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"sector": None, "subsector": None, "category": None}
+    return {
+        "sector": data.get("sector"),
+        "subsector": data.get("subsector"),
+        "category": data.get("category"),
+    }
+
+
 @router.get("/")
 def list_studies(sync: bool = Query(False, description="Sync from landing")):
     root = get_repo_root()
@@ -43,6 +67,7 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
         for path in sorted(raw_root.glob("study_id=*")):
             study_id = path.name.replace("study_id=", "", 1)
             curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
+            classification = _classification_for_study(root, study_id)
             if study_id and study_id not in seen:
                 studies.append(
                     Study(
@@ -53,6 +78,9 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
                         curated_ready=curated_path.exists(),
                         landing_file=landing_files.get(study_id),
                         status="ready",
+                        sector=classification["sector"],
+                        subsector=classification["subsector"],
+                        category=classification["category"],
                     )
                 )
                 seen.add(study_id)
@@ -60,6 +88,7 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
     for study_id, filename in landing_files.items():
         if study_id in seen:
             continue
+        classification = _classification_for_study(root, study_id)
         studies.append(
             Study(
                 id=study_id,
@@ -69,6 +98,9 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
                 curated_ready=False,
                 landing_file=filename,
                 status="missing_raw",
+                sector=classification["sector"],
+                subsector=classification["subsector"],
+                category=classification["category"],
             )
         )
         seen.add(study_id)
@@ -78,6 +110,7 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
             study_id = error.get("study_id")
             if not study_id:
                 continue
+            classification = _classification_for_study(root, study_id)
             studies.append(
                 Study(
                     id=study_id,
@@ -88,6 +121,9 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
                     landing_file=error.get("file"),
                     status="error",
                     error=error.get("error"),
+                    sector=classification["sector"],
+                    subsector=classification["subsector"],
+                    category=classification["category"],
                 )
             )
 
@@ -100,6 +136,9 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
                 source="demo",
                 raw_ready=False,
                 curated_ready=True,
+                sector=None,
+                subsector=None,
+                category=None,
             )
         )
 

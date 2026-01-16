@@ -6,7 +6,15 @@ import ReactECharts from "echarts-for-react";
 import { fetchJourney } from "../lib/api";
 import { JourneyPoint } from "../lib/types";
 
-const STAGES = ["awareness", "consideration", "purchase", "satisfaction", "loyalty"];
+const STAGES = [
+  { value: "awareness", label: "Brand Awareness" },
+  { value: "ad_awareness", label: "Ad Awareness" },
+  { value: "consideration", label: "Brand Consideration" },
+  { value: "purchase", label: "Brand Purchase" },
+  { value: "satisfaction", label: "Brand Satisfaction" },
+  { value: "recommendation", label: "Brand Recommendation" },
+  { value: "touchpoints", label: "Touchpoints" },
+];
 
 export default function JourneyChart({ studyId }: { studyId: string }) {
   const [points, setPoints] = useState<JourneyPoint[]>([]);
@@ -38,7 +46,7 @@ export default function JourneyChart({ studyId }: { studyId: string }) {
     const brands = Array.from(new Set(points.map((point) => point.brand))).sort();
     const series = brands.map((brand) => {
       const brandPoints = STAGES.map((stage) => {
-        const match = points.find((point) => point.brand === brand && point.stage === stage);
+        const match = points.find((point) => point.brand === brand && point.stage === stage.value);
         return match ? Number(match.percentage.toFixed(1)) : 0;
       });
       return {
@@ -52,7 +60,7 @@ export default function JourneyChart({ studyId }: { studyId: string }) {
       tooltip: { trigger: "axis" },
       legend: { top: 0 },
       grid: { left: 40, right: 20, bottom: 30, top: 40 },
-      xAxis: { type: "category", data: STAGES },
+      xAxis: { type: "category", data: STAGES.map((stage) => stage.label) },
       yAxis: { type: "value", axisLabel: { formatter: "{value}%" } },
       series,
     };

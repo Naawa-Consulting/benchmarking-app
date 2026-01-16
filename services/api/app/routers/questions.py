@@ -4,8 +4,8 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
 from app.data.rule_engine import (
-    apply_rules_to_variables,
     filter_rules_by_scope,
+    infer_question_mapping,
     load_rules,
     load_study_rule_scope,
 )
@@ -59,16 +59,6 @@ def list_questions(
     rules = load_rules()
     scope = load_study_rule_scope(study_id, rules)
     rules = filter_rules_by_scope(rules, scope)
-    mapped_df, _ = apply_rules_to_variables(df, rules)
-    mapping_lookup: dict[str, dict[str, str | None]] = {}
-    for _, row in mapped_df.iterrows():
-        var_code = str(row.get("var_code", ""))
-        if var_code and var_code not in mapping_lookup:
-            brand = row.get("brand")
-            mapping_lookup[var_code] = {
-                "stage": row.get("stage"),
-                "brand": brand if isinstance(brand, str) else None,
-            }
 
     conn = None
     if responses_path.exists():
@@ -86,13 +76,25 @@ def list_questions(
 
     for index, item in enumerate(items):
         var_code = item.get("var_code", "")
-        mapping = mapping_lookup.get(str(var_code))
-        mapped_stage = mapping.get("stage") if mapping else None
-        mapped_brand = mapping.get("brand") if mapping else None
-        item["stage_mapped"] = mapped_stage is not None
-        item["brand_mapped"] = mapped_brand is not None and str(mapped_brand).strip() != ""
-        item["mapped_stage"] = mapped_stage
-        item["mapped_brand_example"] = mapped_brand
+        question_text_str = str(item.get("question_text") or "")
+        mapping = infer_question_mapping(question_text_str, str(var_code), rules)
+        if mapping.get("ignored"):
+            item["stage_mapped"] = False
+            item["brand_mapped"] = False
+            item["touchpoint_mapped"] = False
+            item["mapped_stage"] = None
+            item["mapped_brand_example"] = None
+            item["mapped_touchpoint"] = None
+        else:
+            mapped_stage = mapping.get("stage")
+            mapped_brand = mapping.get("brand")
+            mapped_touchpoint = mapping.get("touchpoint")
+            item["stage_mapped"] = mapped_stage is not None
+            item["brand_mapped"] = mapped_brand is not None and str(mapped_brand).strip() != ""
+            item["touchpoint_mapped"] = mapped_touchpoint is not None and str(mapped_touchpoint).strip() != ""
+            item["mapped_stage"] = mapped_stage
+            item["mapped_brand_example"] = mapped_brand
+            item["mapped_touchpoint"] = mapped_touchpoint
 
         value_preview = None
         if conn is not None and index < limit:
@@ -121,8 +123,8 @@ def list_questions(
                 """,
                 [var_code],
             ).fetchone()
-            non_numeric = int(type_row[0]) if type_row else 0
-            non_null = int(type_row[1]) if type_row else 0
+            non_numeric = int(type_row[0]) if type_row and type_row[0] is not None else 0
+            non_null = int(type_row[1]) if type_row and type_row[1] is not None else 0
             value_preview = {
                 "type": infer_type(non_null, non_numeric),
                 "top_values": [

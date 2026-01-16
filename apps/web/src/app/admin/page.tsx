@@ -11,13 +11,23 @@ import {
   getRulesDetailed,
   getStudyRuleScopeDetailed,
   getStudiesDetailed,
+  getStudyClassificationDetailed,
+  getTaxonomyDetailed,
   pingHealthDetailed,
   runRulesDetailed,
   ensureJourneyDetailed,
   saveStudyRuleScopeDetailed,
+  saveStudyClassificationDetailed,
   saveRulesDetailed,
 } from "../../lib/api";
-import { QuestionItem, RuleCoverage, Study, StudyRuleScope } from "../../lib/types";
+import {
+  QuestionItem,
+  RuleCoverage,
+  Study,
+  StudyClassification,
+  StudyRuleScope,
+  TaxonomyItem,
+} from "../../lib/types";
 
 type ActionState = "idle" | "loading" | "success" | "error";
 
@@ -26,6 +36,7 @@ type RulesPayload = {
   stage_rules: Array<Record<string, unknown>>;
   brand_extractors: Array<Record<string, unknown>>;
   ignore_rules: Array<Record<string, unknown>>;
+  touchpoint_rules?: Array<Record<string, unknown>>;
   defaults?: Record<string, unknown>;
 };
 
@@ -40,8 +51,11 @@ type StageRuleForm = {
 type BrandExtractorForm = {
   id: string;
   applies_if_question_text_regex: string;
+  mode: "end" | "start" | "between" | "regex";
   extract_regex: string;
   extract_group: number;
+  between_left: string;
+  between_right: string;
   normalize: boolean;
 };
 
@@ -51,14 +65,31 @@ type IgnoreRuleForm = {
   var_code_regex: string;
 };
 
+type TouchpointRuleForm = {
+  id: string;
+  touchpoint: string;
+  question_regex: string;
+  var_code_regex: string;
+  priority: number;
+};
+
 const STAGES = [
-  "awareness",
-  "consideration",
-  "purchase",
-  "satisfaction",
-  "loyalty",
-  "none",
+  { value: "awareness", label: "Brand Awareness" },
+  { value: "ad_awareness", label: "Ad Awareness" },
+  { value: "consideration", label: "Brand Consideration" },
+  { value: "purchase", label: "Brand Purchase" },
+  { value: "satisfaction", label: "Brand Satisfaction" },
+  { value: "recommendation", label: "Brand Recommendation" },
+  { value: "touchpoints", label: "Touchpoints" },
+  { value: "none", label: "None" },
 ];
+
+const STAGE_LABELS = Object.fromEntries(STAGES.map((stage) => [stage.value, stage.label]));
+
+function stageLabel(value: string | null | undefined) {
+  if (!value) return "--";
+  return STAGE_LABELS[value] || value;
+}
 
 function formatJson(result: ApiResult | null) {
   if (!result) return "No response yet.";
@@ -77,6 +108,10 @@ function formatJson(result: ApiResult | null) {
 
 function escapeRegex(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildBetweenRegex(left: string, right: string) {
+  return `${left}(.+?)(?:${right})`;
 }
 
 function createRuleId(prefix: string, existing: Array<Record<string, unknown>>) {
@@ -108,7 +143,13 @@ function computeQuestionStatus(questions: QuestionItem[], rules: RulesPayload) {
     );
 
     if (ignored) {
-      return { ...item, stage_mapped: false, brand_mapped: false, status: "ignored" as const };
+      return {
+        ...item,
+        stage_mapped: false,
+        brand_mapped: false,
+        touchpoint_mapped: false,
+        status: "ignored" as const,
+      };
     }
 
     const matched = stageRules.some((rule) =>
@@ -121,6 +162,7 @@ function computeQuestionStatus(questions: QuestionItem[], rules: RulesPayload) {
       ...item,
       stage_mapped: matched,
       brand_mapped: false,
+      touchpoint_mapped: false,
       status: matched ? "mapped" : "unmapped",
     } as const;
   });
@@ -154,6 +196,15 @@ export default function RulesStudioPage() {
   const [ruleScope, setRuleScope] = useState<StudyRuleScope | null>(null);
   const [scopeError, setScopeError] = useState<string | null>(null);
 
+  const [taxonomyItems, setTaxonomyItems] = useState<TaxonomyItem[]>([]);
+  const [taxonomyState, setTaxonomyState] = useState<ActionState>("idle");
+  const [classificationState, setClassificationState] = useState<ActionState>("idle");
+  const [classification, setClassification] = useState<StudyClassification | null>(null);
+  const [sector, setSector] = useState<string>("");
+  const [subsector, setSubsector] = useState<string>("");
+  const [category, setCategory] = useState<string>("");
+  const [classificationError, setClassificationError] = useState<string | null>(null);
+
   const [runState, setRunState] = useState<ActionState>("idle");
   const [runResult, setRunResult] = useState<ApiResult | null>(null);
 
@@ -178,18 +229,27 @@ export default function RulesStudioPage() {
   const [brandForm, setBrandForm] = useState<BrandExtractorForm>({
     id: "",
     applies_if_question_text_regex: "",
+    mode: "end",
     extract_regex: "\\?\\s*(.+)$",
     extract_group: 1,
+    between_left: "\\-\\s*",
+    between_right: "\\s+Anuncios\\s+en\\s+|\\s+Anuncios\\s+de\\s+|\\s+Ads\\s+on\\s+",
     normalize: true,
   });
-  const [brandPosition, setBrandPosition] = useState<"end" | "start">("end");
 
   const [ignoreForm, setIgnoreForm] = useState<IgnoreRuleForm>({
     id: "",
     question_text_regex: "",
     var_code_regex: "",
   });
-  const [editingRule, setEditingRule] = useState<{ type: "stage" | "brand" | "ignore"; id: string } | null>(null);
+  const [touchpointForm, setTouchpointForm] = useState<TouchpointRuleForm>({
+    id: "",
+    touchpoint: "",
+    question_regex: "",
+    var_code_regex: "",
+    priority: 100,
+  });
+  const [editingRule, setEditingRule] = useState<{ type: "stage" | "brand" | "ignore" | "touchpoint"; id: string } | null>(null);
 
   const questionStatuses = useMemo(() => {
     if (questions.some((item) => item.stage_mapped !== undefined || item.brand_mapped !== undefined)) {
@@ -217,6 +277,28 @@ export default function RulesStudioPage() {
       return matchesSearch && matchesConoce && matchesCompra && matchesUnmapped;
     });
   }, [questionStatuses, searchText, filterConoce, filterCompra, filterUnmapped]);
+
+  const sectors = useMemo(() => {
+    return Array.from(new Set(taxonomyItems.map((item) => item.sector))).sort();
+  }, [taxonomyItems]);
+
+  const subsectors = useMemo(() => {
+    if (!sector) return [];
+    return Array.from(
+      new Set(taxonomyItems.filter((item) => item.sector === sector).map((item) => item.subsector))
+    ).sort();
+  }, [taxonomyItems, sector]);
+
+  const categories = useMemo(() => {
+    if (!sector || !subsector) return [];
+    return Array.from(
+      new Set(
+        taxonomyItems
+          .filter((item) => item.sector === sector && item.subsector === subsector)
+          .map((item) => item.category)
+      )
+    ).sort();
+  }, [taxonomyItems, sector, subsector]);
 
   useEffect(() => {
     const ping = async () => {
@@ -250,6 +332,7 @@ export default function RulesStudioPage() {
       setLastResponse(result);
       if (result.ok && result.data) {
         const payload = result.data as RulesPayload;
+        payload.touchpoint_rules = payload.touchpoint_rules || [];
         setRulesPayload(payload);
         setRulesJson(JSON.stringify(payload, null, 2));
         setRulesState("success");
@@ -260,6 +343,23 @@ export default function RulesStudioPage() {
     };
 
     loadRules();
+  }, []);
+
+  useEffect(() => {
+    const loadTaxonomy = async () => {
+      setTaxonomyState("loading");
+      const result = await getTaxonomyDetailed();
+      setLastResponse(result);
+      if (result.ok && result.data && typeof result.data === "object") {
+        const data = result.data as { items?: TaxonomyItem[] };
+        setTaxonomyItems(Array.isArray(data.items) ? data.items : []);
+        setTaxonomyState("success");
+      } else {
+        setTaxonomyState("error");
+      }
+    };
+
+    loadTaxonomy();
   }, []);
 
   useEffect(() => {
@@ -297,6 +397,28 @@ export default function RulesStudioPage() {
   }, [selectedStudyId]);
 
   useEffect(() => {
+    if (!selectedStudyId) return;
+    const loadClassification = async () => {
+      setClassificationState("loading");
+      const result = await getStudyClassificationDetailed(selectedStudyId);
+      setLastResponse(result);
+      if (result.ok && result.data) {
+        const data = result.data as StudyClassification;
+        setClassification(data);
+        setSector(data.sector || "");
+        setSubsector(data.subsector || "");
+        setCategory(data.category || "");
+        setClassificationState("success");
+        setClassificationError(null);
+      } else {
+        setClassificationState("error");
+      }
+    };
+
+    loadClassification();
+  }, [selectedStudyId]);
+
+  useEffect(() => {
     if (!selectedStudyId || !rulesPayload) return;
     loadScope(selectedStudyId);
   }, [selectedStudyId, rulesPayload]);
@@ -326,9 +448,18 @@ export default function RulesStudioPage() {
 
   const handleAddBrandExtractor = () => {
     if (!rulesPayload) return;
-    const next = { ...brandForm };
+    const next = { ...brandForm } as Record<string, unknown>;
     if (!next.id) {
       next.id = createRuleId("brand_extractor", rulesPayload.brand_extractors);
+    }
+    if (brandForm.mode === "between") {
+      next.between = {
+        left: brandForm.between_left,
+        right: brandForm.between_right,
+        group: brandForm.extract_group,
+      };
+    } else {
+      delete next["between"];
     }
     const extractors = [
       ...rulesPayload.brand_extractors.filter((rule) => rule.id !== next.id),
@@ -353,7 +484,26 @@ export default function RulesStudioPage() {
     setEditingRule(null);
   };
 
-  const handleEditRule = (type: "stage" | "brand" | "ignore", rule: Record<string, unknown>) => {
+  const handleAddTouchpointRule = () => {
+    if (!rulesPayload) return;
+    const next = { ...touchpointForm };
+    if (!next.id) {
+      next.id = createRuleId("touchpoint", rulesPayload.touchpoint_rules || []);
+    }
+    const touchpointRules = [
+      ...(rulesPayload.touchpoint_rules || []).filter((rule) => rule.id !== next.id),
+      next,
+    ];
+    const updated = { ...rulesPayload, touchpoint_rules: touchpointRules };
+    setRulesPayload(updated);
+    setRulesJson(JSON.stringify(updated, null, 2));
+    setEditingRule(null);
+  };
+
+  const handleEditRule = (
+    type: "stage" | "brand" | "ignore" | "touchpoint",
+    rule: Record<string, unknown>
+  ) => {
     const id = String(rule.id || "");
     setEditingRule({ type, id });
     if (type === "stage") {
@@ -368,15 +518,38 @@ export default function RulesStudioPage() {
       return;
     }
     if (type === "brand") {
-      const extractRegex = String(rule.extract_regex || "\\?\\s*(.+)$");
-      const nextPosition = extractRegex.startsWith("^") ? "start" : "end";
-      setBrandPosition(nextPosition);
+      const mode = String(rule.mode || "regex") as BrandExtractorForm["mode"];
+      const extractRegex =
+        mode === "start"
+          ? String(rule.extract_regex || "^\\s*(.+?)\\s*[-:]")
+          : mode === "end"
+          ? String(rule.extract_regex || "\\?\\s*(.+)$")
+          : String(rule.extract_regex || "");
+      const between = (rule.between as { left?: string; right?: string; group?: number }) || {};
       setBrandForm({
         id,
-        applies_if_question_text_regex: String(rule.applies_if_question_text_regex || ""),
+        applies_if_question_text_regex: String(
+          rule.applies_if_question_regex || rule.applies_if_question_text_regex || ""
+        ),
+        mode,
         extract_regex: extractRegex,
         extract_group: Number(rule.extract_group || 1),
+        between_left: String(between.left || "\\-\\s*"),
+        between_right: String(
+          between.right || "\\s+Anuncios\\s+en\\s+|\\s+Anuncios\\s+de\\s+|\\s+Ads\\s+on\\s+"
+        ),
         normalize: Boolean(rule.normalize !== false),
+      });
+      setActiveTab("builder");
+      return;
+    }
+    if (type === "touchpoint") {
+      setTouchpointForm({
+        id,
+        touchpoint: String(rule.touchpoint || ""),
+        question_regex: String(rule.question_regex || rule.question_text_regex || ""),
+        var_code_regex: String(rule.var_code_regex || ""),
+        priority: Number(rule.priority || 100),
       });
       setActiveTab("builder");
       return;
@@ -393,7 +566,7 @@ export default function RulesStudioPage() {
     setEditingRule(null);
   };
 
-  const handleDeleteRule = (type: "stage" | "brand" | "ignore", id: string) => {
+  const handleDeleteRule = (type: "stage" | "brand" | "ignore" | "touchpoint", id: string) => {
     if (!rulesPayload) return;
     if (type === "stage") {
       const updated = {
@@ -408,6 +581,15 @@ export default function RulesStudioPage() {
       const updated = {
         ...rulesPayload,
         brand_extractors: rulesPayload.brand_extractors.filter((rule) => rule.id !== id),
+      };
+      setRulesPayload(updated);
+      setRulesJson(JSON.stringify(updated, null, 2));
+      return;
+    }
+    if (type === "touchpoint") {
+      const updated = {
+        ...rulesPayload,
+        touchpoint_rules: (rulesPayload.touchpoint_rules || []).filter((rule) => rule.id !== id),
       };
       setRulesPayload(updated);
       setRulesJson(JSON.stringify(updated, null, 2));
@@ -442,6 +624,7 @@ export default function RulesStudioPage() {
     setLastResponse(result);
     if (result.ok && result.data) {
       const payload = result.data as RulesPayload;
+      payload.touchpoint_rules = payload.touchpoint_rules || [];
       setRulesPayload(payload);
       setRulesJson(JSON.stringify(payload, null, 2));
       setRulesState("success");
@@ -544,6 +727,41 @@ export default function RulesStudioPage() {
     }
   };
 
+  const handleSaveClassification = async () => {
+    if (!selectedStudyId) return;
+    setClassificationState("loading");
+    const payload = {
+      sector: sector || null,
+      subsector: subsector || null,
+      category: category || null,
+    };
+    const result = await saveStudyClassificationDetailed(selectedStudyId, payload);
+    setLastResponse(result);
+    if (result.ok && result.data) {
+      const data = result.data as StudyClassification;
+      setClassification(data);
+      setClassificationState("success");
+      setClassificationError(null);
+      setStudies((prev) =>
+        prev.map((study) =>
+          study.id === selectedStudyId
+            ? { ...study, sector: data.sector, subsector: data.subsector, category: data.category }
+            : study
+        )
+      );
+    } else {
+      setClassificationState("error");
+      setClassificationError(result.error || "Failed to save classification.");
+    }
+  };
+
+  const handleClearClassification = async () => {
+    setSector("");
+    setSubsector("");
+    setCategory("");
+    await handleSaveClassification();
+  };
+
   const handlePublish = async (force: boolean) => {
     if (!selectedStudyId) return;
     setPublishState("loading");
@@ -621,6 +839,13 @@ export default function RulesStudioPage() {
                   </option>
                 ))}
               </select>
+              <p className="mt-2 text-xs text-slate">
+                {classification?.sector
+                  ? `${classification.sector} → ${classification.subsector || "—"} → ${
+                      classification.category || "—"
+                    }`
+                  : "Unassigned"}
+              </p>
             </div>
 
             <div>
@@ -706,6 +931,85 @@ export default function RulesStudioPage() {
 
           <div className="main-surface rounded-3xl p-6 space-y-4">
             <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Study Classification</h3>
+              <span className="text-xs text-slate">{classificationState}</span>
+            </div>
+            {classificationError && <p className="text-xs text-red-600">{classificationError}</p>}
+            <div>
+              <p className="text-xs text-slate">Sector</p>
+              <select
+                className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                value={sector}
+                onChange={(event) => {
+                  setSector(event.target.value);
+                  setSubsector("");
+                  setCategory("");
+                }}
+              >
+                <option value="">Unassigned</option>
+                {sectors.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <p className="text-xs text-slate">Subsector</p>
+              <select
+                className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                value={subsector}
+                onChange={(event) => {
+                  setSubsector(event.target.value);
+                  setCategory("");
+                }}
+                disabled={!sector}
+              >
+                <option value="">Unassigned</option>
+                {subsectors.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <p className="text-xs text-slate">Category</p>
+              <select
+                className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                value={category}
+                onChange={(event) => setCategory(event.target.value)}
+                disabled={!sector || !subsector}
+              >
+                <option value="">Unassigned</option>
+                {categories.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="rounded-full bg-emerald-600 px-4 py-2 text-xs font-medium text-white"
+                onClick={handleSaveClassification}
+                type="button"
+                disabled={taxonomyState === "loading"}
+              >
+                Save classification
+              </button>
+              <button
+                className="rounded-full border border-ink/10 px-4 py-2 text-xs font-medium"
+                onClick={handleClearClassification}
+                type="button"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+
+          <div className="main-surface rounded-3xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold">Rule Scope for this Study</h3>
               <span className="text-xs text-slate">{scopeState}</span>
             </div>
@@ -729,7 +1033,7 @@ export default function RulesStudioPage() {
                         <span>
                           <span className="block text-ink">{id}</span>
                           <span className="block text-[10px] text-slate">
-                            {String(rule.stage)} · {String(rule.question_text_regex || "-")}
+                            {stageLabel(String(rule.stage))} · {String(rule.question_text_regex || "-")}
                           </span>
                         </span>
                       </label>
@@ -929,7 +1233,7 @@ export default function RulesStudioPage() {
                                 : "bg-slate-100 text-slate-500"
                             }`}
                           >
-                            Stage: {item.mapped_stage || "--"}
+                            Stage: {stageLabel(item.mapped_stage)}
                           </span>
                           <span
                             className={`rounded-full px-2 py-0.5 ${
@@ -938,7 +1242,16 @@ export default function RulesStudioPage() {
                                 : "bg-slate-100 text-slate-500"
                             }`}
                           >
-                            Brand: {item.brand_mapped ? "ok" : "--"}
+                            Brand: {item.brand_mapped ? item.mapped_brand_example || "ok" : "--"}
+                          </span>
+                          <span
+                            className={`rounded-full px-2 py-0.5 ${
+                              item.touchpoint_mapped
+                                ? "bg-emerald-500/10 text-emerald-700"
+                                : "bg-slate-100 text-slate-500"
+                            }`}
+                          >
+                            Touchpoint: {item.mapped_touchpoint || "--"}
                           </span>
                         </div>
                       </div>
@@ -996,8 +1309,8 @@ export default function RulesStudioPage() {
                       }
                     >
                       {STAGES.map((stage) => (
-                        <option key={stage} value={stage}>
-                          {stage}
+                        <option key={stage.value} value={stage.value}>
+                          {stage.label}
                         </option>
                       ))}
                     </select>
@@ -1084,6 +1397,66 @@ export default function RulesStudioPage() {
                     }
                   />
                 </div>
+                <div>
+                  <p className="text-xs text-slate">Mode</p>
+                  <select
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={brandForm.mode}
+                    onChange={(event) => {
+                      const mode = event.target.value as BrandExtractorForm["mode"];
+                      setBrandForm((prev) => {
+                        if (mode === "start") {
+                          return { ...prev, mode, extract_regex: "^\\s*(.+?)\\s*[-:]" };
+                        }
+                        if (mode === "end") {
+                          return { ...prev, mode, extract_regex: "\\?\\s*(.+)$" };
+                        }
+                        if (mode === "between") {
+                          return { ...prev, mode };
+                        }
+                        return { ...prev, mode };
+                      });
+                    }}
+                  >
+                    <option value="end">End of question</option>
+                    <option value="start">Start of question</option>
+                    <option value="between">Between delimiters</option>
+                    <option value="regex">Custom regex</option>
+                  </select>
+                </div>
+                {brandForm.mode === "between" && (
+                  <div className="space-y-3">
+                    <div>
+                      <p className="text-xs text-slate">Left delimiter regex</p>
+                      <input
+                        className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                        value={brandForm.between_left}
+                        onChange={(event) =>
+                          setBrandForm((prev) => ({
+                            ...prev,
+                            between_left: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate">Right delimiter regex</p>
+                      <input
+                        className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                        value={brandForm.between_right}
+                        onChange={(event) =>
+                          setBrandForm((prev) => ({
+                            ...prev,
+                            between_right: event.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <p className="text-[11px] text-slate">
+                      Preview: {buildBetweenRegex(brandForm.between_left, brandForm.between_right)}
+                    </p>
+                  </div>
+                )}
                 <div className="grid gap-3 md:grid-cols-[2fr_1fr]">
                   <div>
                     <p className="text-xs text-slate">Extract regex</p>
@@ -1110,33 +1483,6 @@ export default function RulesStudioPage() {
                     />
                   </div>
                 </div>
-                <div>
-                  <p className="text-xs text-slate">Brand position</p>
-                  <select
-                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
-                    value={brandPosition}
-                    onChange={(event) => {
-                      const next = event.target.value as "end" | "start";
-                      setBrandPosition(next);
-                      if (next === "start") {
-                        setBrandForm((prev) => ({
-                          ...prev,
-                          extract_regex: "^\\s*(.+?)\\s*[-:]",
-                          extract_group: 1,
-                        }));
-                      } else {
-                        setBrandForm((prev) => ({
-                          ...prev,
-                          extract_regex: "\\\\?\\\\s*(.+)$",
-                          extract_group: 1,
-                        }));
-                      }
-                    }}
-                  >
-                    <option value="end">End of question</option>
-                    <option value="start">Start of question</option>
-                  </select>
-                </div>
                 <label className="flex items-center gap-2 text-xs text-slate">
                   <input
                     checked={brandForm.normalize}
@@ -1155,6 +1501,90 @@ export default function RulesStudioPage() {
                   {editingRule?.type === "brand" ? "Update Brand Extractor" : "Add/Update Brand Extractor"}
                 </button>
                 {editingRule?.type === "brand" && (
+                  <button
+                    className="rounded-full border border-ink/10 px-5 py-2 text-sm font-medium"
+                    onClick={handleCancelEdit}
+                    type="button"
+                  >
+                    Cancel edit
+                  </button>
+                )}
+              </div>
+
+              <div className="main-surface rounded-3xl p-6 space-y-4">
+                <h3 className="text-xl font-semibold">Touchpoint Rules</h3>
+                <div>
+                  <p className="text-xs text-slate">Rule name (id)</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={touchpointForm.id}
+                    onChange={(event) =>
+                      setTouchpointForm((prev) => ({ ...prev, id: event.target.value }))
+                    }
+                    placeholder="tp_facebook"
+                  />
+                </div>
+                <div>
+                  <p className="text-xs text-slate">Touchpoint label</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={touchpointForm.touchpoint}
+                    onChange={(event) =>
+                      setTouchpointForm((prev) => ({ ...prev, touchpoint: event.target.value }))
+                    }
+                    placeholder="Facebook"
+                  />
+                </div>
+                <div>
+                  <p className="text-xs text-slate">Question text regex</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={touchpointForm.question_regex}
+                    onChange={(event) =>
+                      setTouchpointForm((prev) => ({
+                        ...prev,
+                        question_regex: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <p className="text-xs text-slate">Var code regex (optional)</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={touchpointForm.var_code_regex}
+                    onChange={(event) =>
+                      setTouchpointForm((prev) => ({
+                        ...prev,
+                        var_code_regex: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <p className="text-xs text-slate">Priority</p>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    type="number"
+                    value={touchpointForm.priority}
+                    onChange={(event) =>
+                      setTouchpointForm((prev) => ({
+                        ...prev,
+                        priority: Number(event.target.value),
+                      }))
+                    }
+                  />
+                </div>
+                <button
+                  className="rounded-full bg-emerald-600 px-5 py-2 text-sm font-medium text-white"
+                  onClick={handleAddTouchpointRule}
+                  type="button"
+                >
+                  {editingRule?.type === "touchpoint"
+                    ? "Update Touchpoint Rule"
+                    : "Add/Update Touchpoint Rule"}
+                </button>
+                {editingRule?.type === "touchpoint" && (
                   <button
                     className="rounded-full border border-ink/10 px-5 py-2 text-sm font-medium"
                     onClick={handleCancelEdit}
@@ -1225,7 +1655,7 @@ export default function RulesStudioPage() {
                           <div>
                             <p className="text-ink">{String(rule.id)}</p>
                             <p className="text-slate">
-                              {String(rule.stage)} - {String(rule.question_text_regex || "-")}
+                              {stageLabel(String(rule.stage))} - {String(rule.question_text_regex || "-")}
                             </p>
                           </div>
                           <div className="flex items-center gap-3">
@@ -1259,7 +1689,12 @@ export default function RulesStudioPage() {
                           <div>
                             <p className="text-ink">{String(rule.id)}</p>
                             <p className="text-slate">
-                              {String(rule.applies_if_question_text_regex || "-")}
+                              {String(
+                                rule.applies_if_question_regex || rule.applies_if_question_text_regex || "-"
+                              )}
+                            </p>
+                            <p className="text-[10px] text-slate">
+                              Mode: {String(rule.mode || "regex")}
                             </p>
                           </div>
                           <div className="flex items-center gap-3">
@@ -1273,6 +1708,41 @@ export default function RulesStudioPage() {
                             <button
                               className="text-xs font-medium text-red-600"
                               onClick={() => handleDeleteRule("brand", String(rule.id))}
+                              type="button"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-slate">Touchpoint Rules</p>
+                    <div className="mt-2 space-y-2">
+                      {(rulesPayload?.touchpoint_rules || []).map((rule) => (
+                        <div
+                          key={String(rule.id)}
+                          className="flex items-center justify-between rounded-xl border border-ink/10 bg-white px-3 py-2"
+                        >
+                          <div>
+                            <p className="text-ink">{String(rule.id)}</p>
+                            <p className="text-slate">
+                              {String(rule.touchpoint || "-")} ·{" "}
+                              {String(rule.question_regex || rule.question_text_regex || "-")}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <button
+                              className="text-xs font-medium text-emerald-700"
+                              onClick={() => handleEditRule("touchpoint", rule)}
+                              type="button"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              className="text-xs font-medium text-red-600"
+                              onClick={() => handleDeleteRule("touchpoint", String(rule.id))}
                               type="button"
                             >
                               Delete
