@@ -37,6 +37,62 @@ export function fetchJourneyTableDetailed(studyId: string) {
   return requestDetailed(`/analytics/journey/table?study_id=${encodeURIComponent(studyId)}`);
 }
 
+export function fetchJourneyTableMultiDetailed(
+  studies: string | null,
+  limitMode: "top10" | "top25" | "all"
+) {
+  const params = new URLSearchParams({ limit_mode: limitMode });
+  if (studies) {
+    params.set("studies", studies);
+  }
+  return requestDetailed(`/analytics/journey/table_multi?${params.toString()}`);
+}
+
+export function fetchTouchpointsTableMultiDetailed(
+  studies: string | null,
+  limitMode: "top10" | "top25" | "all"
+) {
+  const params = new URLSearchParams({ limit_mode: limitMode });
+  if (studies) {
+    params.set("studies", studies);
+  }
+  return requestDetailed(`/analytics/touchpoints/table_multi?${params.toString()}`);
+}
+
+export function postJourneyTableMultiDetailed(
+  payload: unknown,
+  limitMode: "top10" | "top25" | "all",
+  sortBy = "brand_awareness",
+  sortDir: "asc" | "desc" = "desc"
+) {
+  const params = new URLSearchParams({
+    limit_mode: limitMode,
+    sort_by: sortBy,
+    sort_dir: sortDir,
+  });
+  return requestDetailed(`/analytics/journey/table_multi?${params.toString()}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function postTouchpointsTableMultiDetailed(
+  payload: unknown,
+  limitMode: "top10" | "top25" | "all",
+  sortBy = "recall",
+  sortDir: "asc" | "desc" = "desc"
+) {
+  const params = new URLSearchParams({
+    limit_mode: limitMode,
+    sort_by: sortBy,
+    sort_dir: sortDir,
+  });
+  return requestDetailed(`/analytics/touchpoints/table_multi?${params.toString()}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 async function requestDetailed(path: string, options?: RequestInit): Promise<ApiResult> {
   const url = `${API_BASE_URL}${path}`;
   try {
@@ -259,4 +315,30 @@ export function getDemographicsDatePreview(
   if (varCode) params.set("var_code", varCode);
   if (constant) params.set("constant", constant);
   return requestDetailed(`/demographics/date/preview?${params.toString()}`);
+}
+
+export function getFilterStudyOptionsDetailed() {
+  return requestDetailed("/filters/options/studies");
+}
+
+export function getFilterTaxonomyOptionsDetailed() {
+  return requestDetailed("/filters/options/taxonomy");
+}
+
+export function getFilterDemographicsOptionsDetailed(studyIds: string[] | null) {
+  const params = new URLSearchParams();
+  if (studyIds && studyIds.length > 0) {
+    params.set("study_ids", studyIds.join(","));
+  }
+  const suffix = params.toString();
+  return requestDetailed(`/filters/options/demographics${suffix ? `?${suffix}` : ""}`);
+}
+
+export function getFilterDateOptionsDetailed(studyIds: string[] | null) {
+  const params = new URLSearchParams();
+  if (studyIds && studyIds.length > 0) {
+    params.set("study_ids", studyIds.join(","));
+  }
+  const suffix = params.toString();
+  return requestDetailed(`/filters/options/date${suffix ? `?${suffix}` : ""}`);
 }

@@ -71,6 +71,7 @@ def build_journey_mart(study_id: str = Query(..., description="Study id")) -> Ma
             r.respondent_id,
             m.stage,
             m.brand,
+            m.touchpoint,
             {weight_expr} AS weight,
             TRY_CAST(r.value AS INTEGER) AS value_raw,
             CASE

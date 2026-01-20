@@ -6,6 +6,7 @@ from app.core.logging import configure_logging
 from app.routers import (
     analytics,
     demographics,
+    filters,
     health,
     ingest,
     mapping,
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
     app.include_router(questions.router, tags=["questions"])
     app.include_router(pipeline.router, tags=["pipeline"])
     app.include_router(demographics.router, tags=["demographics"])
+    app.include_router(filters.router, tags=["filters"])
     app.include_router(taxonomy.router, tags=["taxonomy"])
     app.include_router(study_config.router, tags=["study-config"])
 

@@ -118,6 +118,7 @@ def ensure_journey_pipeline(
                 r.respondent_id,
                 m.stage,
                 m.brand,
+                m.touchpoint,
                 {weight_expr} AS weight,
                 TRY_CAST(r.value AS INTEGER) AS value_raw,
                 CASE

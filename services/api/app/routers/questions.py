@@ -126,15 +126,15 @@ def list_questions(
             type_row = conn.execute(
                 """
                 SELECT
-                    SUM(CASE WHEN value IS NULL THEN 0 WHEN TRY_CAST(value AS DOUBLE) IS NULL THEN 1 ELSE 0 END) AS non_numeric,
-                    SUM(CASE WHEN value IS NULL THEN 0 ELSE 1 END) AS non_null
+                    COALESCE(SUM(CASE WHEN value IS NULL THEN 0 WHEN TRY_CAST(value AS DOUBLE) IS NULL THEN 1 ELSE 0 END), 0) AS non_numeric,
+                    COALESCE(SUM(CASE WHEN value IS NULL THEN 0 ELSE 1 END), 0) AS non_null
                 FROM responses
                 WHERE var_code = ?
                 """,
                 [var_code],
             ).fetchone()
-            non_numeric = int(type_row[0]) if type_row and type_row[0] is not None else 0
-            non_null = int(type_row[1]) if type_row and type_row[1] is not None else 0
+            non_numeric = int(type_row[0]) if type_row else 0
+            non_null = int(type_row[1]) if type_row else 0
             value_preview = {
                 "type": infer_type(non_null, non_numeric),
                 "top_values": [

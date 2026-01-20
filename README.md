@@ -32,11 +32,18 @@ npm run dev
 ```
 Web runs at `http://localhost:3000`
 
+## Generate Demo Data
+```powershell
+# from repo root
+.\scripts\seed_demo.ps1
+```
+
 ## Troubleshooting
 - If the web cannot reach the API, verify `NEXT_PUBLIC_API_BASE_URL` in `apps/web/.env.local`.
+- Ensure the API is running before using the seed button.
 - If PowerShell blocks scripts, run `Set-ExecutionPolicy -Scope Process Bypass`.
 - If `pip install` tries to build pandas from source on Windows, install Python 3.11+ and recreate the venv with `py -3.11 -m venv .venv`.
 
 ## Local Development Notes
 - DuckDB reads/writes Parquet in `./data/warehouse`.
-- Ingest `.sav` files from `./data/landing` to populate studies.
+- The `.sav` ingestion pipeline is stubbed and ready for future wiring.
