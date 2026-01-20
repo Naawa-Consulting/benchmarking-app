@@ -5,27 +5,42 @@ import { useEffect, useMemo, useState } from "react";
 import {
   ApiResult,
   coverageRulesDetailed,
+  getDemographicsConfigDetailed,
+  getDemographicsDatePreview,
+  getDemographicsPreviewDetailed,
+  getDemographicsValueLabelsDetailed,
   getApiBaseUrl,
   getQuestionsDetailed,
   getJourneyStatusDetailed,
   getRulesDetailed,
+  getStudyBasePreviewDetailed,
+  getStudyConfigDetailed,
   getStudyRuleScopeDetailed,
+  getStudyVariablesDetailed,
   getStudiesDetailed,
   getStudyClassificationDetailed,
   getTaxonomyDetailed,
   pingHealthDetailed,
+  rebuildBaseDetailed,
   runRulesDetailed,
   ensureJourneyDetailed,
+  saveDemographicsConfigDetailed,
+  saveStudyConfigDetailed,
   saveStudyRuleScopeDetailed,
   saveStudyClassificationDetailed,
   saveRulesDetailed,
 } from "../../lib/api";
 import {
+  DemographicsConfig,
+  DemographicsValueLabel,
   QuestionItem,
   RuleCoverage,
   Study,
+  StudyBasePreview,
   StudyClassification,
+  StudyConfig,
   StudyRuleScope,
+  StudyVariable,
   TaxonomyItem,
 } from "../../lib/types";
 
@@ -205,6 +220,38 @@ export default function RulesStudioPage() {
   const [category, setCategory] = useState<string>("");
   const [classificationError, setClassificationError] = useState<string | null>(null);
 
+  const [studyConfigState, setStudyConfigState] = useState<ActionState>("idle");
+  const [studyConfig, setStudyConfig] = useState<StudyConfig | null>(null);
+  const [studyVariablesState, setStudyVariablesState] = useState<ActionState>("idle");
+  const [studyVariables, setStudyVariables] = useState<StudyVariable[]>([]);
+  const [basePreviewState, setBasePreviewState] = useState<ActionState>("idle");
+  const [basePreviewRows, setBasePreviewRows] = useState<StudyBasePreview[]>([]);
+  const [baseError, setBaseError] = useState<string | null>(null);
+  const [selectedRespondentVar, setSelectedRespondentVar] = useState<string>("__index__");
+  const [selectedWeightVar, setSelectedWeightVar] = useState<string>("__default__");
+
+  const [demographicsState, setDemographicsState] = useState<ActionState>("idle");
+  const [demographicsConfig, setDemographicsConfig] = useState<DemographicsConfig | null>(null);
+  const [demographicsError, setDemographicsError] = useState<string | null>(null);
+  const [demographicsLabels, setDemographicsLabels] = useState<
+    Record<string, DemographicsValueLabel[]>
+  >({});
+  const [demographicsPreview, setDemographicsPreview] = useState<
+    Record<
+      string,
+      {
+        rows: string[];
+        min?: number | null;
+        max?: number | null;
+        parsed?: Array<string | null>;
+        rate?: number;
+      }
+    >
+  >({});
+  const [dateMode, setDateMode] = useState<"none" | "var" | "constant">("none");
+  const [dateVar, setDateVar] = useState<string>("");
+  const [dateConstant, setDateConstant] = useState<string>("");
+
   const [runState, setRunState] = useState<ActionState>("idle");
   const [runResult, setRunResult] = useState<ApiResult | null>(null);
 
@@ -317,8 +364,7 @@ export default function RulesStudioPage() {
         const payload = result.data as { studies?: Study[] } | Study[];
         const items = Array.isArray(payload) ? payload : payload.studies || [];
         setStudies(items);
-        const nonDemo = items.find((item) => item.source !== "demo");
-        setSelectedStudyId(nonDemo?.id || items[0]?.id || "");
+        setSelectedStudyId(items[0]?.id || "");
       }
     };
 
@@ -416,6 +462,88 @@ export default function RulesStudioPage() {
     };
 
     loadClassification();
+  }, [selectedStudyId]);
+
+  useEffect(() => {
+    if (!selectedStudyId) return;
+    const loadBaseConfig = async () => {
+      setStudyConfigState("loading");
+      const result = await getStudyConfigDetailed(selectedStudyId);
+      setLastResponse(result);
+      if (result.ok && result.data) {
+        const data = result.data as StudyConfig;
+        setStudyConfig(data);
+        setSelectedRespondentVar(
+          data.respondent_id?.var_code ? String(data.respondent_id.var_code) : "__index__"
+        );
+        setSelectedWeightVar(
+          data.weight?.var_code ? String(data.weight.var_code) : "__default__"
+        );
+        setStudyConfigState("success");
+        setBaseError(null);
+      } else {
+        setStudyConfigState("error");
+        setBaseError(result.error || "Unable to load study config.");
+      }
+    };
+
+    const loadVariables = async () => {
+      setStudyVariablesState("loading");
+      const result = await getStudyVariablesDetailed(selectedStudyId);
+      setLastResponse(result);
+      if (result.ok && result.data && typeof result.data === "object") {
+        const data = result.data as { variables?: StudyVariable[] };
+        setStudyVariables(Array.isArray(data.variables) ? data.variables : []);
+        setStudyVariablesState("success");
+      } else {
+        setStudyVariables([]);
+        setStudyVariablesState("error");
+      }
+    };
+
+    const loadBasePreview = async () => {
+      setBasePreviewState("loading");
+      const result = await getStudyBasePreviewDetailed(selectedStudyId, 5);
+      setLastResponse(result);
+      if (result.ok && result.data && typeof result.data === "object") {
+        const data = result.data as { rows?: StudyBasePreview[] };
+        setBasePreviewRows(Array.isArray(data.rows) ? data.rows : []);
+        setBasePreviewState("success");
+      } else {
+        setBasePreviewRows([]);
+        setBasePreviewState("error");
+      }
+    };
+
+    loadBaseConfig();
+    loadVariables();
+    loadBasePreview();
+  }, [selectedStudyId]);
+
+  useEffect(() => {
+    if (!selectedStudyId) return;
+    setDemographicsLabels({});
+    setDemographicsPreview({});
+    const loadDemographicsConfig = async () => {
+      setDemographicsState("loading");
+      const result = await getDemographicsConfigDetailed(selectedStudyId);
+      setLastResponse(result);
+      if (result.ok && result.data) {
+        const config = result.data as DemographicsConfig;
+        setDemographicsConfig(config);
+        setDateMode(config.date?.mode || "none");
+        setDateVar(config.date?.var_code || "");
+        setDateConstant(config.date?.constant || "");
+        setDemographicsState("success");
+        setDemographicsError(null);
+      } else {
+        setDemographicsConfig(null);
+        setDemographicsState("error");
+        setDemographicsError(result.error || "Failed to load demographics config.");
+      }
+    };
+
+    loadDemographicsConfig();
   }, [selectedStudyId]);
 
   useEffect(() => {
@@ -762,6 +890,162 @@ export default function RulesStudioPage() {
     await handleSaveClassification();
   };
 
+  const handleSaveStudyConfig = async () => {
+    if (!selectedStudyId) return;
+    setStudyConfigState("loading");
+    const payload = {
+      respondent_id_var: selectedRespondentVar,
+      weight_var: selectedWeightVar,
+      source: "manual",
+    };
+    const result = await saveStudyConfigDetailed(selectedStudyId, payload);
+    setLastResponse(result);
+    if (result.ok && result.data) {
+      setStudyConfig(result.data as StudyConfig);
+      setStudyConfigState("success");
+      setBaseError(null);
+    } else {
+      setStudyConfigState("error");
+      setBaseError(result.error || "Failed to save study config.");
+    }
+  };
+
+  const handleRebuildBase = async () => {
+    if (!selectedStudyId) return;
+    setBasePreviewState("loading");
+    const result = await rebuildBaseDetailed(selectedStudyId, true);
+    setLastResponse(result);
+    if (result.ok) {
+      setBasePreviewState("success");
+      refreshPublishStatus();
+      const preview = await getStudyBasePreviewDetailed(selectedStudyId, 5);
+      if (preview.ok && preview.data && typeof preview.data === "object") {
+        const data = preview.data as { rows?: StudyBasePreview[] };
+        setBasePreviewRows(Array.isArray(data.rows) ? data.rows : []);
+      }
+    } else {
+      setBasePreviewState("error");
+    }
+  };
+
+  const handleSaveDemographics = async () => {
+    if (!selectedStudyId || !demographicsConfig) return;
+    setDemographicsState("loading");
+    if (dateMode === "constant" && dateConstant && !/^\d{4}-\d{2}-\d{2}$/.test(dateConstant)) {
+      setDemographicsState("error");
+      setDemographicsError("Date constant must be YYYY-MM-DD.");
+      return;
+    }
+    const result = await saveDemographicsConfigDetailed(selectedStudyId, {
+      date: {
+        mode: dateMode,
+        var_code: dateMode === "var" ? dateVar || null : null,
+        constant: dateMode === "constant" ? dateConstant || null : null,
+      },
+      gender_var: demographicsConfig.gender_var,
+      age_var: demographicsConfig.age_var,
+      nse_var: demographicsConfig.nse_var,
+      state_var: demographicsConfig.state_var,
+    });
+    setLastResponse(result);
+    if (result.ok && result.data) {
+      setDemographicsConfig(result.data as DemographicsConfig);
+      setDemographicsState("success");
+      setDemographicsError(null);
+    } else {
+      setDemographicsState("error");
+      setDemographicsError(result.error || "Failed to save demographics.");
+    }
+  };
+
+  const handleClearDemographics = async () => {
+    if (!selectedStudyId) return;
+    const cleared: DemographicsConfig = {
+      study_id: selectedStudyId,
+      date: { mode: "none", var_code: null, constant: null },
+      gender_var: null,
+      age_var: null,
+      nse_var: null,
+      state_var: null,
+    };
+    setDemographicsConfig(cleared);
+    setDateMode("none");
+    setDateVar("");
+    setDateConstant("");
+    setDemographicsState("loading");
+    const result = await saveDemographicsConfigDetailed(selectedStudyId, {
+      date: { mode: "none", var_code: null, constant: null },
+      gender_var: null,
+      age_var: null,
+      nse_var: null,
+      state_var: null,
+    });
+    setLastResponse(result);
+    if (result.ok) {
+      setDemographicsState("success");
+      setDemographicsError(null);
+    } else {
+      setDemographicsState("error");
+      setDemographicsError(result.error || "Failed to clear demographics.");
+    }
+  };
+
+  const handleSelectDemographicsVar = async (key: keyof DemographicsConfig, value: string) => {
+    if (!demographicsConfig) return;
+    const next = { ...demographicsConfig, [key]: value || null };
+    setDemographicsConfig(next);
+
+    if (key === "age_var" && value) {
+      const preview = await getDemographicsPreviewDetailed(selectedStudyId, value, 10);
+      if (preview.ok && preview.data && typeof preview.data === "object") {
+        const data = preview.data as { rows?: string[]; min?: number | null; max?: number | null };
+        setDemographicsPreview((prev) => ({
+          ...prev,
+          age_var: { rows: data.rows || [], min: data.min, max: data.max },
+        }));
+      }
+    }
+
+    if ((key === "gender_var" || key === "nse_var" || key === "state_var") && value) {
+      const labels = await getDemographicsValueLabelsDetailed(selectedStudyId, value);
+      if (labels.ok && labels.data && typeof labels.data === "object") {
+        const data = labels.data as { items?: DemographicsValueLabel[] };
+        setDemographicsLabels((prev) => ({
+          ...prev,
+          [key]: Array.isArray(data.items) ? data.items : [],
+        }));
+      }
+    }
+  };
+
+  const handleDateModeChange = async (mode: "none" | "var" | "constant") => {
+    setDateMode(mode);
+    if (mode !== "var") {
+      setDateVar("");
+    }
+    if (mode !== "constant") {
+      setDateConstant("");
+    }
+    if (mode === "var" && dateVar) {
+      const preview = await getDemographicsDatePreview(selectedStudyId, mode, dateVar, null, 10);
+      if (preview.ok && preview.data && typeof preview.data === "object") {
+        const data = preview.data as {
+          raw_samples?: string[];
+          parsed_samples?: string[];
+          parse_success_rate?: number;
+        };
+        setDemographicsPreview((prev) => ({
+          ...prev,
+          date: {
+            rows: data.raw_samples || [],
+            parsed: data.parsed_samples || [],
+            rate: data.parse_success_rate ?? 0,
+          },
+        }));
+      }
+    }
+  };
+
   const handlePublish = async (force: boolean) => {
     if (!selectedStudyId) return;
     setPublishState("loading");
@@ -891,6 +1175,294 @@ export default function RulesStudioPage() {
                 type="button"
               >
                 Unmapped only
+              </button>
+            </div>
+          </div>
+
+          <div className="main-surface rounded-3xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Study Base Fields</h3>
+              <span className="text-xs text-slate">{studyConfigState}</span>
+            </div>
+            <p className="text-xs text-slate">
+              Choose respondent id and weight for this study.
+            </p>
+            {baseError && <p className="text-xs text-red-600">{baseError}</p>}
+            <div>
+              <p className="text-xs text-slate">Respondent ID</p>
+              <select
+                className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                value={selectedRespondentVar}
+                onChange={(event) => setSelectedRespondentVar(event.target.value)}
+              >
+                <option value="__index__">__index__ (Row index fallback)</option>
+                {studyVariables.map((item) => (
+                  <option key={`rid-${item.var_code}`} value={item.var_code}>
+                    {item.var_code}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-[10px] text-slate">
+                Source: {studyConfig?.respondent_id?.source || "auto"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate">Weight</p>
+              <select
+                className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                value={selectedWeightVar}
+                onChange={(event) => setSelectedWeightVar(event.target.value)}
+              >
+                <option value="__default__">__default__ (1.0)</option>
+                {studyVariables.map((item) => (
+                  <option key={`w-${item.var_code}`} value={item.var_code}>
+                    {item.var_code}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-[10px] text-slate">
+                Source: {studyConfig?.weight?.source || "auto"}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="rounded-full bg-emerald-600 px-4 py-2 text-xs font-medium text-white"
+                onClick={handleSaveStudyConfig}
+                type="button"
+                disabled={studyVariablesState === "loading"}
+              >
+                Save
+              </button>
+              <button
+                className="rounded-full border border-ink/10 px-4 py-2 text-xs font-medium"
+                onClick={handleRebuildBase}
+                type="button"
+              >
+                Rebuild base (apply changes)
+              </button>
+            </div>
+            <div className="rounded-2xl border border-ink/10 bg-white p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-medium text-slate">Preview</p>
+                <span className="text-[10px] text-slate">{basePreviewState}</span>
+              </div>
+              {basePreviewRows.length === 0 ? (
+                <p className="mt-2 text-xs text-slate">No preview rows available.</p>
+              ) : (
+                <div className="mt-2 space-y-1 text-xs text-slate">
+                  {basePreviewRows.map((row, idx) => (
+                    <div key={`base-${idx}`} className="flex items-center justify-between">
+                      <span>{row.respondent_id ?? "--"}</span>
+                      <span>{row.weight ?? "--"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="main-surface rounded-3xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Demographics Mapping</h3>
+              <span className="text-xs text-slate">{demographicsState}</span>
+            </div>
+            <p className="text-xs text-slate">
+              Map date, gender, age, NSE, and state using SAV value labels.
+            </p>
+            {demographicsError && <p className="text-xs text-red-600">{demographicsError}</p>}
+            <div className="space-y-3 text-xs">
+              <div>
+                <p className="text-xs text-slate">Date</p>
+                <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
+                  <span className="rounded-full border px-2 py-1 text-slate">
+                    Date: {dateMode}
+                  </span>
+                </div>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={dateMode}
+                  onChange={(event) =>
+                    handleDateModeChange(event.target.value as "none" | "var" | "constant")
+                  }
+                >
+                  <option value="none">None</option>
+                  <option value="var">From variable</option>
+                  <option value="constant">Constant date</option>
+                </select>
+                {dateMode === "var" && (
+                  <>
+                    <select
+                      className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                      value={dateVar}
+                      onChange={async (event) => {
+                        const value = event.target.value;
+                        setDateVar(value);
+                        const preview = await getDemographicsDatePreview(
+                          selectedStudyId,
+                          "var",
+                          value,
+                          null,
+                          10
+                        );
+                        if (preview.ok && preview.data && typeof preview.data === "object") {
+                          const data = preview.data as {
+                            raw_samples?: string[];
+                            parsed_samples?: Array<string | null>;
+                            parse_success_rate?: number;
+                          };
+                          setDemographicsPreview((prev) => ({
+                            ...prev,
+                            date: {
+                              rows: data.raw_samples || [],
+                              parsed: data.parsed_samples || [],
+                              rate: data.parse_success_rate ?? 0,
+                            },
+                          }));
+                        }
+                      }}
+                    >
+                      <option value="">Unassigned</option>
+                      {studyVariables.map((item) => (
+                        <option key={`date-${item.var_code}`} value={item.var_code}>
+                          {item.var_code}
+                        </option>
+                      ))}
+                    </select>
+                    {demographicsPreview.date && demographicsPreview.date.rows.length > 0 && (
+                      <div className="mt-2 rounded-xl border border-ink/10 bg-white p-2 text-[10px] text-slate">
+                        <div>Raw: {demographicsPreview.date.rows.join(", ")}</div>
+                        <div>
+                          Parsed:{" "}
+                          {(demographicsPreview.date.parsed || [])
+                            .map((value) => value ?? "--")
+                            .join(", ")}
+                        </div>
+                        <div>
+                          Success rate: {Math.round((demographicsPreview.date.rate || 0) * 100)}%
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+                {dateMode === "constant" && (
+                  <input
+                    className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    value={dateConstant}
+                    onChange={(event) => setDateConstant(event.target.value)}
+                    placeholder="YYYY-MM-DD"
+                  />
+                )}
+              </div>
+              <div>
+                <p className="text-xs text-slate">Gender</p>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={demographicsConfig?.gender_var || ""}
+                  onChange={(event) => handleSelectDemographicsVar("gender_var", event.target.value)}
+                >
+                  <option value="">Unassigned</option>
+                  {studyVariables.map((item) => (
+                    <option key={`gender-${item.var_code}`} value={item.var_code}>
+                      {item.var_code}
+                    </option>
+                  ))}
+                </select>
+                {demographicsLabels.gender_var && demographicsLabels.gender_var.length > 0 && (
+                  <div className="mt-2 max-h-24 overflow-auto rounded-xl border border-ink/10 bg-white p-2 text-[10px] text-slate">
+                    {demographicsLabels.gender_var.slice(0, 12).map((label) => (
+                      <div key={`gender-${label.value_code}`}>
+                        {label.value_code}: {label.value_label}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <p className="text-xs text-slate">Age (numeric)</p>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={demographicsConfig?.age_var || ""}
+                  onChange={(event) => handleSelectDemographicsVar("age_var", event.target.value)}
+                >
+                  <option value="">Unassigned</option>
+                  {studyVariables.map((item) => (
+                    <option key={`age-${item.var_code}`} value={item.var_code}>
+                      {item.var_code}
+                    </option>
+                  ))}
+                </select>
+                {demographicsPreview.age_var && demographicsPreview.age_var.rows.length > 0 && (
+                  <div className="mt-2 rounded-xl border border-ink/10 bg-white p-2 text-[10px] text-slate">
+                    <div>Sample: {demographicsPreview.age_var.rows.join(", ")}</div>
+                    <div>
+                      Range: {demographicsPreview.age_var.min ?? "--"} - {demographicsPreview.age_var.max ?? "--"}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div>
+                <p className="text-xs text-slate">NSE</p>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={demographicsConfig?.nse_var || ""}
+                  onChange={(event) => handleSelectDemographicsVar("nse_var", event.target.value)}
+                >
+                  <option value="">Unassigned</option>
+                  {studyVariables.map((item) => (
+                    <option key={`nse-${item.var_code}`} value={item.var_code}>
+                      {item.var_code}
+                    </option>
+                  ))}
+                </select>
+                {demographicsLabels.nse_var && demographicsLabels.nse_var.length > 0 && (
+                  <div className="mt-2 max-h-24 overflow-auto rounded-xl border border-ink/10 bg-white p-2 text-[10px] text-slate">
+                    {demographicsLabels.nse_var.slice(0, 12).map((label) => (
+                      <div key={`nse-${label.value_code}`}>
+                        {label.value_code}: {label.value_label}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <p className="text-xs text-slate">State</p>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={demographicsConfig?.state_var || ""}
+                  onChange={(event) => handleSelectDemographicsVar("state_var", event.target.value)}
+                >
+                  <option value="">Unassigned</option>
+                  {studyVariables.map((item) => (
+                    <option key={`state-${item.var_code}`} value={item.var_code}>
+                      {item.var_code}
+                    </option>
+                  ))}
+                </select>
+                {demographicsLabels.state_var && demographicsLabels.state_var.length > 0 && (
+                  <div className="mt-2 max-h-24 overflow-auto rounded-xl border border-ink/10 bg-white p-2 text-[10px] text-slate">
+                    {demographicsLabels.state_var.slice(0, 12).map((label) => (
+                      <div key={`state-${label.value_code}`}>
+                        {label.value_code}: {label.value_label}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="rounded-full bg-emerald-600 px-4 py-2 text-xs font-medium text-white"
+                onClick={handleSaveDemographics}
+                type="button"
+              >
+                Save demographics
+              </button>
+              <button
+                className="rounded-full border border-ink/10 px-4 py-2 text-xs font-medium"
+                onClick={handleClearDemographics}
+                type="button"
+              >
+                Clear
               </button>
             </div>
           </div>

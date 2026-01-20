@@ -37,10 +37,6 @@ export function fetchJourneyTableDetailed(studyId: string) {
   return requestDetailed(`/analytics/journey/table?study_id=${encodeURIComponent(studyId)}`);
 }
 
-export function seedDemo() {
-  return request("/demo/seed", { method: "POST" });
-}
-
 async function requestDetailed(path: string, options?: RequestInit): Promise<ApiResult> {
   const url = `${API_BASE_URL}${path}`;
   try {
@@ -192,4 +188,75 @@ export function saveStudyClassificationDetailed(studyId: string, payload: unknow
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function getStudyConfigDetailed(studyId: string) {
+  const params = new URLSearchParams({ study_id: studyId });
+  return requestDetailed(`/study-config?${params.toString()}`);
+}
+
+export function saveStudyConfigDetailed(studyId: string, payload: unknown) {
+  const params = new URLSearchParams({ study_id: studyId });
+  return requestDetailed(`/study-config?${params.toString()}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getStudyVariablesDetailed(studyId: string) {
+  const params = new URLSearchParams({ study_id: studyId });
+  return requestDetailed(`/study/variables?${params.toString()}`);
+}
+
+export function getStudyBasePreviewDetailed(studyId: string, limit = 5) {
+  const params = new URLSearchParams({ study_id: studyId, n: String(limit) });
+  return requestDetailed(`/study/base/preview?${params.toString()}`);
+}
+
+export function rebuildBaseDetailed(studyId: string, force = false) {
+  const params = new URLSearchParams({ study_id: studyId, force: force ? "1" : "0" });
+  return requestDetailed(`/pipeline/base/rebuild?${params.toString()}`, {
+    method: "POST",
+  });
+}
+
+export function getDemographicsSchemaDetailed(studyId: string) {
+  const params = new URLSearchParams({ study_id: studyId });
+  return requestDetailed(`/demographics/schema?${params.toString()}`);
+}
+
+export function getDemographicsConfigDetailed(studyId: string) {
+  const params = new URLSearchParams({ study_id: studyId });
+  return requestDetailed(`/demographics/config?${params.toString()}`);
+}
+
+export function saveDemographicsConfigDetailed(studyId: string, payload: unknown) {
+  const params = new URLSearchParams({ study_id: studyId });
+  return requestDetailed(`/demographics/config?${params.toString()}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getDemographicsValueLabelsDetailed(studyId: string, varCode: string) {
+  const params = new URLSearchParams({ study_id: studyId, var_code: varCode });
+  return requestDetailed(`/demographics/value-labels?${params.toString()}`);
+}
+
+export function getDemographicsPreviewDetailed(studyId: string, varCode: string, limit = 5) {
+  const params = new URLSearchParams({ study_id: studyId, var_code: varCode, n: String(limit) });
+  return requestDetailed(`/demographics/preview?${params.toString()}`);
+}
+
+export function getDemographicsDatePreview(
+  studyId: string,
+  mode: "none" | "var" | "constant",
+  varCode?: string | null,
+  constant?: string | null,
+  limit = 10
+) {
+  const params = new URLSearchParams({ study_id: studyId, mode, n: String(limit) });
+  if (varCode) params.set("var_code", varCode);
+  if (constant) params.set("constant", constant);
+  return requestDetailed(`/demographics/date/preview?${params.toString()}`);
 }

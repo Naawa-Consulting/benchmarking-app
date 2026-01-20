@@ -15,11 +15,6 @@ class Study(BaseModel):
     category: str | None = None
 
 
-class SeedResponse(BaseModel):
-    path: str
-    stats: dict
-
-
 class JourneyPoint(BaseModel):
     stage: str
     brand: str

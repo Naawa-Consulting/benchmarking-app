@@ -4,21 +4,25 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
-import JourneyChart from "../../components/JourneyChart";
-import SeedDemoButton from "../../components/SeedDemoButton";
 import { fetchJourneyTableDetailed, getStudiesDetailed } from "../../lib/api";
 import { Study } from "../../lib/types";
 
 type TableRow = {
+  sector: string | null;
+  subsector: string | null;
+  category: string | null;
   brand: string;
-  awareness: number | null;
-  consideration: number | null;
-  purchase: number | null;
+  brand_awareness: number | null;
+  ad_awareness: number | null;
+  brand_consideration: number | null;
+  brand_purchase: number | null;
+  brand_satisfaction: number | null;
+  brand_recommendation: number | null;
 };
 
 export default function JourneyPage() {
   const searchParams = useSearchParams();
-  const [studyId, setStudyId] = useState("demo_001");
+  const [studyId, setStudyId] = useState("");
   const [studies, setStudies] = useState<Study[]>([]);
   const [tableRows, setTableRows] = useState<TableRow[]>([]);
   const [tableState, setTableState] = useState<"idle" | "loading" | "error">("idle");
@@ -46,8 +50,7 @@ export default function JourneyPage() {
       return;
     }
     if (studies.length > 0) {
-      const nonDemo = studies.find((item) => item.source !== "demo");
-      setStudyId(nonDemo?.id || studies[0].id);
+      setStudyId(studies[0].id);
     }
   }, [queryStudyId, studies]);
 
@@ -87,7 +90,6 @@ export default function JourneyPage() {
             <h2 className="text-2xl font-semibold">Journey Benchmark</h2>
             <p className="text-slate">Compare brand performance across funnel stages.</p>
           </div>
-          <SeedDemoButton />
         </div>
         <div className="mt-6">
           <div className="flex flex-col gap-2">
@@ -98,7 +100,7 @@ export default function JourneyPage() {
               onChange={(event) => setStudyId(event.target.value)}
             >
               {studies.length === 0 ? (
-                <option value={studyId}>{studyId}</option>
+                <option value="">No studies available</option>
               ) : (
                 studies.map((study) => (
                   <option key={study.id} value={study.id}>
@@ -107,12 +109,13 @@ export default function JourneyPage() {
                 ))
               )}
             </select>
+            {studies.length === 0 && (
+              <p className="text-xs text-slate">
+                No studies available. Upload or sync .sav files in /landing to begin.
+              </p>
+            )}
           </div>
         </div>
-      </section>
-
-      <section className="main-surface rounded-3xl p-6">
-        <JourneyChart studyId={studyId} />
       </section>
 
       <section className="main-surface rounded-3xl p-6">
@@ -124,6 +127,11 @@ export default function JourneyPage() {
             </span>
           )}
         </div>
+        {studies.length === 0 && (
+          <p className="mt-4 text-sm text-slate">
+            No studies available. Upload or sync .sav files in /landing to begin.
+          </p>
+        )}
         {tableState === "loading" && (
           <p className="mt-4 text-sm text-slate">Loading curated results...</p>
         )}
@@ -141,26 +149,54 @@ export default function JourneyPage() {
             <table className="w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-ink/10 text-left">
+                  <th className="py-2 font-semibold">Sector</th>
+                  <th className="py-2 font-semibold">Subsector</th>
+                  <th className="py-2 font-semibold">Category</th>
                   <th className="py-2 font-semibold">Brand</th>
                   <th className="py-2 text-right font-semibold">Brand Awareness</th>
+                  <th className="py-2 text-right font-semibold">Ad Awareness</th>
                   <th className="py-2 text-right font-semibold">Brand Consideration</th>
                   <th className="py-2 text-right font-semibold">Brand Purchase</th>
+                  <th className="py-2 text-right font-semibold">Brand Satisfaction</th>
+                  <th className="py-2 text-right font-semibold">Brand Recommendation</th>
                 </tr>
               </thead>
               <tbody>
                 {tableRows.map((row) => (
                   <tr key={row.brand} className="border-b border-ink/5">
+                    <td className="py-2">{row.sector || "--"}</td>
+                    <td className="py-2">{row.subsector || "--"}</td>
+                    <td className="py-2">{row.category || "--"}</td>
                     <td className="py-2">{row.brand}</td>
                     <td className="py-2 text-right">
-                      {row.awareness === null || row.awareness === undefined ? "--" : `${row.awareness}%`}
-                    </td>
-                    <td className="py-2 text-right">
-                      {row.consideration === null || row.consideration === undefined
+                      {row.brand_awareness === null || row.brand_awareness === undefined
                         ? "--"
-                        : `${row.consideration}%`}
+                        : `${row.brand_awareness}%`}
                     </td>
                     <td className="py-2 text-right">
-                      {row.purchase === null || row.purchase === undefined ? "--" : `${row.purchase}%`}
+                      {row.ad_awareness === null || row.ad_awareness === undefined
+                        ? "--"
+                        : `${row.ad_awareness}%`}
+                    </td>
+                    <td className="py-2 text-right">
+                      {row.brand_consideration === null || row.brand_consideration === undefined
+                        ? "--"
+                        : `${row.brand_consideration}%`}
+                    </td>
+                    <td className="py-2 text-right">
+                      {row.brand_purchase === null || row.brand_purchase === undefined
+                        ? "--"
+                        : `${row.brand_purchase}%`}
+                    </td>
+                    <td className="py-2 text-right">
+                      {row.brand_satisfaction === null || row.brand_satisfaction === undefined
+                        ? "--"
+                        : `${row.brand_satisfaction}%`}
+                    </td>
+                    <td className="py-2 text-right">
+                      {row.brand_recommendation === null || row.brand_recommendation === undefined
+                        ? "--"
+                        : `${row.brand_recommendation}%`}
                     </td>
                   </tr>
                 ))}

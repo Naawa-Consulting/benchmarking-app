@@ -127,21 +127,6 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
                 )
             )
 
-    demo_path = root / "data" / "warehouse" / "curated" / "fact_journey_demo.parquet"
-    if demo_path.exists() and "demo_001" not in seen:
-        studies.append(
-            Study(
-                id="demo_001",
-                name="Demo Study",
-                source="demo",
-                raw_ready=False,
-                curated_ready=True,
-                sector=None,
-                subsector=None,
-                category=None,
-            )
-        )
-
     if sync:
         return {"sync": sync_summary or {}, "studies": studies}
     return studies

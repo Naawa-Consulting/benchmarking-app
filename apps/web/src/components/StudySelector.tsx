@@ -34,7 +34,7 @@ export default function StudySelector({ value, onChange }: Props) {
         onChange={(event) => onChange(event.target.value)}
       >
         {studies.length === 0 ? (
-          <option value="demo_001">demo_001 (seed first)</option>
+          <option value="">No studies available</option>
         ) : (
           studies.map((study) => (
             <option key={study.id} value={study.id}>

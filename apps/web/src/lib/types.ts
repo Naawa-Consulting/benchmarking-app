@@ -87,3 +87,34 @@ export interface StudyClassification {
   subsector: string | null;
   category: string | null;
 }
+
+export interface StudyConfig {
+  study_id: string;
+  respondent_id?: { source?: string; var_code?: string | null };
+  weight?: { source?: string; var_code?: string | null; default?: number };
+}
+
+export interface StudyVariable {
+  var_code: string;
+  label?: string | null;
+  type?: string | null;
+}
+
+export interface StudyBasePreview {
+  respondent_id: string | number | null;
+  weight: number | null;
+}
+
+export interface DemographicsConfig {
+  study_id: string;
+  date: { mode: "none" | "var" | "constant"; var_code: string | null; constant: string | null };
+  gender_var: string | null;
+  age_var: string | null;
+  nse_var: string | null;
+  state_var: string | null;
+}
+
+export interface DemographicsValueLabel {
+  value_code: string;
+  value_label: string;
+}

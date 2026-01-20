@@ -9,6 +9,7 @@ from app.data.rule_engine import (
     load_rules,
     load_study_rule_scope,
 )
+from app.data.study_config import load_or_create_study_config
 from app.data.warehouse import get_duckdb_connection, get_repo_root, load_parquet_as_view
 
 router = APIRouter()
@@ -49,6 +50,15 @@ def list_questions(
     df = df[["var_code", "question_text"]].copy()
     df["var_code"] = df["var_code"].astype(str)
     df["question_text"] = df["question_text"].where(pd.notna(df["question_text"]), None)
+    config = load_or_create_study_config(study_id, df["var_code"].tolist())
+    respondent_var = (config.get("respondent_id") or {}).get("var_code")
+    weight_var = (config.get("weight") or {}).get("var_code")
+    excluded = {"respondent_id", "weight"}
+    if respondent_var and respondent_var not in ("__index__", ""):
+        excluded.add(str(respondent_var))
+    if weight_var and weight_var not in ("__default__", ""):
+        excluded.add(str(weight_var))
+    df = df[~df["var_code"].isin(excluded)]
     df = df.sort_values("var_code")
 
     items = df.to_dict(orient="records")

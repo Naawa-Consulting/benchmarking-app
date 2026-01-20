@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
-from app.data.ingest_from_landing import ensure_raw_from_landing
+from app.data.ingest_from_landing import ensure_raw_from_landing, rebuild_raw_for_study
 from app.data.rule_engine import (
     apply_rules_to_variables,
     filter_rules_by_scope,
@@ -102,12 +102,24 @@ def ensure_journey_pipeline(
             f"CREATE OR REPLACE VIEW responses AS SELECT * FROM read_parquet('{responses_path}')"
         )
         conn.register("mapping", mapping_df)
+        weight_exists = (
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_name = 'responses' AND column_name = 'weight'
+                """
+            ).fetchone()[0]
+            > 0
+        )
+        weight_expr = "COALESCE(TRY_CAST(r.weight AS DOUBLE), 1.0)" if weight_exists else "1.0"
         query = """
             SELECT
                 r.study_id,
                 r.respondent_id,
                 m.stage,
                 m.brand,
+                {weight_expr} AS weight,
+                TRY_CAST(r.value AS INTEGER) AS value_raw,
                 CASE
                     WHEN list_contains(m.true_codes, CAST(r.value AS VARCHAR)) THEN 1
                     ELSE 0
@@ -117,7 +129,7 @@ def ensure_journey_pipeline(
                 ON r.var_code = m.var_code
                 AND r.study_id = m.study_id
         """
-        df = conn.execute(query).df()
+        df = conn.execute(query.format(weight_expr=weight_expr)).df()
         if df.empty:
             curated_status = "error"
             errors.append("No rows matched mapping criteria.")
@@ -146,6 +158,7 @@ def journey_pipeline_status(study_id: str = Query(..., description="Study id")) 
     base_data_dir = root / "data"
     raw_dir = base_data_dir / "warehouse" / "raw" / f"study_id={study_id}"
     raw_ready = (raw_dir / "raw_responses.parquet").exists() and (raw_dir / "raw_variables.parquet").exists()
+    demographics_ready = (raw_dir / "respondents.parquet").exists()
 
     mapping_rows = _mapping_rows_for_study(study_id)
     mapping_ready = len(mapping_rows) > 0
@@ -160,9 +173,40 @@ def journey_pipeline_status(study_id: str = Query(..., description="Study id")) 
         "raw_ready": raw_ready,
         "mapping_ready": mapping_ready,
         "curated_ready": curated_ready,
+        "demographics_ready": demographics_ready,
         "paths": {
             "raw_dir": str(raw_dir),
             "mapping_csv": str(_mapping_csv_path()),
             "curated_path": str(curated_path),
         },
+    }
+
+
+@router.post("/pipeline/base/rebuild")
+def rebuild_base_pipeline(
+    study_id: str = Query(..., description="Study id"),
+    force: bool = Query(False, description="Force rebuild raw"),
+) -> dict:
+    base_data_dir = get_repo_root() / "data"
+    raw_summary = rebuild_raw_for_study(base_data_dir, study_id, force=force)
+
+    curated_path = (
+        base_data_dir
+        / "warehouse"
+        / "curated"
+        / f"study_id={study_id}"
+        / "fact_journey.parquet"
+    )
+    curated_status = "skipped"
+    if curated_path.exists():
+        try:
+            ensure_journey_pipeline(study_id=study_id, sync_raw=False, force=True)
+            curated_status = "ok"
+        except HTTPException:
+            curated_status = "error"
+
+    return {
+        "study_id": study_id,
+        "raw": raw_summary,
+        "curated": {"status": curated_status},
     }

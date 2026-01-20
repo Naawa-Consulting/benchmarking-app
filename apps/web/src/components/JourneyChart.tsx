@@ -71,7 +71,11 @@ export default function JourneyChart({ studyId }: { studyId: string }) {
   }
 
   if (status === "error") {
-    return <p className="text-red-600">Unable to load journey data. Seed demo data first.</p>;
+    return (
+      <p className="text-red-600">
+        Unable to load journey data. Ingest a real study first.
+      </p>
+    );
   }
 
   return (

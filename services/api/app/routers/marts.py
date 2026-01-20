@@ -54,12 +54,25 @@ def build_journey_mart(study_id: str = Query(..., description="Study id")) -> Ma
     load_parquet_as_view(conn, "responses", str(responses_path))
     conn.register("mapping", mapping_df)
 
+    weight_exists = (
+        conn.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.columns
+            WHERE table_name = 'responses' AND column_name = 'weight'
+            """
+        ).fetchone()[0]
+        > 0
+    )
+    weight_expr = "COALESCE(TRY_CAST(r.weight AS DOUBLE), 1.0)" if weight_exists else "1.0"
+
     query = """
         SELECT
             r.study_id,
             r.respondent_id,
             m.stage,
             m.brand,
+            {weight_expr} AS weight,
+            TRY_CAST(r.value AS INTEGER) AS value_raw,
             CASE
                 WHEN list_contains(m.true_codes, CAST(r.value AS VARCHAR)) THEN 1
                 ELSE 0
@@ -69,7 +82,7 @@ def build_journey_mart(study_id: str = Query(..., description="Study id")) -> Ma
             ON r.var_code = m.var_code
             AND r.study_id = m.study_id
     """
-    df = conn.execute(query).df()
+    df = conn.execute(query.format(weight_expr=weight_expr)).df()
     if df.empty:
         raise HTTPException(status_code=400, detail="No rows matched mapping criteria.")
 
