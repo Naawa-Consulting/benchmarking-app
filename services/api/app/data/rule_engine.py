@@ -379,6 +379,7 @@ def infer_question_mapping(question_text: str, var_code: str, rules: dict[str, A
     touchpoint_rule_id = touchpoint_rule.get("id") if touchpoint_rule else None
 
     brand: str | None = None
+    brand_extractor_id: str | None = None
     brand_extractors_sorted = sorted(
         brand_extractors, key=lambda item: int(item.get("priority", 0)), reverse=True
     )
@@ -391,6 +392,7 @@ def infer_question_mapping(question_text: str, var_code: str, rules: dict[str, A
         extracted = _extract_brand_with_rule(extractor, question_text)
         if extracted:
             brand = _normalize_brand(extracted) if extractor.get("normalize") else extracted
+            brand_extractor_id = extractor.get("id")
             break
 
     if brand is None:
@@ -400,6 +402,7 @@ def infer_question_mapping(question_text: str, var_code: str, rules: dict[str, A
         "ignored": False,
         "stage": stage,
         "brand": brand,
+        "brand_extractor_id": brand_extractor_id,
         "touchpoint": touchpoint,
         "touchpoint_rule_id": touchpoint_rule_id,
         "value_true_codes": defaults.get("value_true_codes", "1"),

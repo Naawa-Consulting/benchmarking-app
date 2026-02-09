@@ -68,6 +68,31 @@ export interface QuestionItem {
   } | null;
 }
 
+export interface QuestionMapRow {
+  study_id: string;
+  var_code: string;
+  question_text?: string | null;
+  var_type?: string | null;
+  stage?: string | null;
+  brand_mode?: string | null;
+  brand_value?: string | null;
+  brand_extractor_id?: string | null;
+  touchpoint_mode?: string | null;
+  touchpoint_value?: string | null;
+  touchpoint_rule_id?: string | null;
+  source_stage?: string | null;
+  source_brand?: string | null;
+  source_touchpoint?: string | null;
+  updated_at?: string | null;
+  updated_by?: string | null;
+}
+
+export interface QuestionMapPreview {
+  var_code: string;
+  kind: "labels" | "samples";
+  items: Array<{ code: string; label: string } | string>;
+}
+
 export interface StudyRuleScope {
   study_id: string;
   enabled_stage_rules: string[];

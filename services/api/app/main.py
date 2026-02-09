@@ -11,8 +11,10 @@ from app.routers import (
     ingest,
     mapping,
     marts,
+    network,
     pipeline,
     questions,
+    question_map,
     rules,
     studies,
     study_config,
@@ -40,8 +42,10 @@ def create_app() -> FastAPI:
     app.include_router(ingest.router, tags=["ingest"])
     app.include_router(mapping.router, tags=["mapping"])
     app.include_router(marts.router, tags=["marts"])
+    app.include_router(network.router, tags=["network"])
     app.include_router(rules.router, tags=["rules"])
     app.include_router(questions.router, tags=["questions"])
+    app.include_router(question_map.router, tags=["question-map"])
     app.include_router(pipeline.router, tags=["pipeline"])
     app.include_router(demographics.router, tags=["demographics"])
     app.include_router(filters.router, tags=["filters"])

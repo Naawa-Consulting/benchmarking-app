@@ -4,12 +4,16 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   ApiResult,
+  applyQuestionMapSuggestionsDetailed,
+  bulkUpdateQuestionMapDetailed,
   coverageRulesDetailed,
   getDemographicsConfigDetailed,
   getDemographicsDatePreview,
   getDemographicsPreviewDetailed,
   getDemographicsValueLabelsDetailed,
   getApiBaseUrl,
+  getQuestionMapDetailed,
+  getQuestionMapValuePreviewDetailed,
   getQuestionsDetailed,
   getJourneyStatusDetailed,
   getRulesDetailed,
@@ -34,6 +38,7 @@ import {
   DemographicsConfig,
   DemographicsValueLabel,
   QuestionItem,
+  QuestionMapRow,
   RuleCoverage,
   Study,
   StudyBasePreview,
@@ -195,6 +200,17 @@ export default function RulesStudioPage() {
   const [questions, setQuestions] = useState<QuestionItem[]>([]);
   const [questionsState, setQuestionsState] = useState<ActionState>("idle");
 
+  const [questionMapRows, setQuestionMapRows] = useState<QuestionMapRow[]>([]);
+  const [questionMapState, setQuestionMapState] = useState<ActionState>("idle");
+  const [questionMapSearch, setQuestionMapSearch] = useState("");
+  const [questionMapUnmappedOnly, setQuestionMapUnmappedOnly] = useState(false);
+  const [questionMapSelection, setQuestionMapSelection] = useState<Set<string>>(new Set());
+  const [bulkStage, setBulkStage] = useState("");
+  const [bulkBrand, setBulkBrand] = useState("");
+  const [bulkTouchpoint, setBulkTouchpoint] = useState("");
+  const [previewRow, setPreviewRow] = useState<QuestionMapRow | null>(null);
+  const [previewItems, setPreviewItems] = useState<string>("");
+
   const [rulesState, setRulesState] = useState<ActionState>("idle");
   const [rulesPayload, setRulesPayload] = useState<RulesPayload | null>(null);
   const [rulesJson, setRulesJson] = useState<string>("");
@@ -258,7 +274,7 @@ export default function RulesStudioPage() {
   const [lastResponse, setLastResponse] = useState<ApiResult | null>(null);
   const [showDetails, setShowDetails] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<"questions" | "builder" | "advanced">("questions");
+  const [activeTab, setActiveTab] = useState<"questions" | "builder" | "mapper" | "advanced">("questions");
 
   const [searchText, setSearchText] = useState("");
   const [filterConoce, setFilterConoce] = useState(false);
@@ -444,6 +460,31 @@ export default function RulesStudioPage() {
 
   useEffect(() => {
     if (!selectedStudyId) return;
+    const loadQuestionMap = async () => {
+      setQuestionMapState("loading");
+      const result = await getQuestionMapDetailed(
+        selectedStudyId,
+        questionMapSearch || null,
+        questionMapUnmappedOnly,
+        500,
+        0
+      );
+      setLastResponse(result);
+      if (result.ok && result.data && typeof result.data === "object") {
+        const data = result.data as { rows?: QuestionMapRow[] };
+        setQuestionMapRows(Array.isArray(data.rows) ? data.rows : []);
+        setQuestionMapState("success");
+      } else {
+        setQuestionMapRows([]);
+        setQuestionMapState("error");
+      }
+    };
+
+    loadQuestionMap();
+  }, [selectedStudyId, questionMapSearch, questionMapUnmappedOnly]);
+
+  useEffect(() => {
+    if (!selectedStudyId) return;
     const loadClassification = async () => {
       setClassificationState("loading");
       const result = await getStudyClassificationDetailed(selectedStudyId);
@@ -559,6 +600,96 @@ export default function RulesStudioPage() {
       question_text_regex: escaped,
     }));
     setActiveTab("builder");
+  };
+
+  const refreshQuestionMap = async () => {
+    if (!selectedStudyId) return;
+    const result = await getQuestionMapDetailed(
+      selectedStudyId,
+      questionMapSearch || null,
+      questionMapUnmappedOnly,
+      500,
+      0
+    );
+    setLastResponse(result);
+    if (result.ok && result.data && typeof result.data === "object") {
+      const data = result.data as { rows?: QuestionMapRow[] };
+      setQuestionMapRows(Array.isArray(data.rows) ? data.rows : []);
+      setQuestionMapState("success");
+    } else {
+      setQuestionMapRows([]);
+      setQuestionMapState("error");
+    }
+  };
+
+  const handleSelectAllQuestionMap = (checked: boolean) => {
+    if (!checked) {
+      setQuestionMapSelection(new Set());
+      return;
+    }
+    const next = new Set(questionMapRows.map((row) => row.var_code));
+    setQuestionMapSelection(next);
+  };
+
+  const handleToggleQuestionMapRow = (varCode: string, checked: boolean) => {
+    setQuestionMapSelection((prev) => {
+      const next = new Set(prev);
+      if (checked) {
+        next.add(varCode);
+      } else {
+        next.delete(varCode);
+      }
+      return next;
+    });
+  };
+
+  const handleBulkUpdate = async (mode: { stage?: string; brand?: string; touchpoint?: string }, patch: Record<string, unknown>) => {
+    if (!selectedStudyId || questionMapSelection.size === 0) return;
+    const payload = {
+      var_codes: Array.from(questionMapSelection),
+      patch,
+      mode,
+      updated_by: "admin-ui",
+    };
+    const result = await bulkUpdateQuestionMapDetailed(selectedStudyId, payload);
+    setLastResponse(result);
+    if (result.ok) {
+      await refreshQuestionMap();
+      setQuestionMapSelection(new Set());
+    }
+  };
+
+  const handleApplySuggestions = async () => {
+    if (!selectedStudyId) return;
+    const result = await applyQuestionMapSuggestionsDetailed(selectedStudyId, {
+      targets: ["stage", "brand", "touchpoint"],
+      only_empty: true,
+    });
+    setLastResponse(result);
+    if (result.ok) {
+      await refreshQuestionMap();
+    }
+  };
+
+  const handlePreview = async (row: QuestionMapRow) => {
+    setPreviewRow(row);
+    if (!selectedStudyId) return;
+    const result = await getQuestionMapValuePreviewDetailed(selectedStudyId, row.var_code, "labels", 12);
+    if (result.ok && result.data && typeof result.data === "object") {
+      const data = result.data as { kind?: string; items?: Array<Record<string, unknown> | string> };
+      if (data.kind === "labels") {
+        const lines = (data.items || []).map((item) => {
+          if (typeof item === "string") return item;
+          const entry = item as { code?: string; label?: string };
+          return `${entry.code}: ${entry.label}`;
+        });
+        setPreviewItems(lines.join(", "));
+      } else {
+        setPreviewItems((data.items || []).map((item) => String(item)).join(", "));
+      }
+    } else {
+      setPreviewItems("");
+    }
   };
 
   const handleAddStageRule = () => {
@@ -1768,6 +1899,17 @@ export default function RulesStudioPage() {
               </button>
               <button
                 className={`rounded-full px-4 py-2 text-sm ${
+                  activeTab === "mapper"
+                    ? "bg-emerald-600 text-white"
+                    : "border border-ink/10 bg-white"
+                }`}
+                onClick={() => setActiveTab("mapper")}
+                type="button"
+              >
+                Question Mapper
+              </button>
+              <button
+                className={`rounded-full px-4 py-2 text-sm ${
                   activeTab === "advanced"
                     ? "bg-emerald-600 text-white"
                     : "border border-ink/10 bg-white"
@@ -1850,6 +1992,229 @@ export default function RulesStudioPage() {
                       </button>
                     </div>
                   ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === "mapper" && (
+            <div className="grid gap-6 lg:grid-cols-[2.2fr_1fr]">
+              <div className="main-surface rounded-3xl p-6">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-xl font-semibold">Question Mapper</h3>
+                    <p className="text-xs text-slate">
+                      Manual mappings are preserved; rule suggestions fill blanks only.
+                    </p>
+                  </div>
+                  <button
+                    className="rounded-full bg-emerald-600 px-4 py-2 text-xs font-medium text-white"
+                    onClick={handleApplySuggestions}
+                    type="button"
+                  >
+                    Apply suggestions (fill blanks)
+                  </button>
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center gap-3 text-xs">
+                  <input
+                    className="w-56 rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    placeholder="Search questions..."
+                    value={questionMapSearch}
+                    onChange={(event) => setQuestionMapSearch(event.target.value)}
+                  />
+                  <label className="flex items-center gap-2 text-xs text-slate">
+                    <input
+                      checked={questionMapUnmappedOnly}
+                      onChange={(event) => setQuestionMapUnmappedOnly(event.target.checked)}
+                      type="checkbox"
+                    />
+                    Unmapped only
+                  </label>
+                  <span className="text-xs text-slate">Status: {questionMapState}</span>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-3 rounded-2xl border border-ink/10 bg-white p-3 text-xs">
+                  <div className="flex items-center gap-2">
+                    <select
+                      className="rounded-lg border border-ink/10 bg-white px-2 py-1"
+                      value={bulkStage}
+                      onChange={(event) => setBulkStage(event.target.value)}
+                    >
+                      <option value="">Stage...</option>
+                      {STAGES.filter((stage) => stage.value !== "none").map((stage) => (
+                        <option key={stage.value} value={stage.value}>
+                          {stage.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="rounded-lg border border-ink/10 px-2 py-1"
+                      onClick={() =>
+                        handleBulkUpdate(
+                          { stage: "manual" },
+                          { stage: bulkStage || null }
+                        )
+                      }
+                      type="button"
+                    >
+                      Apply Stage
+                    </button>
+                    <button
+                      className="rounded-lg border border-ink/10 px-2 py-1"
+                      onClick={() => handleBulkUpdate({ stage: "clear" }, { stage: null })}
+                      type="button"
+                    >
+                      Clear Stage
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      className="rounded-lg border border-ink/10 bg-white px-2 py-1"
+                      placeholder="Brand"
+                      value={bulkBrand}
+                      onChange={(event) => setBulkBrand(event.target.value)}
+                    />
+                    <button
+                      className="rounded-lg border border-ink/10 px-2 py-1"
+                      onClick={() =>
+                        handleBulkUpdate(
+                          { brand: "manual" },
+                          { brand_value: bulkBrand || null }
+                        )
+                      }
+                      type="button"
+                    >
+                      Apply Brand
+                    </button>
+                    <button
+                      className="rounded-lg border border-ink/10 px-2 py-1"
+                      onClick={() => handleBulkUpdate({ brand: "clear" }, { brand_value: null })}
+                      type="button"
+                    >
+                      Clear Brand
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      className="rounded-lg border border-ink/10 bg-white px-2 py-1"
+                      placeholder="Touchpoint"
+                      value={bulkTouchpoint}
+                      onChange={(event) => setBulkTouchpoint(event.target.value)}
+                    />
+                    <button
+                      className="rounded-lg border border-ink/10 px-2 py-1"
+                      onClick={() =>
+                        handleBulkUpdate(
+                          { touchpoint: "manual" },
+                          { touchpoint_value: bulkTouchpoint || null }
+                        )
+                      }
+                      type="button"
+                    >
+                      Apply Touchpoint
+                    </button>
+                    <button
+                      className="rounded-lg border border-ink/10 px-2 py-1"
+                      onClick={() =>
+                        handleBulkUpdate({ touchpoint: "clear" }, { touchpoint_value: null })
+                      }
+                      type="button"
+                    >
+                      Clear Touchpoint
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-4 max-h-[520px] overflow-auto rounded-2xl border border-ink/10">
+                  <table className="w-full border-collapse text-xs">
+                    <thead>
+                      <tr className="border-b border-ink/10 bg-white text-left">
+                        <th className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={
+                              questionMapRows.length > 0 &&
+                              questionMapSelection.size === questionMapRows.length
+                            }
+                            onChange={(event) => handleSelectAllQuestionMap(event.target.checked)}
+                          />
+                        </th>
+                        <th className="px-3 py-2">Var</th>
+                        <th className="px-3 py-2">Question</th>
+                        <th className="px-3 py-2">Stage</th>
+                        <th className="px-3 py-2">Brand</th>
+                        <th className="px-3 py-2">Touchpoint</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {questionMapRows.map((row) => (
+                        <tr
+                          key={row.var_code}
+                          className="border-b border-ink/5 hover:bg-emerald-500/5"
+                          onClick={() => handlePreview(row)}
+                        >
+                          <td className="px-3 py-2">
+                            <input
+                              type="checkbox"
+                              checked={questionMapSelection.has(row.var_code)}
+                              onChange={(event) =>
+                                handleToggleQuestionMapRow(row.var_code, event.target.checked)
+                              }
+                            />
+                          </td>
+                          <td className="px-3 py-2 text-slate">{row.var_code}</td>
+                          <td className="px-3 py-2">{row.question_text || "--"}</td>
+                          <td className="px-3 py-2">
+                            <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-700">
+                              {stageLabel(String(row.stage || ""))}
+                            </span>
+                            <span className="ml-2 text-[10px] text-slate">
+                              {row.source_stage || "empty"}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-700">
+                              {row.brand_value || "--"}
+                            </span>
+                            <span className="ml-2 text-[10px] text-slate">
+                              {row.source_brand || "empty"}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-700">
+                              {row.touchpoint_value || "--"}
+                            </span>
+                            <span className="ml-2 text-[10px] text-slate">
+                              {row.source_touchpoint || "empty"}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                      {questionMapRows.length === 0 && (
+                        <tr>
+                          <td className="px-3 py-4 text-center text-slate" colSpan={6}>
+                            No question map rows yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="main-surface rounded-3xl p-6 space-y-3">
+                <h4 className="text-lg font-semibold">Value Preview</h4>
+                {previewRow ? (
+                  <>
+                    <p className="text-xs text-slate">{previewRow.var_code}</p>
+                    <p className="text-sm">{previewRow.question_text || "--"}</p>
+                    <div className="rounded-2xl border border-ink/10 bg-white p-3 text-xs text-slate">
+                      {previewItems || "No values available."}
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate">Select a row to preview values.</p>
                 )}
               </div>
             </div>

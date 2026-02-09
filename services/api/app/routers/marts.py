@@ -7,7 +7,9 @@ from pathlib import Path
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
+from app.data.rule_engine import load_rules
 from app.data.warehouse import get_duckdb_connection, get_repo_root, load_parquet_as_view
+from app.storage.question_map import question_map_path
 from app.models.schemas import MartBuildResponse
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,26 @@ def _mapping_csv_path() -> Path:
 
 
 def _load_mapping_df(study_id: str) -> pd.DataFrame:
+    map_path = question_map_path(study_id)
+    if map_path.exists():
+        df = pd.read_parquet(map_path)
+        df = df[df["stage"].notna() & (df["stage"].astype(str).str.strip() != "")]
+        df = df[df["brand_value"].notna() & (df["brand_value"].astype(str).str.strip() != "")]
+        if df.empty:
+            return pd.DataFrame()
+        rules = load_rules()
+        default_true_codes = (rules.get("defaults") or {}).get("value_true_codes", "1")
+        df = df.assign(
+            study_id=study_id,
+            var_code=df["var_code"].astype(str),
+            stage=df["stage"],
+            brand=df["brand_value"],
+            touchpoint=df.get("touchpoint_value"),
+            value_true_codes=default_true_codes,
+        )
+        df["true_codes"] = df["value_true_codes"].astype(str).str.split("|")
+        return df[["study_id", "var_code", "stage", "brand", "touchpoint", "value_true_codes", "true_codes"]]
+
     path = _mapping_csv_path()
     if not path.exists():
         return pd.DataFrame()

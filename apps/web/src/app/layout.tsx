@@ -31,6 +31,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <Link className="rounded-full border border-ink/10 px-4 py-2" href="/journey">
                 Journey
               </Link>
+              <Link className="rounded-full border border-ink/10 px-4 py-2" href="/demand-network">
+                Demand Network
+              </Link>
               <Link className="rounded-full border border-ink/10 px-4 py-2" href="/admin">
                 Admin
               </Link>

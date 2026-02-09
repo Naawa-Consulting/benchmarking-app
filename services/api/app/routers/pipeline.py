@@ -14,6 +14,7 @@ from app.data.rule_engine import (
     load_study_rule_scope,
 )
 from app.data.warehouse import get_repo_root
+from app.storage.question_map import question_map_path
 
 router = APIRouter()
 
@@ -29,6 +30,28 @@ def _mapping_rows_for_study(study_id: str) -> list[dict]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         return [row for row in reader if row.get("study_id") == study_id]
+
+
+def _load_mapping_df_from_question_map(study_id: str, rules: dict) -> pd.DataFrame:
+    map_path = question_map_path(study_id)
+    if not map_path.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(map_path)
+    df = df[df["stage"].notna() & (df["stage"].astype(str).str.strip() != "")]
+    df = df[df["brand_value"].notna() & (df["brand_value"].astype(str).str.strip() != "")]
+    if df.empty:
+        return pd.DataFrame()
+    default_true_codes = (rules.get("defaults") or {}).get("value_true_codes", "1")
+    df = df.assign(
+        study_id=study_id,
+        var_code=df["var_code"].astype(str),
+        stage=df["stage"],
+        brand=df["brand_value"],
+        touchpoint=df.get("touchpoint_value"),
+        value_true_codes=default_true_codes,
+    )
+    df["true_codes"] = df["value_true_codes"].astype(str).str.split("|")
+    return df[["study_id", "var_code", "stage", "brand", "touchpoint", "value_true_codes", "true_codes"]]
 
 
 @router.post("/pipeline/journey/ensure")
@@ -60,15 +83,20 @@ def ensure_journey_pipeline(
     df_vars = pd.read_parquet(variables_path)
     mapped_df, stats = apply_rules_to_variables(df_vars, rules)
 
+    question_map_df = _load_mapping_df_from_question_map(study_id, rules)
+
     mapping_path = _mapping_csv_path()
     mapping_path.parent.mkdir(parents=True, exist_ok=True)
     existing_rows: list[dict] = []
     if mapping_path.exists():
         existing_rows = list(pd.read_csv(mapping_path).to_dict(orient="records"))
     remaining = [row for row in existing_rows if row.get("study_id") != study_id]
-    mapped_rows = mapped_df.copy()
-    mapped_rows.insert(0, "study_id", study_id)
-    merged_rows = remaining + mapped_rows.to_dict(orient="records")
+    if not question_map_df.empty:
+        merged_rows = remaining + question_map_df.to_dict(orient="records")
+    else:
+        mapped_rows = mapped_df.copy()
+        mapped_rows.insert(0, "study_id", study_id)
+        merged_rows = remaining + mapped_rows.to_dict(orient="records")
     pd.DataFrame(merged_rows).to_csv(mapping_path, index=False)
 
     curated_path = (
@@ -88,12 +116,13 @@ def ensure_journey_pipeline(
         if not responses_path.exists():
             raise HTTPException(status_code=404, detail="raw_responses.parquet not found for study.")
 
-        mapping_df = mapped_df.copy()
-        mapping_df.insert(0, "study_id", study_id)
-        mapping_df["value_true_codes"] = mapping_df["value_true_codes"].fillna(
-            rules.get("defaults", {}).get("value_true_codes", "1")
-        )
-        mapping_df["true_codes"] = mapping_df["value_true_codes"].astype(str).str.split("|")
+        mapping_df = question_map_df if not question_map_df.empty else mapped_df.copy()
+        if mapping_df is mapped_df:
+            mapping_df.insert(0, "study_id", study_id)
+            mapping_df["value_true_codes"] = mapping_df["value_true_codes"].fillna(
+                rules.get("defaults", {}).get("value_true_codes", "1")
+            )
+            mapping_df["true_codes"] = mapping_df["value_true_codes"].astype(str).str.split("|")
 
         import duckdb
 
@@ -162,7 +191,8 @@ def journey_pipeline_status(study_id: str = Query(..., description="Study id")) 
     demographics_ready = (raw_dir / "respondents.parquet").exists()
 
     mapping_rows = _mapping_rows_for_study(study_id)
-    mapping_ready = len(mapping_rows) > 0
+    question_map_exists = question_map_path(study_id).exists()
+    mapping_ready = len(mapping_rows) > 0 or question_map_exists
 
     curated_path = (
         base_data_dir / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
@@ -178,6 +208,7 @@ def journey_pipeline_status(study_id: str = Query(..., description="Study id")) 
         "paths": {
             "raw_dir": str(raw_dir),
             "mapping_csv": str(_mapping_csv_path()),
+            "question_map": str(question_map_path(study_id)),
             "curated_path": str(curated_path),
         },
     }

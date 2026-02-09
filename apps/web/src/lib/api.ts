@@ -317,6 +317,50 @@ export function getDemographicsDatePreview(
   return requestDetailed(`/demographics/date/preview?${params.toString()}`);
 }
 
+export function getQuestionMapDetailed(
+  studyId: string,
+  q: string | null,
+  unmappedOnly: boolean,
+  limit = 500,
+  offset = 0
+) {
+  const params = new URLSearchParams({ study_id: studyId, limit: String(limit), offset: String(offset) });
+  if (q) params.set("q", q);
+  if (unmappedOnly) params.set("unmapped_only", "1");
+  return requestDetailed(`/question-map?${params.toString()}`);
+}
+
+export function bulkUpdateQuestionMapDetailed(studyId: string, payload: unknown) {
+  const params = new URLSearchParams({ study_id: studyId });
+  return requestDetailed(`/question-map/bulk-update?${params.toString()}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function applyQuestionMapSuggestionsDetailed(studyId: string, payload: unknown) {
+  const params = new URLSearchParams({ study_id: studyId });
+  return requestDetailed(`/question-map/apply-suggestions?${params.toString()}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getQuestionMapValuePreviewDetailed(
+  studyId: string,
+  varCode: string,
+  mode: "labels" | "samples" = "labels",
+  limit = 12
+) {
+  const params = new URLSearchParams({
+    study_id: studyId,
+    var_code: varCode,
+    mode,
+    n: String(limit),
+  });
+  return requestDetailed(`/question-map/value-preview?${params.toString()}`);
+}
+
 export function getFilterStudyOptionsDetailed() {
   return requestDetailed("/filters/options/studies");
 }
