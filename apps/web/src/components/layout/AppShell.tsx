@@ -1,0 +1,32 @@
+"use client";
+
+import TopNav from "./TopNav";
+import ScopeBar from "./ScopeBar";
+import { ScopeProvider } from "./ScopeProvider";
+
+type AppShellProps = {
+  children: React.ReactNode;
+  layoutVariant?: "content" | "canvas";
+};
+
+export default function AppShell({ children, layoutVariant = "content" }: AppShellProps) {
+  return (
+    <ScopeProvider>
+      <div className="min-h-screen bg-app">
+        <TopNav />
+        <div className="pt-[68px]">
+          <ScopeBar />
+        </div>
+        <main className="pb-8 pt-6">
+          <div
+            className={`mx-auto w-full px-4 sm:px-6 lg:px-8 ${
+              layoutVariant === "canvas" ? "max-w-[1800px]" : "max-w-[1440px]"
+            }`}
+          >
+            {children}
+          </div>
+        </main>
+      </div>
+    </ScopeProvider>
+  );
+}

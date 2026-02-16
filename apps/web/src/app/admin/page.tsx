@@ -2741,7 +2741,7 @@ export default function RulesStudioPage() {
                     type="button"
                     disabled={!selectedStudyId}
                   >
-                    Run Rules -> Generate Mapping
+                    Run Rules → Generate Mapping
                   </button>
                 </div>
                 {runState === "success" && (

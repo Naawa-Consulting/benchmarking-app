@@ -84,6 +84,7 @@ def _pick_mode(weighted_counts: dict[str, float]) -> tuple[str | None, bool]:
 
 def _parse_filters(
     study_ids: str | None,
+    brands: str | None,
     sector: str | None,
     subsector: str | None,
     category: str | None,
@@ -113,6 +114,12 @@ def _parse_filters(
         "quarter_to": quarter_to,
     }
     return analytics._parse_filters(payload)
+
+
+def _parse_csv(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item and item.strip()]
 
 
 def _filter_studies(filters: dict) -> list[str]:
@@ -162,6 +169,7 @@ def _build_primary_links(filters: dict, study_ids: list[str], top_links: int) ->
         return [], [], {"warning": None, "link_metric_counts": {"recall": 0, "consideration": 0, "purchase": 0}}
 
     links = []
+    selected_brands = set(filters.get("brands") or [])
     brand_contexts: dict[str, dict[str, dict[str, float] | list[dict]]] = {}
     for row in rows:
         recall = row.get("recall")
@@ -174,6 +182,8 @@ def _build_primary_links(filters: dict, study_ids: list[str], top_links: int) ->
         subsector = row.get("subsector")
         category = row.get("category")
         if not brand or not touchpoint:
+            continue
+        if selected_brands and brand not in selected_brands:
             continue
         context = brand_contexts.setdefault(
             brand,
@@ -307,6 +317,7 @@ def _collect_positive_items(
     column: str,
     filters: dict,
     columns: set[str],
+    allowed_items: set[str] | None = None,
 ) -> tuple[dict[str, set[str]], bool]:
     root = get_repo_root()
     curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
@@ -354,10 +365,13 @@ def _collect_positive_items(
     for respondent_id, item in rows:
         if respondent_id is None or item is None:
             continue
+        item_value = str(item)
+        if allowed_items and item_value not in allowed_items:
+            continue
         bucket = items_by_resp[str(respondent_id)]
         if len(bucket) >= MAX_ITEMS_PER_RESPONDENT:
             continue
-        bucket.add(str(item))
+        bucket.add(item_value)
 
     return items_by_resp, bool(rows)
 
@@ -441,6 +455,7 @@ def _build_secondary_brand_links(
             "brand",
             filters,
             columns,
+            selected_brands or None,
         )
         if has_rows:
             any_rows = True
@@ -751,6 +766,21 @@ def _build_tp_brand_graph(
 
     links = links + secondary
 
+    selected_brands = set(filters.get("brands") or [])
+    if selected_brands:
+        allowed_brand_node_ids = {f"brand:{brand}" for brand in selected_brands}
+
+        filtered_links = []
+        for link in links:
+            source = str(link.get("source", ""))
+            target = str(link.get("target", ""))
+            if source.startswith("brand:") and source not in allowed_brand_node_ids:
+                continue
+            if target.startswith("brand:") and target not in allowed_brand_node_ids:
+                continue
+            filtered_links.append(link)
+        links = filtered_links
+
     node_ids = {node["id"] for node in nodes}
     for link in links:
         for node_id in (link["source"], link["target"]):
@@ -769,6 +799,9 @@ def _build_tp_brand_graph(
                 }
             )
             node_ids.add(node_id)
+
+    referenced_ids = {node_id for link in links for node_id in (str(link["source"]), str(link["target"]))}
+    nodes = [node for node in nodes if str(node.get("id")) in referenced_ids]
 
     node_counts = {
         "brand": sum(1 for node in nodes if node.get("group") == "brand"),
@@ -791,6 +824,7 @@ def demand_network(
     metric: str = Query("recall", description="recall|consideration|purchase|both"),
     metric_mode: str | None = Query(None, description="recall|consideration|purchase|both"),
     study_ids: str | None = Query(None, description="Comma-separated study ids"),
+    brands: str | None = Query(None, description="Comma-separated brands"),
     sector: str | None = Query(None),
     subsector: str | None = Query(None),
     category: str | None = Query(None),
@@ -819,6 +853,7 @@ def demand_network(
 
     filters = _parse_filters(
         study_ids,
+        brands,
         sector,
         subsector,
         category,
@@ -832,6 +867,7 @@ def demand_network(
         quarter_from,
         quarter_to,
     )
+    filters["brands"] = _parse_csv(brands)
 
     cache_payload = {
         "metric_mode": metric_mode,
@@ -879,3 +915,4 @@ def demand_network(
 
     _set_cached(key, payload)
     return payload
+    selected_brands = set(filters.get("brands") or [])

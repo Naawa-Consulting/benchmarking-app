@@ -24,4 +24,6 @@ def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
 
 
 def load_parquet_as_view(conn: duckdb.DuckDBPyConnection, view_name: str, parquet_path: str) -> None:
-    conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM read_parquet('{parquet_path}')")
+    # Use TEMP VIEW to keep view creation scoped to the current connection and avoid
+    # cross-request catalog write conflicts in the shared DuckDB file.
+    conn.execute(f"CREATE OR REPLACE TEMP VIEW {view_name} AS SELECT * FROM read_parquet('{parquet_path}')")

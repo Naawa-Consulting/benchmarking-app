@@ -7,9 +7,14 @@
 }
 
 body {
-  @apply bg-mesh text-ink;
+  background: #f7f8fa;
+  color: rgb(15 23 42);
+}
+
+.bg-app {
+  background: #f7f8fa;
 }
 
 .main-surface {
-  @apply bg-white/80 backdrop-blur border border-mist shadow-sm;
+  @apply rounded-3xl border border-ink/10 bg-white shadow-sm;
 }

@@ -58,6 +58,21 @@ def _quarter_key(value: str | None) -> int | None:
     return year * 10 + quarter
 
 
+def _parquet_columns(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    conn = get_duckdb_connection()
+    try:
+        cursor = conn.execute(f"SELECT * FROM read_parquet('{path}') LIMIT 0")
+        return {column[0] for column in cursor.description}
+    finally:
+        conn.close()
+
+
+def _column_or_null(columns: set[str], column_name: str) -> str:
+    return column_name if column_name in columns else f"NULL AS {column_name}"
+
+
 def _parse_filters(payload: dict | None) -> dict:
     if not payload:
         payload = {}
@@ -125,6 +140,10 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
     if not respondents_path.exists():
         return None, [], False
 
+    respondent_columns = _parquet_columns(respondents_path)
+    if "respondent_id" not in respondent_columns:
+        return None, [], False
+
     config = normalize_demographics_config(load_demographics_config(study_id))
     gender_var = config.get("gender_var")
     nse_var = config.get("nse_var")
@@ -132,15 +151,22 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
     age_var = config.get("age_var")
     date_mode = (config.get("date") or {}).get("mode", "none")
 
-    if filters.get("gender") and not gender_var:
+    if filters.get("gender") and (not gender_var or "gender_code" not in respondent_columns):
         return None, [], False
-    if filters.get("nse") and not nse_var:
+    if filters.get("nse") and (not nse_var or "nse_code" not in respondent_columns):
         return None, [], False
-    if filters.get("state") and not state_var:
+    if filters.get("state") and (not state_var or "state_code" not in respondent_columns):
         return None, [], False
-    if (filters.get("age_min") is not None or filters.get("age_max") is not None) and not age_var:
+    if (filters.get("age_min") is not None or filters.get("age_max") is not None) and (
+        not age_var or "age" not in respondent_columns
+    ):
         return None, [], False
-    if (filters.get("quarter_from") or filters.get("quarter_to") or filters.get("date_from") or filters.get("date_to")) and date_mode == "none":
+    if (
+        filters.get("quarter_from")
+        or filters.get("quarter_to")
+        or filters.get("date_from")
+        or filters.get("date_to")
+    ) and (date_mode == "none" or "date" not in respondent_columns):
         return None, [], False
 
     labels_path = (
@@ -202,7 +228,13 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
 
     cte = f"""
         respondents AS (
-            SELECT respondent_id, gender_code, nse_code, state_code, age, date
+            SELECT
+                respondent_id,
+                {_column_or_null(respondent_columns, "gender_code")},
+                {_column_or_null(respondent_columns, "nse_code")},
+                {_column_or_null(respondent_columns, "state_code")},
+                {_column_or_null(respondent_columns, "age")},
+                {_column_or_null(respondent_columns, "date")}
             FROM read_parquet('{respondents_path}')
         ),
         labels AS (

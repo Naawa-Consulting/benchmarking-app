@@ -1,18 +1,9 @@
-﻿"use client";
+"use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
-
-import {
-  getFilterDateOptionsDetailed,
-  getFilterDemographicsOptionsDetailed,
-  getFilterStudyOptionsDetailed,
-  getFilterTaxonomyOptionsDetailed,
-  postJourneyTableMultiDetailed,
-  postTouchpointsTableMultiDetailed,
-} from "../../lib/api";
-import { FilterBar, FilterState, DemographicOptions, DateOptions, StudyOption, TaxonomyItem } from "../../components/FilterBar";
+import { useEffect, useState } from "react";
+import { postJourneyTableMultiDetailed, postTouchpointsTableMultiDetailed } from "../../lib/api";
+import { useScope } from "../../components/layout/ScopeProvider";
 
 type TableRow = {
   study_id: string;
@@ -39,32 +30,12 @@ type TouchpointRow = {
   recall: number | null;
 };
 
+const firstOrNull = (values: string[]) => (values.length ? values[0] : null);
+
 export default function JourneyPage() {
-  const searchParams = useSearchParams();
+  const { scope } = useScope();
   const [limitMode, setLimitMode] = useState<"top10" | "top25" | "all">("top10");
-  const [studies, setStudies] = useState<StudyOption[]>([]);
-  const [taxonomyItems, setTaxonomyItems] = useState<TaxonomyItem[]>([]);
-  const [demographicOptions, setDemographicOptions] = useState<DemographicOptions>({
-    gender: [],
-    nse: [],
-    state: [],
-    age: { min: null, max: null },
-  });
-  const [dateOptions, setDateOptions] = useState<DateOptions>({ quarters: [] });
-  const [filters, setFilters] = useState<FilterState>({
-    studyIds: [],
-    sector: null,
-    subsector: null,
-    category: null,
-    gender: null,
-    nse: null,
-    state: null,
-    ageMin: null,
-    ageMax: null,
-    dateGrain: "Q",
-    quarterFrom: null,
-    quarterTo: null,
-  });
+  const [touchpointLimit, setTouchpointLimit] = useState<"top10" | "top25" | "all">("top25");
   const [tableRows, setTableRows] = useState<TableRow[]>([]);
   const [tableState, setTableState] = useState<"idle" | "loading" | "error">("idle");
   const [tableMessage, setTableMessage] = useState<string | null>(null);
@@ -72,75 +43,24 @@ export default function JourneyPage() {
   const [touchpointRows, setTouchpointRows] = useState<TouchpointRow[]>([]);
   const [touchpointState, setTouchpointState] = useState<"idle" | "loading" | "error">("idle");
   const [touchpointMessage, setTouchpointMessage] = useState<string | null>(null);
-  const [touchpointLimit, setTouchpointLimit] = useState<"top10" | "top25" | "all">("top25");
-
-  const queryStudyId = useMemo(() => searchParams.get("study_id"), [searchParams]);
-
-  useEffect(() => {
-    const loadOptions = async () => {
-      const studyResult = await getFilterStudyOptionsDetailed();
-      if (studyResult.ok && studyResult.data) {
-        const payload = studyResult.data as { items?: StudyOption[] };
-        setStudies(Array.isArray(payload.items) ? payload.items : []);
-      }
-      const taxonomyResult = await getFilterTaxonomyOptionsDetailed();
-      if (taxonomyResult.ok && taxonomyResult.data) {
-        const payload = taxonomyResult.data as { items?: TaxonomyItem[] };
-        setTaxonomyItems(Array.isArray(payload.items) ? payload.items : []);
-      }
-    };
-
-    loadOptions();
-  }, []);
-
-  useEffect(() => {
-    if (!queryStudyId) return;
-    setFilters((prev) => ({ ...prev, studyIds: [queryStudyId] }));
-  }, [queryStudyId]);
-
-  useEffect(() => {
-    const loadOptions = async () => {
-      const demographicResult = await getFilterDemographicsOptionsDetailed(filters.studyIds);
-      if (demographicResult.ok && demographicResult.data) {
-        const payload = demographicResult.data as DemographicOptions;
-        setDemographicOptions({
-          gender: Array.isArray(payload.gender) ? payload.gender : [],
-          nse: Array.isArray(payload.nse) ? payload.nse : [],
-          state: Array.isArray(payload.state) ? payload.state : [],
-          age: payload.age || { min: null, max: null },
-        });
-      }
-      const dateResult = await getFilterDateOptionsDetailed(filters.studyIds);
-      if (dateResult.ok && dateResult.data) {
-        const payload = dateResult.data as DateOptions;
-        setDateOptions({
-          quarters: Array.isArray(payload.quarters) ? payload.quarters : [],
-          min: payload.min ?? null,
-          max: payload.max ?? null,
-        });
-      }
-    };
-
-    loadOptions();
-  }, [filters.studyIds]);
 
   useEffect(() => {
     setTableState("loading");
     setTableMessage(null);
     postJourneyTableMultiDetailed(
       {
-        study_ids: filters.studyIds,
-        sector: filters.sector,
-        subsector: filters.subsector,
-        category: filters.category,
-        gender: filters.gender,
-        nse: filters.nse,
-        state: filters.state,
-        age_min: filters.ageMin,
-        age_max: filters.ageMax,
-        date_grain: filters.dateGrain,
-        quarter_from: filters.quarterFrom,
-        quarter_to: filters.quarterTo,
+        study_ids: scope.studyIds,
+        sector: scope.sector,
+        subsector: scope.subsector,
+        category: scope.category,
+        gender: firstOrNull(scope.gender),
+        nse: firstOrNull(scope.nse),
+        state: firstOrNull(scope.state),
+        age_min: scope.ageMin,
+        age_max: scope.ageMax,
+        date_grain: scope.timeGranularity,
+        quarter_from: scope.quarterFrom,
+        quarter_to: scope.quarterTo,
       },
       limitMode
     )
@@ -165,25 +85,25 @@ export default function JourneyPage() {
         setTableMessage(error instanceof Error ? error.message : "Unable to load table.");
         setTableRows([]);
       });
-  }, [filters, limitMode]);
+  }, [scope, limitMode]);
 
   useEffect(() => {
     setTouchpointState("loading");
     setTouchpointMessage(null);
     postTouchpointsTableMultiDetailed(
       {
-        study_ids: filters.studyIds,
-        sector: filters.sector,
-        subsector: filters.subsector,
-        category: filters.category,
-        gender: filters.gender,
-        nse: filters.nse,
-        state: filters.state,
-        age_min: filters.ageMin,
-        age_max: filters.ageMax,
-        date_grain: filters.dateGrain,
-        quarter_from: filters.quarterFrom,
-        quarter_to: filters.quarterTo,
+        study_ids: scope.studyIds,
+        sector: scope.sector,
+        subsector: scope.subsector,
+        category: scope.category,
+        gender: firstOrNull(scope.gender),
+        nse: firstOrNull(scope.nse),
+        state: firstOrNull(scope.state),
+        age_min: scope.ageMin,
+        age_max: scope.ageMax,
+        date_grain: scope.timeGranularity,
+        quarter_from: scope.quarterFrom,
+        quarter_to: scope.quarterTo,
       },
       touchpointLimit
     )
@@ -207,52 +127,11 @@ export default function JourneyPage() {
         setTouchpointMessage(error instanceof Error ? error.message : "Unable to load touchpoints.");
         setTouchpointRows([]);
       });
-  }, [filters, touchpointLimit]);
-
-  const handleFilterChange = (next: Partial<FilterState>) => {
-    setFilters((prev) => {
-      const merged = { ...prev, ...next };
-      if (Object.prototype.hasOwnProperty.call(next, "sector")) {
-        merged.subsector = null;
-        merged.category = null;
-      }
-      if (Object.prototype.hasOwnProperty.call(next, "subsector")) {
-        merged.category = null;
-      }
-      return merged;
-    });
-  };
-
-  const handleClearFilters = () => {
-    setFilters({
-      studyIds: [],
-      sector: null,
-      subsector: null,
-      category: null,
-      gender: null,
-      nse: null,
-      state: null,
-      ageMin: null,
-      ageMax: null,
-      dateGrain: "Q",
-      quarterFrom: null,
-      quarterTo: null,
-    });
-  };
+  }, [scope, touchpointLimit]);
 
   return (
     <main className="space-y-6">
-      <FilterBar
-        state={filters}
-        studies={studies}
-        taxonomyItems={taxonomyItems}
-        demographics={demographicOptions}
-        dateOptions={dateOptions}
-        onChange={handleFilterChange}
-        onClear={handleClearFilters}
-      />
-
-      <section className="main-surface rounded-3xl p-6">
+      <section className="main-surface p-6">
         <div className="flex items-center justify-between">
           <h3 className="text-xl font-semibold">Journey Results</h3>
           {tableSource && (
@@ -279,13 +158,10 @@ export default function JourneyPage() {
           ))}
           <span className="text-[10px] text-slate">Sorted by Brand Awareness (desc)</span>
         </div>
-        {tableState === "loading" && (
-          <p className="mt-4 text-sm text-slate">Loading curated results...</p>
-        )}
+        {tableState === "loading" && <p className="mt-4 text-sm text-slate">Loading curated results...</p>}
         {tableState === "error" && (
           <p className="mt-4 text-sm text-red-600">
-            {tableMessage ||
-              "Results not published for this study yet. Go to Admin -> Publish Journey Results."}{" "}
+            {tableMessage || "Results not published for this study yet. Go to Admin → Publish Journey Results."}{" "}
             <Link className="underline" href="/admin">
               Open Admin
             </Link>
@@ -323,9 +199,7 @@ export default function JourneyPage() {
                         : `${row.brand_awareness}%`}
                     </td>
                     <td className="py-2 text-right">
-                      {row.ad_awareness === null || row.ad_awareness === undefined
-                        ? "--"
-                        : `${row.ad_awareness}%`}
+                      {row.ad_awareness === null || row.ad_awareness === undefined ? "--" : `${row.ad_awareness}%`}
                     </td>
                     <td className="py-2 text-right">
                       {row.brand_consideration === null || row.brand_consideration === undefined
@@ -355,7 +229,7 @@ export default function JourneyPage() {
         )}
         {tableState !== "error" && tableRows.length === 0 && (
           <p className="mt-4 text-sm text-slate">
-            Results not published for this study yet. Go to Admin -> Publish Journey Results.{" "}
+            Results not published for this study yet. Go to Admin → Publish Journey Results.{" "}
             <Link className="underline" href="/admin">
               Open Admin
             </Link>
@@ -363,13 +237,11 @@ export default function JourneyPage() {
         )}
       </section>
 
-      <section className="main-surface rounded-3xl p-6">
+      <section className="main-surface p-6">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-xl font-semibold">Touchpoints (Recall)</h3>
-            <p className="text-sm text-slate">
-              Recall = % value == 1 within touchpoints module.
-            </p>
+            <p className="text-sm text-slate">Recall = % value == 1 within touchpoints module.</p>
           </div>
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
@@ -390,12 +262,8 @@ export default function JourneyPage() {
           ))}
           <span className="text-[10px] text-slate">Sorted by Recall (desc)</span>
         </div>
-        {touchpointState === "loading" && (
-          <p className="mt-4 text-sm text-slate">Loading touchpoints...</p>
-        )}
-        {touchpointState === "error" && (
-          <p className="mt-4 text-sm text-red-600">{touchpointMessage}</p>
-        )}
+        {touchpointState === "loading" && <p className="mt-4 text-sm text-slate">Loading touchpoints...</p>}
+        {touchpointState === "error" && <p className="mt-4 text-sm text-red-600">{touchpointMessage}</p>}
         {touchpointState !== "error" && touchpointRows.length > 0 && (
           <div className="mt-4 max-h-[520px] overflow-auto">
             <table className="w-full border-collapse text-sm">

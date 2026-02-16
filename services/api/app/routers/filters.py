@@ -111,75 +111,80 @@ def filter_demographic_options(
         resp_path = respondents_path(study_id)
         if not resp_path.exists():
             continue
-        config = normalize_demographics_config(load_demographics_config(study_id))
         conn = duckdb.connect()
-        conn.execute(f"CREATE OR REPLACE VIEW respondents AS SELECT * FROM read_parquet('{resp_path}')")
+        try:
+            config = normalize_demographics_config(load_demographics_config(study_id))
+            conn.execute(f"CREATE OR REPLACE VIEW respondents AS SELECT * FROM read_parquet('{resp_path}')")
 
-        if config.get("age_var"):
-            row = conn.execute(
-                "SELECT MIN(age) AS min_age, MAX(age) AS max_age FROM respondents WHERE age IS NOT NULL"
-            ).fetchone()
-            if row:
-                if row[0] is not None:
-                    age_min = row[0] if age_min is None else min(age_min, row[0])
-                if row[1] is not None:
-                    age_max = row[1] if age_max is None else max(age_max, row[1])
+            if config.get("age_var"):
+                row = conn.execute(
+                    "SELECT MIN(age) AS min_age, MAX(age) AS max_age FROM respondents WHERE age IS NOT NULL"
+                ).fetchone()
+                if row:
+                    if row[0] is not None:
+                        age_min = row[0] if age_min is None else min(age_min, row[0])
+                    if row[1] is not None:
+                        age_max = row[1] if age_max is None else max(age_max, row[1])
 
-        labels_path = value_labels_path(study_id)
-        if not labels_path.exists():
+            labels_path = value_labels_path(study_id)
+            if not labels_path.exists():
+                continue
+            conn.execute(f"CREATE OR REPLACE VIEW labels AS SELECT * FROM read_parquet('{labels_path}')")
+
+            gender_var = config.get("gender_var")
+            if gender_var:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT l.value_label
+                    FROM labels l
+                    WHERE l.var_code = ?
+                      AND l.value_code IN (
+                        SELECT DISTINCT CAST(gender_code AS VARCHAR)
+                        FROM respondents
+                        WHERE gender_code IS NOT NULL
+                      )
+                    """,
+                    [gender_var],
+                ).fetchall()
+                gender_values.update({str(row[0]).strip() for row in rows if row[0] is not None and str(row[0]).strip()})
+
+            nse_var = config.get("nse_var")
+            if nse_var:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT l.value_label
+                    FROM labels l
+                    WHERE l.var_code = ?
+                      AND l.value_code IN (
+                        SELECT DISTINCT CAST(nse_code AS VARCHAR)
+                        FROM respondents
+                        WHERE nse_code IS NOT NULL
+                      )
+                    """,
+                    [nse_var],
+                ).fetchall()
+                nse_values.update({str(row[0]).strip() for row in rows if row[0] is not None and str(row[0]).strip()})
+
+            state_var = config.get("state_var")
+            if state_var:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT l.value_label
+                    FROM labels l
+                    WHERE l.var_code = ?
+                      AND l.value_code IN (
+                        SELECT DISTINCT CAST(state_code AS VARCHAR)
+                        FROM respondents
+                        WHERE state_code IS NOT NULL
+                      )
+                    """,
+                    [state_var],
+                ).fetchall()
+                state_values.update({str(row[0]).strip() for row in rows if row[0] is not None and str(row[0]).strip()})
+        except Exception:
             continue
-        conn.execute(f"CREATE OR REPLACE VIEW labels AS SELECT * FROM read_parquet('{labels_path}')")
-
-        gender_var = config.get("gender_var")
-        if gender_var:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT l.value_label
-                FROM labels l
-                WHERE l.var_code = ?
-                  AND l.value_code IN (
-                    SELECT DISTINCT CAST(gender_code AS VARCHAR)
-                    FROM respondents
-                    WHERE gender_code IS NOT NULL
-                  )
-                """,
-                [gender_var],
-            ).fetchall()
-            gender_values.update({row[0] for row in rows if row[0] is not None})
-
-        nse_var = config.get("nse_var")
-        if nse_var:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT l.value_label
-                FROM labels l
-                WHERE l.var_code = ?
-                  AND l.value_code IN (
-                    SELECT DISTINCT CAST(nse_code AS VARCHAR)
-                    FROM respondents
-                    WHERE nse_code IS NOT NULL
-                  )
-                """,
-                [nse_var],
-            ).fetchall()
-            nse_values.update({row[0] for row in rows if row[0] is not None})
-
-        state_var = config.get("state_var")
-        if state_var:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT l.value_label
-                FROM labels l
-                WHERE l.var_code = ?
-                  AND l.value_code IN (
-                    SELECT DISTINCT CAST(state_code AS VARCHAR)
-                    FROM respondents
-                    WHERE state_code IS NOT NULL
-                  )
-                """,
-                [state_var],
-            ).fetchall()
-            state_values.update({row[0] for row in rows if row[0] is not None})
+        finally:
+            conn.close()
 
     return {
         "gender": sorted(gender_values),
@@ -202,19 +207,24 @@ def filter_date_options(
         if not resp_path.exists():
             continue
         conn = duckdb.connect()
-        conn.execute(f"CREATE OR REPLACE VIEW respondents AS SELECT * FROM read_parquet('{resp_path}')")
-        rows = conn.execute(
-            """
-            SELECT DISTINCT
-                EXTRACT(year FROM TRY_CAST(date AS DATE)) * 10
-                    + EXTRACT(quarter FROM TRY_CAST(date AS DATE)) AS q_key
-            FROM respondents
-            WHERE TRY_CAST(date AS DATE) IS NOT NULL
-            """
-        ).fetchall()
-        for row in rows:
-            if row and row[0] is not None:
-                quarters.add(int(row[0]))
+        try:
+            conn.execute(f"CREATE OR REPLACE VIEW respondents AS SELECT * FROM read_parquet('{resp_path}')")
+            rows = conn.execute(
+                """
+                SELECT DISTINCT
+                    EXTRACT(year FROM TRY_CAST(date AS DATE)) * 10
+                        + EXTRACT(quarter FROM TRY_CAST(date AS DATE)) AS q_key
+                FROM respondents
+                WHERE TRY_CAST(date AS DATE) IS NOT NULL
+                """
+            ).fetchall()
+            for row in rows:
+                if row and row[0] is not None:
+                    quarters.add(int(row[0]))
+        except Exception:
+            continue
+        finally:
+            conn.close()
 
     sorted_keys = sorted(quarters)
     quarter_labels = [f"{key // 10}-Q{key % 10}" for key in sorted_keys]
