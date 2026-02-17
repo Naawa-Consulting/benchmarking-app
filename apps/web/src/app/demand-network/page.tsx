@@ -2,13 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { createPortal } from "react-dom";
 
 import { getApiBaseUrl } from "../../lib/api";
 import { type HoveredLink, type NetworkCanvasHandle } from "../../components/NetworkCanvas";
 import DemandNetworkView from "../../components/demand-network/views/DemandNetworkView";
 import type { DNViewMode } from "../../components/demand-network/views/types";
 import {
-  ChipSelect,
   ChipToggle,
   ChipToggleGroup,
   Toolbar,
@@ -67,15 +67,12 @@ type NetworkResponse = {
     empty_reason?: string | null;
     node_counts?: { brand?: number; touchpoint?: number };
     link_count?: number;
-    top_links?: number;
     link_metric_counts?: { recall?: number; consideration?: number; purchase?: number };
   };
 };
 
-const TOP_LINK_OPTIONS = [100, 250, 500] as const;
-const SECONDARY_OPTIONS = ["off", "brands", "touchpoints", "both"] as const;
-const SECONDARY_TOP_K = [3, 4, 5] as const;
-const METRICS = ["recall", "consideration", "purchase", "both"] as const;
+const SECONDARY_OPTIONS = ["off", "brands", "touchpoints"] as const;
+const METRICS = ["recall", "consideration", "purchase"] as const;
 const VIEW_OPTIONS: Array<{ label: string; value: DNViewMode }> = [
   { label: "◎ Network", value: "network" },
   { label: "▦ Matrix", value: "matrix" },
@@ -100,24 +97,19 @@ const metricLabel = (metric: MetricKey) => {
       return "Consideration";
     case "purchase":
       return "Purchase";
-    case "both":
-      return "Both";
     default:
       return "Recall";
   }
 };
+
+const primaryMetricLabel = (metric: MetricKey) =>
+  metric === "consideration" ? "Consideration (given recall of touchpoint)" : metricLabel(metric);
 
 const TOOLTIP_COPY = {
   view: "Switch between advanced analytical views using the same filtered dataset.",
   metric: "Choose the primary metric used to render links.",
   layout: "Adjust network spacing density without changing data.",
   layers: "Show or hide secondary relationship layers.",
-  topLinks: "Limit the strongest primary links to reduce clutter.",
-  spotlight: "Highlight one-hop neighborhood on node hover.",
-  labels: "Auto shows smart labels for top nodes; Off keeps hover-only labels.",
-  secondaryTopK: "Limit secondary links kept per node.",
-  cluster: "Group brands by category when available.",
-  fit: "Re-center and fit the current graph into view.",
 } as const;
 
 export default function DemandNetworkPage() {
@@ -127,14 +119,12 @@ export default function DemandNetworkPage() {
   const { scope, studies } = useScope();
   const apiBase = getApiBaseUrl();
   const isPresentation = searchParams.get("presentation") === "1";
+  const advancedOpen = searchParams.get("scope_advanced") === "1";
   const [metric, setMetric] = useState<MetricKey>("recall");
   const [viewMode, setViewMode] = useState<DNViewMode>("network");
-  const [topLinks, setTopLinks] = useState<(typeof TOP_LINK_OPTIONS)[number]>(250);
   const [secondaryLinks, setSecondaryLinks] = useState<SecondaryMode>("off");
   const [showSecondaryAlways, setShowSecondaryAlways] = useState(false);
-  const [secondaryTopK, setSecondaryTopK] = useState<(typeof SECONDARY_TOP_K)[number]>(3);
   const [secondaryWarning, setSecondaryWarning] = useState<string | null>(null);
-  const [clusterMode, setClusterMode] = useState<"off" | "category">("off");
   const [interaction, setInteraction] = useState<InteractionState>({
     hoveredNodeId: null,
     hoveredLinkId: null,
@@ -144,8 +134,6 @@ export default function DemandNetworkPage() {
   const [hoveredLink, setHoveredLink] = useState<HoveredLink | null>(null);
   const [contextCollapsed, setContextCollapsed] = useState(true);
   const [filtersCollapsed, setFiltersCollapsed] = useState(true);
-  const [labelMode, setLabelMode] = useState<"auto" | "off">("auto");
-  const [spotlight, setSpotlight] = useState(true);
   const [layoutMode, setLayoutMode] = useState<"auto" | "spacious">("spacious");
   const [graphVisible, setGraphVisible] = useState(false);
   const [pulseNodeId, setPulseNodeId] = useState<string | null>(null);
@@ -157,17 +145,9 @@ export default function DemandNetworkPage() {
   const [data, setData] = useState<NetworkResponse | null>(null);
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [advancedSlot, setAdvancedSlot] = useState<HTMLElement | null>(null);
   const canvasRef = useRef<NetworkCanvasHandle>(null);
-
-  const categories = useMemo(() => {
-    const set = new Set<string>();
-    studies.forEach((study) => {
-      if (study.category) set.add(study.category as string);
-    });
-    return Array.from(set).sort();
-  }, [studies]);
-
-  const clusterDisabled = categories.length > 20;
+  const secondaryInitRef = useRef(false);
 
   const filteredStudies = useMemo(() => {
     if (!scope.category) return studies;
@@ -175,10 +155,35 @@ export default function DemandNetworkPage() {
   }, [studies, scope.category]);
 
   useEffect(() => {
-    if (clusterDisabled && clusterMode !== "off") {
-      setClusterMode("off");
+    if (secondaryInitRef.current) return;
+    secondaryInitRef.current = true;
+    const incoming = searchParams.get("secondary_links");
+    if (!incoming) return;
+    if (incoming === "brands" || incoming === "touchpoints" || incoming === "off") {
+      setSecondaryLinks(incoming);
+      return;
     }
-  }, [clusterDisabled, clusterMode]);
+    if (incoming === "both") {
+      setSecondaryLinks("off");
+      const params = new URLSearchParams(searchParams.toString());
+      params.delete("secondary_links");
+      router.replace(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`);
+    }
+  }, [pathname, router, searchParams]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (!advancedOpen || isPresentation) {
+      setAdvancedSlot(null);
+      return;
+    }
+    const syncSlot = () => {
+      setAdvancedSlot(document.getElementById("dn-advanced-controls-slot"));
+    };
+    syncSlot();
+    const frame = window.requestAnimationFrame(syncSlot);
+    return () => window.cancelAnimationFrame(frame);
+  }, [advancedOpen, isPresentation]);
 
   const activeStudies = useMemo(() => {
     if (scope.studyIds.length) {
@@ -228,7 +233,7 @@ export default function DemandNetworkPage() {
   }, [scope.category, studies]);
 
   const query = useMemo(() => {
-    const params = new URLSearchParams({ metric_mode: metric, top_links: String(topLinks) });
+    const params = new URLSearchParams({ metric_mode: metric });
     if (scope.studyIds.length) {
       params.set("study_ids", scope.studyIds.join(","));
     }
@@ -249,11 +254,9 @@ export default function DemandNetworkPage() {
     if (scope.quarterTo) params.set("quarter_to", scope.quarterTo);
     if (secondaryLinks !== "off") {
       params.set("secondary_links", secondaryLinks);
-      params.set("secondary_top_k_per_node", String(secondaryTopK));
-      params.set("tp_secondary_top_k_per_node", String(secondaryTopK));
     }
     return params.toString();
-  }, [metric, scope, topLinks, secondaryLinks, secondaryTopK]);
+  }, [metric, scope, secondaryLinks]);
 
   useEffect(() => {
     const handle = setTimeout(() => {
@@ -318,6 +321,40 @@ export default function DemandNetworkPage() {
     }
   }, [data, secondaryLinks]);
 
+  const allowsBrandLayer = metric === "consideration" || metric === "purchase";
+  const allowsTouchpointLayer = metric === "recall";
+  useEffect(() => {
+    if (
+      (secondaryLinks === "brands" && !allowsBrandLayer) ||
+      (secondaryLinks === "touchpoints" && !allowsTouchpointLayer)
+    ) {
+      setSecondaryLinks("off");
+    }
+  }, [allowsBrandLayer, allowsTouchpointLayer, secondaryLinks]);
+
+  const layersOptions = useMemo(
+    () => [
+      { label: "off", value: "off" as const },
+      {
+        label: "Brand",
+        value: "brands" as const,
+        disabled: !allowsBrandLayer,
+        tooltip: allowsBrandLayer
+          ? "Brand layer is available for Consideration and Purchase."
+          : "Brand layer is only available for Consideration and Purchase.",
+      },
+      {
+        label: "Touchpoint",
+        value: "touchpoints" as const,
+        disabled: !allowsTouchpointLayer,
+        tooltip: allowsTouchpointLayer
+          ? "Touchpoint layer is available for Recall."
+          : "Touchpoint layer is only available for Recall.",
+      },
+    ],
+    [allowsBrandLayer, allowsTouchpointLayer]
+  );
+
   useEffect(() => {
     if (!data) return;
     setGraphVisible(false);
@@ -336,32 +373,56 @@ export default function DemandNetworkPage() {
     return () => clearTimeout(handle);
   }, [data]);
 
-  const linkCounts = useMemo(() => {
-    if (!data) return { primary: 0, secondary: 0, labels: 0 };
-    const primary = data.links.filter((link) => link.type === "primary_tp_brand").length;
-    const secondary = data.links.filter((link) => link.type.startsWith("secondary_")).length;
-    const labels =
-      labelMode === "auto"
-        ? Math.min(12, data.nodes.filter((node) => node.type === "brand").length) +
-          Math.min(8, data.nodes.filter((node) => node.type === "touchpoint").length)
-        : 0;
-    return { primary, secondary, labels };
-  }, [data, labelMode]);
   const aggregatedLinks = useMemo(() => (data ? aggregateLinks(data.links) : []), [data]);
+  const linkCounts = useMemo(() => {
+    if (!data) return { primary: 0, secondary: 0, total: 0 };
+    const primary = aggregatedLinks.filter((link) => link.type === "primary_tp_brand").length;
+    const secondary = aggregatedLinks.filter((link) => link.type.startsWith("secondary_")).length;
+    return { primary, secondary, total: aggregatedLinks.length };
+  }, [aggregatedLinks, data]);
   const nodeById = useMemo(() => new Map((data?.nodes || []).map((node) => [node.id, node])), [data]);
   const activeNodeId = interaction.focusedNodeId || interaction.hoveredNodeId || null;
   const activeLinkId = interaction.focusedNodeId ? null : interaction.hoveredLinkId;
 
   const metricCounts = data?.meta?.link_metric_counts;
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production" || !data) return;
+    const sampleConsideration = aggregateLinks(data.links)
+      .filter((link) => typeof link.w_consideration_raw === "number")
+      .slice(0, 3)
+      .map((link) => ({
+        source: link.source,
+        target: link.target,
+        recall: link.w_recall_raw,
+        consideration: link.w_consideration_raw,
+      }));
+    const nonNull = {
+      recall: data.links.filter((link) => typeof link.w_recall_raw === "number").length,
+      consideration: data.links.filter((link) => typeof link.w_consideration_raw === "number").length,
+      purchase: data.links.filter((link) => typeof link.w_purchase_raw === "number").length,
+    };
+    // Dev-only visibility to confirm selected metric availability.
+    console.debug("[BBS] demand-network metric availability", {
+      metric,
+      links: data.links.length,
+      nonNull,
+      sampleConsideration,
+    });
+  }, [data, metric]);
+  const selectedBrandsWithoutLinks = useMemo(() => {
+    if (!scope.brands.length || !data) return 0;
+    const renderedBrands = new Set(
+      data.nodes
+        .filter((node) => node.type === "brand")
+        .map((node) => node.label.toLowerCase().trim())
+    );
+    return scope.brands.filter((brand) => !renderedBrands.has(brand.toLowerCase().trim())).length;
+  }, [data, scope.brands]);
   const canvasHeight = isPresentation
     ? "clamp(700px, calc(100vh - 120px), 1200px)"
     : contextCollapsed
       ? "clamp(560px, calc(100vh - 270px), 860px)"
       : "clamp(460px, calc(100vh - 560px), 760px)";
-
-  const handleFitToView = useCallback(() => {
-    canvasRef.current?.fitToView();
-  }, []);
 
   const neighborIdsByNode = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -480,12 +541,16 @@ export default function DemandNetworkPage() {
   }, [includeLegendInExport]);
 
   useEffect(() => {
-    let resizeTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => handleFitToView(), 220);
+    let resizeTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      canvasRef.current?.fitToView();
+    }, 220);
     const onResize = () => {
       if (resizeTimer) {
         clearTimeout(resizeTimer);
       }
-      resizeTimer = setTimeout(() => handleFitToView(), 220);
+      resizeTimer = setTimeout(() => {
+        canvasRef.current?.fitToView();
+      }, 220);
     };
     window.addEventListener("resize", onResize);
     return () => {
@@ -494,7 +559,7 @@ export default function DemandNetworkPage() {
       }
       window.removeEventListener("resize", onResize);
     };
-  }, [handleFitToView]);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -515,9 +580,11 @@ export default function DemandNetworkPage() {
 
   useEffect(() => {
     if (!isPresentation) return;
-    const timer = setTimeout(() => handleFitToView(), 180);
+    const timer = setTimeout(() => {
+      canvasRef.current?.fitToView();
+    }, 180);
     return () => clearTimeout(timer);
-  }, [isPresentation, handleFitToView]);
+  }, [isPresentation]);
 
   const focusedNode = interaction.focusedNodeId ? nodeById.get(interaction.focusedNodeId) || null : null;
   const hoveredNode = interaction.hoveredNodeId ? nodeById.get(interaction.hoveredNodeId) || null : null;
@@ -529,11 +596,34 @@ export default function DemandNetworkPage() {
     (link: { w_recall_raw?: number | null; w_consideration_raw?: number | null; w_purchase_raw?: number | null }) => {
       if (metric === "purchase") return link.w_purchase_raw ?? 0;
       if (metric === "consideration") return link.w_consideration_raw ?? 0;
-      if (metric === "both") return Math.max(link.w_recall_raw ?? 0, link.w_consideration_raw ?? 0, link.w_purchase_raw ?? 0);
       return link.w_recall_raw ?? 0;
     },
     [metric]
   );
+
+  const weightedBrandMetricById = useMemo(() => {
+    const result = new Map<string, number | null>();
+    const weightsByBrand = new Map<string, { sum: number; w: number }>();
+    aggregatedLinks.forEach((link) => {
+      if (link.type !== "primary_tp_brand") return;
+      const metricValue =
+        metric === "purchase"
+          ? link.w_purchase_raw
+          : metric === "consideration"
+            ? link.w_consideration_raw
+            : link.w_recall_raw;
+      if (typeof metricValue !== "number") return;
+      const weight = typeof link.n_base === "number" && link.n_base > 0 ? link.n_base : 1;
+      const bucket = weightsByBrand.get(link.target) || { sum: 0, w: 0 };
+      bucket.sum += metricValue * weight;
+      bucket.w += weight;
+      weightsByBrand.set(link.target, bucket);
+    });
+    weightsByBrand.forEach((value, brandId) => {
+      result.set(brandId, value.w > 0 ? value.sum / value.w : null);
+    });
+    return result;
+  }, [aggregatedLinks, metric]);
 
   const topConnections = useMemo(() => {
     if (!panelNode) return [];
@@ -554,129 +644,66 @@ export default function DemandNetworkPage() {
       });
   }, [aggregatedLinks, metricValueForLink, nodeById, panelNode]);
 
+  const advancedControlsContent =
+    !isPresentation && advancedOpen ? (
+      <Toolbar className="w-full max-w-full">
+        <ChipToggleGroup
+          label="View"
+          tooltip={TOOLTIP_COPY.view}
+          value={viewMode}
+          options={VIEW_OPTIONS}
+          onChange={setViewMode}
+        />
+        <ChipToggleGroup
+          label="Metric"
+          tooltip={TOOLTIP_COPY.metric}
+          value={metric}
+          options={METRICS.map((item) => ({ label: metricLabel(item), value: item }))}
+          onChange={setMetric}
+        />
+        <ChipToggleGroup
+          label="Layout"
+          tooltip={TOOLTIP_COPY.layout}
+          value={layoutMode}
+          options={[
+            { label: "Auto", value: "auto" as const },
+            { label: "Spacious", value: "spacious" as const },
+          ]}
+          onChange={setLayoutMode}
+        />
+        <ChipToggleGroup
+          label="Layers"
+          tooltip={TOOLTIP_COPY.layers}
+          value={secondaryLinks}
+          options={layersOptions}
+          onChange={setSecondaryLinks}
+        />
+        {secondaryLinks !== "off" && (
+          <ChipToggleGroup
+            label="Secondary"
+            tooltip="Latent keeps secondary links hidden until hover; Always keeps them softly visible."
+            value={showSecondaryAlways ? "always" : "latent"}
+            options={[
+              { label: "Latent", value: "latent" as const },
+              { label: "Always", value: "always" as const },
+            ]}
+            onChange={(value) => setShowSecondaryAlways(value === "always")}
+          />
+        )}
+        <ToolbarGroup label="View" tooltip="Toggle clean demo mode">
+          <ChipToggle
+            label="Presentation"
+            tooltip="Toggle clean demo mode"
+            active={isPresentation}
+            onClick={() => setPresentation(true)}
+          />
+        </ToolbarGroup>
+      </Toolbar>
+    ) : null;
+
   return (
     <main className={`space-y-6 ${isPresentation ? "pt-1" : ""}`}>
-      {!isPresentation && (
-      <section className="main-surface rounded-3xl p-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <h2 className="text-2xl font-semibold">Demand Network</h2>
-            <p className="text-slate">
-              How touchpoints translate into brand demand across categories.
-            </p>
-          </div>
-          <Toolbar className="w-full max-w-full lg:max-w-[74%]">
-            <ChipToggleGroup
-              label="View"
-              tooltip={TOOLTIP_COPY.view}
-              value={viewMode}
-              options={VIEW_OPTIONS}
-              onChange={setViewMode}
-            />
-            <ChipToggleGroup
-              label="Metric"
-              tooltip={TOOLTIP_COPY.metric}
-              value={metric}
-              options={METRICS.map((item) => ({ label: metricLabel(item), value: item }))}
-              onChange={setMetric}
-            />
-            <ChipToggleGroup
-              label="Layout"
-              tooltip={TOOLTIP_COPY.layout}
-              value={layoutMode}
-              options={[
-                { label: "Auto", value: "auto" as const },
-                { label: "Spacious", value: "spacious" as const },
-              ]}
-              onChange={setLayoutMode}
-            />
-            <ChipToggleGroup
-              label="Layers"
-              tooltip={TOOLTIP_COPY.layers}
-              value={secondaryLinks}
-              options={SECONDARY_OPTIONS.map((item) => ({
-                label: item === "touchpoints" ? "Touchpoint" : item === "brands" ? "Brand" : item,
-                value: item,
-              }))}
-              onChange={setSecondaryLinks}
-            />
-            {secondaryLinks !== "off" && (
-              <ChipToggleGroup
-                label="Secondary"
-                tooltip="Latent keeps secondary links hidden until hover; Always keeps them softly visible."
-                value={showSecondaryAlways ? "always" : "latent"}
-                options={[
-                  { label: "Latent", value: "latent" as const },
-                  { label: "Always", value: "always" as const },
-                ]}
-                onChange={(value) => setShowSecondaryAlways(value === "always")}
-              />
-            )}
-            {secondaryLinks !== "off" && (
-              <ChipToggleGroup
-                label="TopK"
-                tooltip={TOOLTIP_COPY.secondaryTopK}
-                value={secondaryTopK}
-                options={SECONDARY_TOP_K.map((item) => ({ label: String(item), value: item }))}
-                onChange={setSecondaryTopK}
-              />
-            )}
-            <ChipSelect
-              label="Top Links"
-              tooltip={TOOLTIP_COPY.topLinks}
-              value={topLinks}
-              options={TOP_LINK_OPTIONS.map((item) => ({ label: String(item), value: item }))}
-              onChange={(value) => setTopLinks(Number(value) as (typeof TOP_LINK_OPTIONS)[number])}
-            />
-            <ChipToggleGroup
-              label="Spotlight"
-              tooltip={TOOLTIP_COPY.spotlight}
-              value={spotlight ? "on" : "off"}
-              options={[
-                { label: "On", value: "on" as const },
-                { label: "Off", value: "off" as const },
-              ]}
-              onChange={(value) => setSpotlight(value === "on")}
-            />
-            <ChipToggleGroup
-              label="Labels"
-              tooltip={TOOLTIP_COPY.labels}
-              value={labelMode}
-              options={[
-                { label: "Auto", value: "auto" as const },
-                { label: "Off", value: "off" as const },
-              ]}
-              onChange={setLabelMode}
-            />
-            <ChipToggleGroup
-              label="Cluster"
-              tooltip={TOOLTIP_COPY.cluster}
-              value={clusterMode}
-              disabled={clusterDisabled}
-              options={[
-                { label: "Off", value: "off" as const },
-                { label: "Category", value: "category" as const },
-              ]}
-              onChange={setClusterMode}
-            />
-            <ToolbarGroup label="View" tooltip={TOOLTIP_COPY.fit}>
-              <ChipToggle
-                label="Fit"
-                tooltip={viewMode === "network" ? TOOLTIP_COPY.fit : "Fit is available in Network view."}
-                disabled={viewMode !== "network"}
-                onClick={handleFitToView}
-              />
-              <ChipToggle
-                label="Presentation"
-                tooltip="Toggle clean demo mode"
-                active={isPresentation}
-                onClick={() => setPresentation(true)}
-              />
-            </ToolbarGroup>
-          </Toolbar>
-        </div>
-      </section>
-      )}
+      {advancedControlsContent && advancedSlot ? createPortal(advancedControlsContent, advancedSlot) : null}
 
       <section className="space-y-4">
         <div className="hidden">
@@ -695,7 +722,6 @@ export default function DemandNetworkPage() {
             <div className="mt-4 space-y-2 text-xs text-slate">
               <p>{scope.studyIds.length || "All"} studies selected</p>
               <p>Category: {scope.category || "All"}</p>
-              <p>Top links: {topLinks}</p>
             </div>
           ) : (
             <div className="mt-4 space-y-4">
@@ -713,26 +739,6 @@ export default function DemandNetworkPage() {
                   <p className="mt-1">Path: {breadcrumb}</p>
                 </div>
               </div>
-
-              <div>
-                <p className="text-sm font-semibold text-ink">Top links</p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {TOP_LINK_OPTIONS.map((value) => (
-                    <button
-                      key={value}
-                      className={`rounded-full border px-4 py-1 text-xs ${
-                        topLinks === value
-                          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700"
-                          : "border-ink/10 text-slate"
-                      }`}
-                      type="button"
-                      onClick={() => setTopLinks(value)}
-                    >
-                      Top {value}
-                    </button>
-                  ))}
-                </div>
-              </div>
             </div>
           )}
         </div>
@@ -746,14 +752,14 @@ export default function DemandNetworkPage() {
                 How touchpoints translate into brand demand across categories.
               </p>
               <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-slate">
-                {viewMode === "network" && (metric === "consideration" || metric === "both") && (
+                {viewMode === "network" && metric === "consideration" && (
                   <span className="flex items-center gap-2">
                     <span className="h-[2px] w-6 bg-ink/70" /> Solid = Consideration
                   </span>
                 )}
-                {viewMode === "network" && (metric === "purchase" || metric === "both") && (
+                {viewMode === "network" && metric === "purchase" && (
                   <span className="flex items-center gap-2">
-                    <span className="h-[2px] w-6 border-b-2 border-dashed border-ink/70" /> Dashed = Purchase
+                    <span className="h-[2px] w-6 bg-ink/70" /> Solid = Purchase
                   </span>
                 )}
                 {viewMode === "network" && metric === "recall" && (
@@ -787,9 +793,7 @@ export default function DemandNetworkPage() {
                     Locked brands: {interaction.lockedBrandIds.length}
                   </span>
                 )}
-                {typeof data.meta.link_count === "number" && (
-                  <span className="rounded-full border border-ink/10 px-3 py-1">Links: {data.meta.link_count}</span>
-                )}
+                <span className="rounded-full border border-ink/10 px-3 py-1">Links: {linkCounts.total}</span>
                 {metricCounts && (
                   <span className="rounded-full border border-ink/10 px-3 py-1">
                     C:{metricCounts.consideration || 0} · P:{metricCounts.purchase || 0}
@@ -808,13 +812,6 @@ export default function DemandNetworkPage() {
                 <p className="text-[11px] text-slate">{metricLabel(metric)} view</p>
               </div>
               <div className="pointer-events-auto flex items-center gap-2 rounded-2xl border border-white/60 bg-white/75 px-2 py-2 shadow-sm backdrop-blur">
-                <button
-                  type="button"
-                  className="rounded-full border border-ink/10 px-3 py-1 text-xs text-slate hover:border-ink/20"
-                  onClick={handleFitToView}
-                >
-                  Fit
-                </button>
                 <button
                   type="button"
                   className="rounded-full border border-ink/10 px-3 py-1 text-xs text-slate hover:border-ink/20"
@@ -843,6 +840,12 @@ export default function DemandNetworkPage() {
           {data?.meta?.warning && (
             <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
               {data.meta.warning}
+            </div>
+          )}
+          {selectedBrandsWithoutLinks > 0 && (
+            <div className="mb-4 rounded-2xl border border-ink/10 bg-white px-4 py-3 text-xs text-slate">
+              {selectedBrandsWithoutLinks} selected brand
+              {selectedBrandsWithoutLinks === 1 ? "" : "s"} have no links in the current scope.
             </div>
           )}
 
@@ -895,11 +898,11 @@ export default function DemandNetworkPage() {
                 nodes={data.nodes}
                 links={data.links}
                 metricMode={metric}
-                clusterMode={clusterMode}
+                clusterMode="off"
                 selectedBrandsCount={scope.brands.length}
                 showSecondaryAlways={showSecondaryAlways}
-                labelMode={labelMode}
-                spotlight={spotlight}
+                labelMode="auto"
+                spotlight={false}
                 layoutMode={layoutMode}
                 pulseNodeId={pulseNodeId}
                 height={canvasHeight}
@@ -991,6 +994,18 @@ export default function DemandNetworkPage() {
                         {nodeById.get(panelLink.target)?.label || panelLink.target}
                       </p>
                       <p>Type: Link ({panelLink.type})</p>
+                      <p className="font-semibold text-ink">
+                        {primaryMetricLabel(metric)}:{" "}
+                        {(() => {
+                          const selectedValue =
+                            metric === "purchase"
+                              ? panelLink.w_purchase_raw
+                              : metric === "consideration"
+                                ? panelLink.w_consideration_raw
+                                : panelLink.w_recall_raw;
+                          return typeof selectedValue === "number" ? `${(selectedValue * 100).toFixed(1)}%` : "--";
+                        })()}
+                      </p>
                       <p>Recall: {typeof panelLink.w_recall_raw === "number" ? `${(panelLink.w_recall_raw * 100).toFixed(1)}%` : "--"}</p>
                       <p>
                         Consideration:{" "}
@@ -1022,8 +1037,7 @@ export default function DemandNetworkPage() {
                 <div className="absolute bottom-5 left-5 z-20 rounded-xl border border-white/60 bg-white/80 px-3 py-2 text-[11px] text-slate shadow-sm backdrop-blur">
                   <p className="font-semibold text-ink">Legend</p>
                   <p>Node: Touchpoint / Brand</p>
-                  <p>Solid links: Recall / Consideration</p>
-                  <p>Dashed links: Purchase</p>
+                  <p>Solid links: Recall / Consideration / Purchase</p>
                 </div>
               )}
               {isPresentation && (
@@ -1031,13 +1045,13 @@ export default function DemandNetworkPage() {
                   <p>
                     Nodes: {data.meta.node_counts?.brand || 0}/{data.meta.node_counts?.touchpoint || 0}
                   </p>
-                  <p>Links: {data.meta.link_count || 0}</p>
+                  <p>Links: {linkCounts.total}</p>
                 </div>
               )}
               {process.env.NODE_ENV !== "production" && (
                 <p className="mt-3 text-[11px] text-slate">
                   Nodes: {data.meta.node_counts?.brand || 0} brands / {data.meta.node_counts?.touchpoint || 0} tps ·
-                  Links: primary {linkCounts.primary} / secondary {linkCounts.secondary} · Labels: {linkCounts.labels}
+                  Links: primary {linkCounts.primary} / secondary {linkCounts.secondary}
                 </p>
               )}
             </div>
@@ -1097,9 +1111,6 @@ export default function DemandNetworkPage() {
                 </div>
                 <div className="rounded-2xl border border-ink/10 bg-white px-3 py-3">
                   <p className="text-[11px] text-slate">Brand fill = Sector · Halo = Subsector</p>
-                  {clusterDisabled && (
-                    <p className="mt-1 text-[11px] text-slate">Clustering disabled (20+ categories).</p>
-                  )}
                 </div>
               </div>
 
@@ -1111,12 +1122,21 @@ export default function DemandNetworkPage() {
                     <p>Sector: {hoveredNode.sector || "Unassigned"}</p>
                     <p>Subsector: {hoveredNode.subsector || "Unassigned"}</p>
                     <p>Category: {hoveredNode.category || "Unassigned"}</p>
-                    <p>
-                      Awareness:{" "}
-                      {typeof hoveredNode.colorMeta?.kpi_awareness === "number"
-                        ? `${Number(hoveredNode.colorMeta?.kpi_awareness).toFixed(1)}%`
-                        : "--"}
-                    </p>
+                    {metric === "recall" ? (
+                      <p>
+                        Awareness:{" "}
+                        {typeof hoveredNode.colorMeta?.kpi_awareness === "number"
+                          ? `${Number(hoveredNode.colorMeta?.kpi_awareness).toFixed(1)}%`
+                          : "--"}
+                      </p>
+                    ) : (
+                      <p>
+                        {metric === "consideration" ? "Consideration (weighted)" : "Purchase (weighted)"}:{" "}
+                        {typeof weightedBrandMetricById.get(hoveredNode.id) === "number"
+                          ? `${(Number(weightedBrandMetricById.get(hoveredNode.id)) * 100).toFixed(1)}%`
+                          : "--"}
+                      </p>
+                    )}
                     {Boolean(hoveredNode.colorMeta?.context_mixed) && (
                       <p className="text-[11px] text-slate">Context: mixed</p>
                     )}

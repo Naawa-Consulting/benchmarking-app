@@ -27,7 +27,7 @@ export type DNLink = {
   colorMeta?: Record<string, unknown> | null;
 };
 
-export type DNMetric = "recall" | "consideration" | "purchase" | "both";
+export type DNMetric = "recall" | "consideration" | "purchase";
 export type DNLayout = "auto" | "spacious";
 export type DNSecondaryCluster = "off" | "category";
 export type DNViewMode = "network" | "matrix" | "sankey" | "multiples";

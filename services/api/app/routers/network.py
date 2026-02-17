@@ -16,7 +16,6 @@ from app.routers import analytics
 router = APIRouter()
 
 CACHE_TTL_SECONDS = 60
-MAX_TOP_LINKS = 2000
 MAX_ITEMS_PER_RESPONDENT = 50
 
 _NETWORK_CACHE: dict[str, tuple[float, dict]] = {}
@@ -159,7 +158,11 @@ def _value_expr(columns: set[str]) -> str:
     return "TRY_CAST(value AS INTEGER)"
 
 
-def _build_primary_links(filters: dict, study_ids: list[str], top_links: int) -> tuple[list[dict], list[dict], dict]:
+def _build_primary_links(
+    filters: dict,
+    study_ids: list[str],
+    top_links: int | None,
+) -> tuple[list[dict], list[dict], dict]:
     if not study_ids:
         return [], [], {"warning": None, "link_metric_counts": {"recall": 0, "consideration": 0, "purchase": 0}}
 
@@ -170,10 +173,27 @@ def _build_primary_links(filters: dict, study_ids: list[str], top_links: int) ->
 
     links = []
     selected_brands = set(filters.get("brands") or [])
+    consideration_by_study: dict[str, dict[tuple[str, str], float]] = {}
+    purchase_by_study: dict[str, dict[tuple[str, str], float]] = {}
+    for study_id in study_ids:
+        consideration_by_study[study_id] = _build_conditional_metric_by_touchpoint(
+            study_id,
+            filters,
+            ("consideration", "brand_consideration"),
+            selected_brands or None,
+        )
+        purchase_by_study[study_id] = _build_conditional_metric_by_touchpoint(
+            study_id,
+            filters,
+            ("purchase", "brand_purchase"),
+            selected_brands or None,
+        )
     brand_contexts: dict[str, dict[str, dict[str, float] | list[dict]]] = {}
     for row in rows:
         recall = row.get("recall")
-        if recall is None:
+        consideration = row.get("consideration")
+        purchase = row.get("purchase")
+        if recall is None and consideration is None and purchase is None:
             continue
         brand = row.get("brand")
         touchpoint = row.get("touchpoint")
@@ -185,6 +205,17 @@ def _build_primary_links(filters: dict, study_ids: list[str], top_links: int) ->
             continue
         if selected_brands and brand not in selected_brands:
             continue
+        conditional_key = (str(brand), str(touchpoint))
+        consideration_conditional = (
+            consideration_by_study.get(str(study_id), {}).get(conditional_key)
+            if study_id is not None
+            else None
+        )
+        purchase_conditional = (
+            purchase_by_study.get(str(study_id), {}).get(conditional_key)
+            if study_id is not None
+            else None
+        )
         context = brand_contexts.setdefault(
             brand,
             {
@@ -194,7 +225,8 @@ def _build_primary_links(filters: dict, study_ids: list[str], top_links: int) ->
                 "sources": [],
             },
         )
-        weight = float(recall)
+        context_metric = recall if recall is not None else consideration if consideration is not None else purchase
+        weight = float(context_metric or 0)
         if sector:
             context["sector"][sector] += weight
         if subsector:
@@ -216,16 +248,33 @@ def _build_primary_links(filters: dict, study_ids: list[str], top_links: int) ->
                 "target": f"brand:{brand}",
                 "weight": None,
                 "type": "primary_tp_brand",
-                "w_recall_raw": round(float(recall) / 100, 4),
-                "w_consideration_raw": None,
-                "w_purchase_raw": None,
+                "w_recall_raw": round(float(recall) / 100, 4) if recall is not None else None,
+                "w_consideration_raw": round(float(consideration_conditional), 4)
+                if consideration_conditional is not None
+                else (round(float(consideration) / 100, 4) if consideration is not None else None),
+                "w_purchase_raw": round(float(purchase_conditional), 4)
+                if purchase_conditional is not None
+                else (round(float(purchase) / 100, 4) if purchase is not None else None),
                 "n_base": None,
-                "colorMeta": {"metric": "recall"},
+                "colorMeta": {
+                    "metric": "recall",
+                    "study_id": study_id,
+                    "consideration_given_recall": consideration_conditional,
+                    "purchase_given_recall": purchase_conditional,
+                },
             }
         )
 
-    links.sort(key=lambda link: link.get("w_recall_raw") or 0, reverse=True)
-    links = links[:top_links]
+    links.sort(
+        key=lambda link: max(
+            link.get("w_recall_raw") or 0,
+            link.get("w_consideration_raw") or 0,
+            link.get("w_purchase_raw") or 0,
+        ),
+        reverse=True,
+    )
+    # Top-links truncation is deprecated. Links are already aggregated (one weighted link per pair),
+    # so we always keep the full set.
 
     journey_payload = analytics._journey_table_multi_filtered(filters, "all", "brand_awareness", "desc")
     awareness_map: dict[str, float] = {}
@@ -376,6 +425,91 @@ def _collect_positive_items(
     return items_by_resp, bool(rows)
 
 
+def _build_conditional_metric_by_touchpoint(
+    study_id: str,
+    filters: dict,
+    positive_stages: tuple[str, ...],
+    selected_brands: set[str] | None = None,
+) -> dict[tuple[str, str], float]:
+    root = get_repo_root()
+    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
+    columns = _parquet_columns(curated_path)
+    if not curated_path.exists() or "touchpoint" not in columns or "brand" not in columns or "respondent_id" not in columns:
+        return {}
+
+    respondent_cte, respondent_params, eligible = analytics._respondent_filter_cte(study_id, filters)
+    if not eligible:
+        return {}
+
+    value_expr = _value_expr(columns)
+    respondent_filter = (
+        "AND respondent_id IN (SELECT respondent_id FROM filtered_respondents)"
+        if respondent_cte
+        else ""
+    )
+    cte_prefix = f"{respondent_cte}," if respondent_cte else ""
+    stages_sql = ", ".join(f"'{stage}'" for stage in positive_stages)
+    selected_brands = selected_brands or set()
+    brand_filter_sql = ""
+    if selected_brands:
+        escaped = ", ".join("'" + brand.replace("'", "''") + "'" for brand in sorted(selected_brands))
+        brand_filter_sql = f" AND brand IN ({escaped})"
+
+    query = f"""
+        WITH {cte_prefix}
+        recall_tp AS (
+            SELECT respondent_id, brand, touchpoint
+            FROM read_parquet('{curated_path}')
+            WHERE study_id = ?
+              AND LOWER(stage) IN ('touchpoints', 'awareness')
+              AND touchpoint IS NOT NULL
+              AND TRIM(CAST(touchpoint AS VARCHAR)) <> ''
+              AND brand IS NOT NULL
+              AND TRIM(CAST(brand AS VARCHAR)) <> ''
+              AND {value_expr} = 1
+              {respondent_filter}
+              {brand_filter_sql}
+            GROUP BY respondent_id, brand, touchpoint
+        ),
+        metric_brand AS (
+            SELECT respondent_id, brand
+            FROM read_parquet('{curated_path}')
+            WHERE study_id = ?
+              AND LOWER(stage) IN ({stages_sql})
+              AND brand IS NOT NULL
+              AND TRIM(CAST(brand AS VARCHAR)) <> ''
+              AND {value_expr} = 1
+              {respondent_filter}
+              {brand_filter_sql}
+            GROUP BY respondent_id, brand
+        )
+        SELECT
+            r.brand,
+            r.touchpoint,
+            COUNT(*) AS denom_recall,
+            SUM(CASE WHEN m.respondent_id IS NOT NULL THEN 1 ELSE 0 END) AS numer_joint
+        FROM recall_tp r
+        LEFT JOIN metric_brand m
+          ON m.respondent_id = r.respondent_id
+         AND m.brand = r.brand
+        GROUP BY r.brand, r.touchpoint
+    """
+
+    conn = duckdb.connect()
+    try:
+        rows = conn.execute(query, [*respondent_params, study_id, study_id]).fetchall()
+    finally:
+        conn.close()
+
+    values: dict[tuple[str, str], float] = {}
+    for brand, touchpoint, denom, numer in rows:
+        if not denom:
+            continue
+        value = float(numer or 0) / float(denom)
+        values[(str(brand), str(touchpoint))] = max(0.0, min(1.0, value))
+    return values
+
+
 def _aggregate_pairs(
     items_by_resp: dict[str, set[str]],
     base_counts: dict[str, int],
@@ -444,6 +578,7 @@ def _build_secondary_brand_links(
     base_counts: dict[str, int] = defaultdict(int)
     co_counts: dict[tuple[str, str], int] = defaultdict(int)
     any_rows = False
+    selected_brands = set(filters.get("brands") or [])
 
     for study_id in study_ids:
         root = get_repo_root()
@@ -630,7 +765,7 @@ def _synthetic_graph(metric: str) -> dict:
 def _build_tp_brand_graph(
     metric_mode: str,
     filters: dict,
-    top_links: int,
+    top_links: int | None,
     secondary_links: str,
     secondary_top_k: int,
     tp_secondary_top_k: int,
@@ -654,21 +789,12 @@ def _build_tp_brand_graph(
             "meta": {"empty_reason": "No touchpoint data available for the selected filters."},
         }, None
 
-    if metric_mode in {"consideration", "both"}:
-        for link in links:
-            link["w_consideration_raw"] = link.get("w_recall_raw")
-        warning = "Consideration not available yet. Showing Recall instead."
-        meta["link_metric_counts"]["consideration"] = sum(
-            1 for link in links if link.get("w_consideration_raw") is not None
-        )
-
-    if metric_mode == "purchase":
-        for link in links:
-            link["w_purchase_raw"] = link.get("w_recall_raw")
-        warning = "Purchase not available yet. Showing Recall instead."
-        meta["link_metric_counts"]["purchase"] = sum(
-            1 for link in links if link.get("w_purchase_raw") is not None
-        )
+    consideration_available = any(link.get("w_consideration_raw") is not None for link in links)
+    purchase_available = any(link.get("w_purchase_raw") is not None for link in links)
+    if metric_mode == "consideration" and not consideration_available:
+        warning = "Consideration links are unavailable for this scope (computed as P(consideration|touchpoint recall))."
+    elif metric_mode == "purchase" and not purchase_available:
+        warning = "Purchase links are unavailable for this scope (computed as P(purchase|touchpoint recall))."
 
     _normalize_links(links)
     _apply_metric_weights(links, metric_mode)
@@ -812,7 +938,6 @@ def _build_tp_brand_graph(
         {
             "node_counts": node_counts,
             "link_count": len(links),
-            "top_links": top_links,
         }
     )
 
@@ -837,7 +962,7 @@ def demand_network(
     date_to: str | None = Query(None),
     quarter_from: str | None = Query(None),
     quarter_to: str | None = Query(None),
-    top_links: int = Query(250, description="Top links to keep"),
+    top_links: int | None = Query(None, description="Deprecated legacy link cap; omit for full links"),
     secondary_links: str = Query("off", description="off|brands|touchpoints|both"),
     secondary_top_k_per_node: int = Query(3, description="3-5"),
     tp_secondary_top_k_per_node: int = Query(3, description="3-5"),
@@ -847,7 +972,7 @@ def demand_network(
     if metric_mode not in {"recall", "consideration", "purchase", "both"}:
         metric_mode = "recall"
 
-    top_links = min(max(top_links, 1), MAX_TOP_LINKS)
+    # Legacy query param retained for backward compatibility; ignored by the pipeline.
     secondary_top_k_per_node = min(max(secondary_top_k_per_node, 3), 5)
     tp_secondary_top_k_per_node = min(max(tp_secondary_top_k_per_node, 3), 5)
 
@@ -870,9 +995,9 @@ def demand_network(
     filters["brands"] = _parse_csv(brands)
 
     cache_payload = {
+        "calc_v": 2,
         "metric_mode": metric_mode,
         "filters": filters,
-        "top_links": top_links,
         "secondary_links": secondary_links,
         "secondary_top_k": secondary_top_k_per_node,
         "tp_secondary_top_k": tp_secondary_top_k_per_node,
@@ -915,4 +1040,3 @@ def demand_network(
 
     _set_cached(key, payload)
     return payload
-    selected_brands = set(filters.get("brands") or [])

@@ -37,6 +37,28 @@ const asFinite = (value: MetricValue): number | null => {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+const normalizePercentiles = (values: number[]) => {
+  if (!values.length) return [];
+  const sorted = values.slice().sort((a, b) => a - b);
+  if (sorted.length === 1) return [0.5];
+  const p05Idx = Math.max(0, Math.round((sorted.length - 1) * 0.05));
+  const p95Idx = Math.max(0, Math.round((sorted.length - 1) * 0.95));
+  const p05 = sorted[p05Idx];
+  const p95 = sorted[p95Idx];
+  if (p95 <= p05) return values.map(() => 0.5);
+  return values.map((value) => clamp((value - p05) / (p95 - p05), 0, 1));
+};
+
+const deriveConsiderationGivenRecall = (link: AggregatableLink) => {
+  const fromMeta = asFinite(link.colorMeta?.consideration_given_recall as number | null | undefined);
+  if (fromMeta !== null) return clamp(fromMeta, 0, 1);
+  if (link.type !== "primary_tp_brand") return asFinite(link.w_consideration_raw);
+  const recall = asFinite(link.w_recall_raw);
+  const consideration = asFinite(link.w_consideration_raw);
+  if (recall === null || consideration === null || recall <= 0) return null;
+  return clamp(consideration / recall, 0, 1);
+};
+
 type Accumulator = {
   link: AggregatableLink;
   baseNSum: number;
@@ -72,11 +94,21 @@ export const aggregateLinks = (rawLinks: AggregatableLink[]): AggregatedLink[] =
       bucket.studies.add(studyId);
     }
 
-    for (const metric of METRIC_KEYS) {
-      const value = asFinite(link[metric]);
-      if (value === null) continue;
-      bucket.weighted[metric].sum += value * weight;
-      bucket.weighted[metric].weight += weight;
+    const recall = asFinite(link.w_recall_raw);
+    const considerationGivenRecall = deriveConsiderationGivenRecall(link);
+    const purchase = asFinite(link.w_purchase_raw);
+
+    if (recall !== null) {
+      bucket.weighted.w_recall_raw.sum += recall * weight;
+      bucket.weighted.w_recall_raw.weight += weight;
+    }
+    if (considerationGivenRecall !== null) {
+      bucket.weighted.w_consideration_raw.sum += considerationGivenRecall * weight;
+      bucket.weighted.w_consideration_raw.weight += weight;
+    }
+    if (purchase !== null) {
+      bucket.weighted.w_purchase_raw.sum += purchase * weight;
+      bucket.weighted.w_purchase_raw.weight += weight;
     }
   }
 
@@ -104,6 +136,28 @@ export const aggregateLinks = (rawLinks: AggregatableLink[]): AggregatedLink[] =
       w_recall_raw: recall,
       w_consideration_raw: consideration,
       w_purchase_raw: purchase,
+    });
+  }
+
+  // Keep norm fields in sync with aggregated raw metrics so selected metric really changes thickness/rendering.
+  const metricToNorm: Array<[MetricKey, "w_recall_norm" | "w_consideration_norm" | "w_purchase_norm"]> = [
+    ["w_recall_raw", "w_recall_norm"],
+    ["w_consideration_raw", "w_consideration_norm"],
+    ["w_purchase_raw", "w_purchase_norm"],
+  ];
+
+  for (const [rawKey, normKey] of metricToNorm) {
+    const indexes: number[] = [];
+    const values: number[] = [];
+    output.forEach((link, index) => {
+      const value = asFinite(link[rawKey]);
+      if (value === null) return;
+      indexes.push(index);
+      values.push(value);
+    });
+    const normalized = normalizePercentiles(values);
+    indexes.forEach((linkIndex, idx) => {
+      output[linkIndex][normKey] = normalized[idx];
     });
   }
 

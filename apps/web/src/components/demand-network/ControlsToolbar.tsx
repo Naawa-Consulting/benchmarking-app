@@ -5,6 +5,8 @@ import { type ReactNode } from "react";
 type Option<T extends string | number> = {
   label: string;
   value: T;
+  disabled?: boolean;
+  tooltip?: string;
 };
 
 type ToolbarProps = {
@@ -109,9 +111,12 @@ export function ChipToggleGroup<T extends string | number>({
           key={String(option.value)}
           label={option.label}
           active={option.value === value}
-          disabled={disabled}
-          tooltip={tooltip}
-          onClick={() => onChange(option.value)}
+          disabled={disabled || option.disabled}
+          tooltip={option.tooltip || tooltip}
+          onClick={() => {
+            if (option.disabled || disabled) return;
+            onChange(option.value);
+          }}
         />
       ))}
     </ToolbarGroup>

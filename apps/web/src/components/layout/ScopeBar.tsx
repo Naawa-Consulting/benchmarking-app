@@ -1,12 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import * as Popover from "@radix-ui/react-popover";
 import { useScope } from "./ScopeProvider";
-
-type PanelKey = "brands" | "demographics" | "time" | "advanced";
-type PanelPosition = { top: number; left: number; width: number };
 
 function summaryLabel(values: string[], fallback: string) {
   if (!values.length) return fallback;
@@ -15,26 +12,34 @@ function summaryLabel(values: string[], fallback: string) {
 }
 
 export default function ScopeBar() {
+  const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const { scope, setScope, resetScope, taxonomyItems, demographics, dateOptions, optionsLoading, brands } =
     useScope();
 
-  const [openPanel, setOpenPanel] = useState<PanelKey | null>(null);
+  const advancedOpen = searchParams.get("scope_advanced") === "1";
   const [brandsOpen, setBrandsOpen] = useState(false);
   const [demographicsOpen, setDemographicsOpen] = useState(false);
   const [timeOpen, setTimeOpen] = useState(false);
-  const [panelPos, setPanelPos] = useState<PanelPosition | null>(null);
   const [brandSearch, setBrandSearch] = useState("");
   const [brandsPrunedHint, setBrandsPrunedHint] = useState<string | null>(null);
 
-  const panelRef = useRef<HTMLDivElement | null>(null);
   const brandsButtonRef = useRef<HTMLButtonElement | null>(null);
   const demographicsButtonRef = useRef<HTMLButtonElement | null>(null);
   const timeButtonRef = useRef<HTMLButtonElement | null>(null);
-  const advancedButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const isPresentationMode = pathname === "/demand-network" && searchParams.get("presentation") === "1";
+
+  const setAdvancedOpen = (nextOpen: boolean) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (nextOpen) {
+      params.set("scope_advanced", "1");
+    } else {
+      params.delete("scope_advanced");
+    }
+    router.replace(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`, { scroll: false });
+  };
 
   const sectorOptions = useMemo(
     () => Array.from(new Set(taxonomyItems.map((item) => item.sector))).sort(),
@@ -70,60 +75,6 @@ export default function ScopeBar() {
     return brands.filter((brand) => brand.toLowerCase().includes(needle));
   }, [brandSearch, brands]);
 
-  const closePanel = () => {
-    setOpenPanel(null);
-    setPanelPos(null);
-  };
-
-  const getButtonByPanel = (panel: PanelKey | null) => {
-    switch (panel) {
-      case "brands":
-        return brandsButtonRef.current;
-      case "demographics":
-        return demographicsButtonRef.current;
-      case "time":
-        return timeButtonRef.current;
-      case "advanced":
-        return advancedButtonRef.current;
-      default:
-        return null;
-    }
-  };
-
-const getPanelWidth = (panel: PanelKey) => {
-    if (panel === "demographics") return 460;
-    if (panel === "advanced") return 420;
-    if (panel === "time") return 320;
-    const triggerWidth = brandsButtonRef.current?.getBoundingClientRect().width ?? 260;
-    return Math.max(320, Math.min(420, triggerWidth));
-  };
-
-  const updatePanelPosition = (panel: PanelKey) => {
-    const button = getButtonByPanel(panel);
-    if (!button) return;
-    const rect = button.getBoundingClientRect();
-    const width = getPanelWidth(panel);
-    const viewportPadding = 16;
-    const panelHeight = panel === "demographics" ? 360 : 320;
-    const left = Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - width - viewportPadding));
-    const downTop = rect.bottom + 8;
-    const upTop = Math.max(viewportPadding, rect.top - panelHeight - 8);
-    const top =
-      downTop + panelHeight > window.innerHeight - viewportPadding
-        ? upTop
-        : downTop;
-    setPanelPos({ top, left, width });
-  };
-
-  const togglePanel = (panel: PanelKey) => {
-    if (openPanel === panel) {
-      closePanel();
-      return;
-    }
-    setOpenPanel(panel);
-    window.requestAnimationFrame(() => updatePanelPosition(panel));
-  };
-
   const closeBrandsPopover = () => {
     setBrandsOpen(false);
   };
@@ -135,43 +86,9 @@ const getPanelWidth = (panel: PanelKey) => {
   };
 
   useEffect(() => {
-    if (!openPanel) return;
-    updatePanelPosition(openPanel);
-    const handleResize = () => updatePanelPosition(openPanel);
-    window.addEventListener("resize", handleResize);
-    window.addEventListener("scroll", handleResize, true);
-    return () => {
-      window.removeEventListener("resize", handleResize);
-      window.removeEventListener("scroll", handleResize, true);
-    };
-  }, [openPanel]);
-
-  useEffect(() => {
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!openPanel) return;
-      const target = event.target as Node;
-      const inPanel = panelRef.current?.contains(target);
-      const inButton =
-        brandsButtonRef.current?.contains(target) ||
-        demographicsButtonRef.current?.contains(target) ||
-        timeButtonRef.current?.contains(target) ||
-        advancedButtonRef.current?.contains(target);
-      if (!inPanel && !inButton) closePanel();
-    };
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closePanel();
-    };
-    window.addEventListener("mousedown", handlePointerDown);
-    window.addEventListener("keydown", handleEscape);
-    return () => {
-      window.removeEventListener("mousedown", handlePointerDown);
-      window.removeEventListener("keydown", handleEscape);
-    };
-  }, [openPanel]);
-
-  useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        setAdvancedOpen(false);
         closeBrandsPopover();
         closeDemographicsPopover();
         closeTimePopover();
@@ -253,7 +170,7 @@ const getPanelWidth = (panel: PanelKey) => {
             onOpenChange={(nextOpen) => {
               setBrandsOpen(nextOpen);
               if (nextOpen) {
-                closePanel();
+                setAdvancedOpen(false);
                 closeDemographicsPopover();
                 closeTimePopover();
               }
@@ -329,7 +246,7 @@ const getPanelWidth = (panel: PanelKey) => {
             onOpenChange={(nextOpen) => {
               setDemographicsOpen(nextOpen);
               if (nextOpen) {
-                closePanel();
+                setAdvancedOpen(false);
                 closeBrandsPopover();
                 closeTimePopover();
               }
@@ -429,7 +346,7 @@ const getPanelWidth = (panel: PanelKey) => {
             onOpenChange={(nextOpen) => {
               setTimeOpen(nextOpen);
               if (nextOpen) {
-                closePanel();
+                setAdvancedOpen(false);
                 closeBrandsPopover();
                 closeDemographicsPopover();
               }
@@ -487,12 +404,13 @@ const getPanelWidth = (panel: PanelKey) => {
 
           <div className="ml-auto flex items-center gap-2">
             <button
-              ref={advancedButtonRef}
               type="button"
               className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm transition hover:bg-slate-50"
-              onClick={() => togglePanel("advanced")}
+              onClick={() => setAdvancedOpen(!advancedOpen)}
+              aria-expanded={advancedOpen}
+              aria-controls="scope-advanced-submenu"
             >
-              Advanced
+              Advanced {advancedOpen ? "^" : "v"}
             </button>
             <button
               type="button"
@@ -507,24 +425,21 @@ const getPanelWidth = (panel: PanelKey) => {
         {optionsLoading && <p className="mt-2 text-[11px] text-slate">Loading scope options...</p>}
         {brandsPrunedHint && <p className="mt-2 text-[11px] text-slate">{brandsPrunedHint}</p>}
 
-        {openPanel && panelPos && (
+        {advancedOpen && (
           <div
-            ref={panelRef}
-            className="fixed z-[80] rounded-2xl border border-ink/10 bg-white p-3 shadow-xl"
-            style={{ top: panelPos.top, left: panelPos.left, width: panelPos.width, maxHeight: 360, overflow: "auto" }}
+            id="scope-advanced-submenu"
+            className="mt-3 w-full rounded-2xl border border-ink/10 bg-white p-3 shadow-sm"
           >
-            {openPanel === "advanced" && (
-              <div className="grid gap-3 text-xs text-slate md:grid-cols-2">
-                <div>
-                  <p className="font-semibold text-ink">Advanced options</p>
-                  <p className="mt-1">Weighting profile and include/exclude controls will appear here.</p>
-                </div>
-                <div>
-                  <p className="font-semibold text-ink">Network controls</p>
-                  <p className="mt-1">Link threshold and scenario presets are reserved for upcoming sprints.</p>
-                </div>
+            <div className="grid gap-3 text-xs text-slate md:grid-cols-2">
+              <div className="md:col-span-2">
+                <p className="font-semibold text-ink">Network controls</p>
               </div>
-            )}
+              {pathname === "/demand-network" && (
+                <div className="md:col-span-2">
+                  <div id="dn-advanced-controls-slot" />
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>

@@ -54,7 +54,7 @@ type NetworkLink = {
 type NetworkCanvasProps = {
   nodes: NetworkNode[];
   links: NetworkLink[];
-  metricMode: "recall" | "consideration" | "purchase" | "both";
+  metricMode: "recall" | "consideration" | "purchase";
   clusterMode?: "off" | "category";
   onHoverNode?: (node: NetworkNode | null) => void;
   onHoverLink?: (link: HoveredLink | null) => void;
@@ -103,6 +103,12 @@ const getMetricLabel = (metric: string) => {
   }
 };
 
+const getPrimaryMetricLabel = (metric: "recall" | "consideration" | "purchase") => {
+  if (metric === "consideration") return "Consideration (given recall of touchpoint)";
+  if (metric === "purchase") return "Purchase";
+  return "Recall";
+};
+
 const PALETTE = ["#0ea5a4", "#14b8a6", "#06b6d4", "#0f766e", "#22c55e", "#22d3ee", "#38bdf8", "#34d399"];
 const HALO_PALETTE = ["#0f766e", "#0e7490", "#0f172a", "#1f2937", "#0f766e", "#155e75", "#1e293b", "#166534"];
 
@@ -140,6 +146,28 @@ const hexToRgba = (value: string, alpha: number) => {
 const sortByLabel = (a: NetworkNode, b: NetworkNode) => a.label.localeCompare(b.label);
 const getLinkId = (link: { source: string; target: string; type: string }) =>
   `${link.source}::${link.target}::${link.type}`;
+
+const weightedMetricFromLinks = (
+  links: AggregatedLink[],
+  metric: "recall" | "consideration" | "purchase"
+) => {
+  let weightedSum = 0;
+  let totalWeight = 0;
+  for (const link of links) {
+    if (link.type !== "primary_tp_brand") continue;
+    const value =
+      metric === "purchase"
+        ? link.w_purchase_raw
+        : metric === "consideration"
+          ? link.w_consideration_raw
+          : link.w_recall_raw;
+    if (typeof value !== "number") continue;
+    const w = typeof link.n_base === "number" && link.n_base > 0 ? link.n_base : 1;
+    weightedSum += value * w;
+    totalWeight += w;
+  }
+  return totalWeight > 0 ? weightedSum / totalWeight : null;
+};
 
 const buildTargetPositions = (
   nodes: NetworkNode[],
@@ -599,9 +627,7 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
           ? link.w_purchase_raw
           : metricMode === "consideration"
             ? link.w_consideration_raw
-            : metricMode === "both"
-              ? Math.max(link.w_consideration_raw ?? 0, link.w_purchase_raw ?? 0)
-              : link.w_recall_raw
+            : link.w_recall_raw
       )
     );
 
@@ -634,18 +660,18 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
             ? link.w_consideration_raw
             : link.w_recall_raw;
       const scaledPrimaryWidth = thicknessScale(metricRaw);
-      const baseWidth = secondary ? Math.max(0.34, scaledPrimaryWidth * 0.42) : scaledPrimaryWidth;
-      const baseOpacity = (secondary ? 0.025 : 0.28) + (weight || 0) * (secondary ? 0.15 : 0.52);
+      const baseWidth = secondary ? clamp(Math.max(0.28, scaledPrimaryWidth * 0.34), 0.7, 1.6) : scaledPrimaryWidth;
+      const baseOpacity = (secondary ? 0.2 : 0.28) + (weight || 0) * (secondary ? 0.2 : 0.52);
       let width = baseWidth;
       let opacity = baseOpacity;
 
       if (secondary) {
         if (!showSecondaryAlways && !secondaryConnectedToFocus) {
-          opacity = shouldDimWithSpotlight ? 0.015 : 0.03;
-          width = 0.28;
+          opacity = shouldDimWithSpotlight ? 0.06 : 0.14;
+          width = 0.7;
         } else if (secondaryConnectedToFocus) {
-          opacity = Math.min(0.54, baseOpacity + 0.22);
-          width = baseWidth + 0.8;
+          opacity = Math.min(0.62, baseOpacity + 0.18);
+          width = Math.min(2, baseWidth + 0.35);
         }
       }
 
@@ -660,8 +686,8 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
         width,
         opacity,
         color: secondary ? "rgba(15, 23, 42, 0.6)" : "#0f172a",
-        type: mode === "purchase" ? "dashed" : "solid",
-        dashOffset: mode === "purchase" ? 4 : 0,
+        type: secondary ? "dashed" : "solid",
+        dashOffset: 0,
       };
     };
 
@@ -677,6 +703,7 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
           lineStyle: {
             opacity: secondary ? 0.6 : 0.9,
             width: secondary ? 2.5 : 4.5,
+            type: secondary ? "dashed" : "solid",
           },
         },
       });
@@ -685,16 +712,7 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
     const primaryLinks = aggregatedLinks.filter((link) => !isSecondaryLink(link));
     const secondaryLinks = aggregatedLinks.filter((link) => isSecondaryLink(link));
 
-    if (metricMode === "both") {
-      for (const link of primaryLinks) {
-        if (link.w_consideration_norm != null) {
-          pushLink(link, "consideration");
-        }
-        if (link.w_purchase_norm != null) {
-          pushLink(link, "purchase");
-        }
-      }
-    } else if (metricMode === "purchase") {
+    if (metricMode === "purchase") {
       for (const link of primaryLinks) {
         if (link.w_purchase_norm != null) {
           pushLink(link, "purchase");
@@ -737,32 +755,53 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
             const recall = formatPct01(params.data.w_recall_raw);
             const consideration = formatPct01(params.data.w_consideration_raw);
             const purchase = formatPct01(params.data.w_purchase_raw);
+            const primaryMetricLabel = getPrimaryMetricLabel(metricMode);
+            const primaryMetricValue =
+              metricMode === "purchase"
+                ? purchase
+                : metricMode === "consideration"
+                  ? consideration
+                  : recall;
             const base = params.data.n_base ?? "--";
             const studies = params.data.countStudies ?? "--";
             if (params.data.type?.startsWith("secondary_")) {
               const metricLabel = params.data.type.includes("purchase")
-                ? "Purchase"
+                ? "Purchase layer: P(B | A)"
                 : params.data.type.includes("consideration")
-                  ? "Consideration"
-                  : "Recall";
+                  ? "Consideration layer: P(B | A)"
+                  : "Recall layer: P(Y | X)";
               const value =
-                metricLabel === "Purchase"
+                params.data.type.includes("purchase")
                   ? purchase
-                  : metricLabel === "Consideration"
+                  : params.data.type.includes("consideration")
                     ? consideration
                     : recall;
               const meta = params.data.colorMeta || {};
               const coCount = meta.co_count ?? "--";
               const baseA = meta.base_a ?? "--";
               const baseB = meta.base_b ?? "--";
-              return `${source} ↔ ${target}<br/>Co-${metricLabel}: ${value}<br/>Co-count: ${coCount}<br/>Base A: ${baseA} · Base B: ${baseB}<br/>Studies: ${studies}`;
+              return `${source} ↔ ${target}<br/>${metricLabel}: ${value}<br/>Co-count: ${coCount}<br/>Base A: ${baseA} · Base B: ${baseB}<br/>Studies: ${studies}`;
             }
-            return `${source} -> ${target}<br/>Recall: ${recall}<br/>Consideration: ${consideration}<br/>Purchase: ${purchase}<br/>Base N: ${base}<br/>Studies: ${studies}`;
+            const extraLines = [];
+            if (metricMode !== "recall") extraLines.push(`Recall: ${recall}`);
+            if (metricMode !== "consideration") extraLines.push(`Consideration: ${consideration}`);
+            if (metricMode !== "purchase") extraLines.push(`Purchase: ${purchase}`);
+            return `${source} -> ${target}<br/>${primaryMetricLabel}: ${primaryMetricValue}${
+              extraLines.length ? `<br/>${extraLines.join("<br/>")}` : ""
+            }<br/>Base N: ${base}<br/>Studies: ${studies}`;
           }
           const node: NetworkNode | undefined = nodeById.get(params.data.id);
           if (!node) return "";
           if (node.type === "brand") {
             const awareness = node.colorMeta?.kpi_awareness as number | undefined;
+            const weightedConsideration = weightedMetricFromLinks(
+              (connectionMap.get(node.id)?.incoming || []).filter((link) => link.type === "primary_tp_brand"),
+              "consideration"
+            );
+            const weightedPurchase = weightedMetricFromLinks(
+              (connectionMap.get(node.id)?.incoming || []).filter((link) => link.type === "primary_tp_brand"),
+              "purchase"
+            );
             const base = node.colorMeta?.base_n_awareness as number | undefined;
             const contextMixed = node.colorMeta?.context_mixed as boolean | undefined;
             const sources = node.context_sources || [];
@@ -778,7 +817,19 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
                 return `${label} (${formatPct01(link.w_consideration_raw)})`;
               })
               .join(", ");
-            return `${node.label}<br/>Awareness: ${formatPct100(awareness)}<br/>Base N: ${base ?? "--"}${
+            const primaryBrandMetricLabel =
+              metricMode === "consideration"
+                ? "Consideration (weighted)"
+                : metricMode === "purchase"
+                  ? "Purchase (weighted)"
+                  : "Awareness";
+            const primaryBrandMetricValue =
+              metricMode === "consideration"
+                ? formatPct01(weightedConsideration)
+                : metricMode === "purchase"
+                  ? formatPct01(weightedPurchase)
+                  : formatPct100(awareness);
+            return `${node.label}<br/>${primaryBrandMetricLabel}: ${primaryBrandMetricValue}<br/>Base N: ${base ?? "--"}${
               top ? `<br/><span style="opacity:.7">Top touchpoints: ${top}</span>` : ""
             }<br/>Sector: ${node.sector ?? "--"}<br/>Subsector: ${node.subsector ?? "--"}<br/>Category: ${
               node.category ?? "--"

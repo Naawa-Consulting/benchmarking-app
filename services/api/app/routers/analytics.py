@@ -28,6 +28,14 @@ SORTABLE_METRICS = {
 }
 
 TOUCHPOINT_STAGE_KEY = "touchpoints"
+TOUCHPOINT_STAGE_METRICS = {
+    "touchpoints": "recall",
+    "awareness": "recall",
+    "consideration": "consideration",
+    "brand_consideration": "consideration",
+    "purchase": "purchase",
+    "brand_purchase": "purchase",
+}
 
 
 def _discover_curated_studies(root: Path) -> list[str]:
@@ -543,13 +551,14 @@ def _compute_touchpoint_rows(study_id: str) -> list[dict]:
     query = f"""
         WITH base AS (
             SELECT
+                LOWER(stage) AS stage,
                 brand,
                 touchpoint,
                 respondent_id,
                 TRY_CAST(value AS INTEGER) AS v_int
             FROM touchpoints_table
             WHERE study_id = ?
-              AND LOWER(stage) = '{TOUCHPOINT_STAGE_KEY}'
+              AND LOWER(stage) IN ('touchpoints', 'awareness', 'consideration', 'brand_consideration', 'purchase', 'brand_purchase')
               AND touchpoint IS NOT NULL
               AND TRIM(CAST(touchpoint AS VARCHAR)) <> ''
               AND brand IS NOT NULL
@@ -557,39 +566,52 @@ def _compute_touchpoint_rows(study_id: str) -> list[dict]:
               AND TRY_CAST(value AS INTEGER) IS NOT NULL
         ),
         nums AS (
-            SELECT brand, touchpoint, COUNT(DISTINCT respondent_id) AS num
+            SELECT stage, brand, touchpoint, COUNT(DISTINCT respondent_id) AS num
             FROM base
             WHERE v_int = 1
-            GROUP BY brand, touchpoint
+            GROUP BY stage, brand, touchpoint
         ),
         denoms AS (
-            SELECT brand, touchpoint, COUNT(DISTINCT respondent_id) AS denom
+            SELECT stage, brand, touchpoint, COUNT(DISTINCT respondent_id) AS denom
             FROM base
-            GROUP BY brand, touchpoint
+            GROUP BY stage, brand, touchpoint
         )
         SELECT
+            d.stage,
             d.brand,
             d.touchpoint,
             n.num,
             d.denom
         FROM denoms d
         LEFT JOIN nums n
-            ON n.brand = d.brand AND n.touchpoint = d.touchpoint
+            ON n.stage = d.stage AND n.brand = d.brand AND n.touchpoint = d.touchpoint
     """
     rows = conn.execute(query, [study_id]).fetchall()
     if not rows:
         return []
 
-    result_rows = []
-    for brand, touchpoint, num, denom in rows:
-        recall = None
+    values_by_pair: dict[tuple[str, str], dict[str, float | None]] = {}
+    for stage, brand, touchpoint, num, denom in rows:
+        metric = TOUCHPOINT_STAGE_METRICS.get(str(stage).lower())
+        if not metric:
+            continue
+        key = (brand, touchpoint)
+        if key not in values_by_pair:
+            values_by_pair[key] = {"recall": None, "consideration": None, "purchase": None}
+        value = None
         if denom and denom > 0:
-            recall = round((float(num or 0) / denom) * 100, 1)
+            value = round((float(num or 0) / denom) * 100, 1)
+        values_by_pair[key][metric] = value
+
+    result_rows = []
+    for (brand, touchpoint), values in values_by_pair.items():
         result_rows.append(
             {
                 "brand": brand,
                 "touchpoint": touchpoint,
-                "recall": recall,
+                "recall": values.get("recall"),
+                "consideration": values.get("consideration"),
+                "purchase": values.get("purchase"),
             }
         )
     return result_rows
@@ -644,13 +666,14 @@ def _compute_touchpoint_rows_filtered(study_id: str, filters: dict) -> list[dict
         WITH {cte_prefix}
         base AS (
             SELECT
+                LOWER(stage) AS stage,
                 brand,
                 touchpoint,
                 respondent_id,
                 {value_expr} AS v_int
             FROM touchpoints_table
             WHERE study_id = ?
-              AND LOWER(stage) = '{TOUCHPOINT_STAGE_KEY}'
+              AND LOWER(stage) IN ('touchpoints', 'awareness', 'consideration', 'brand_consideration', 'purchase', 'brand_purchase')
               AND touchpoint IS NOT NULL
               AND TRIM(CAST(touchpoint AS VARCHAR)) <> ''
               AND brand IS NOT NULL
@@ -659,40 +682,53 @@ def _compute_touchpoint_rows_filtered(study_id: str, filters: dict) -> list[dict
               {respondent_filter}
         ),
         nums AS (
-            SELECT brand, touchpoint, COUNT(DISTINCT respondent_id) AS num
+            SELECT stage, brand, touchpoint, COUNT(DISTINCT respondent_id) AS num
             FROM base
             WHERE v_int = 1
-            GROUP BY brand, touchpoint
+            GROUP BY stage, brand, touchpoint
         ),
         denoms AS (
-            SELECT brand, touchpoint, COUNT(DISTINCT respondent_id) AS denom
+            SELECT stage, brand, touchpoint, COUNT(DISTINCT respondent_id) AS denom
             FROM base
-            GROUP BY brand, touchpoint
+            GROUP BY stage, brand, touchpoint
         )
         SELECT
+            d.stage,
             d.brand,
             d.touchpoint,
             n.num,
             d.denom
         FROM denoms d
         LEFT JOIN nums n
-            ON n.brand = d.brand AND n.touchpoint = d.touchpoint
+            ON n.stage = d.stage AND n.brand = d.brand AND n.touchpoint = d.touchpoint
     """
     params = [*respondent_params, study_id]
     rows = conn.execute(query, params).fetchall()
     if not rows:
         return []
 
-    result_rows = []
-    for brand, touchpoint, num, denom in rows:
-        recall = None
+    values_by_pair: dict[tuple[str, str], dict[str, float | None]] = {}
+    for stage, brand, touchpoint, num, denom in rows:
+        metric = TOUCHPOINT_STAGE_METRICS.get(str(stage).lower())
+        if not metric:
+            continue
+        key = (brand, touchpoint)
+        if key not in values_by_pair:
+            values_by_pair[key] = {"recall": None, "consideration": None, "purchase": None}
+        value = None
         if denom and denom > 0:
-            recall = round((float(num or 0) / denom) * 100, 1)
+            value = round((float(num or 0) / denom) * 100, 1)
+        values_by_pair[key][metric] = value
+
+    result_rows = []
+    for (brand, touchpoint), values in values_by_pair.items():
         result_rows.append(
             {
                 "brand": brand,
                 "touchpoint": touchpoint,
-                "recall": recall,
+                "recall": values.get("recall"),
+                "consideration": values.get("consideration"),
+                "purchase": values.get("purchase"),
             }
         )
     return result_rows
@@ -905,7 +941,8 @@ def _touchpoints_table_multi_filtered(
             )
 
     reverse = sort_dir.lower() != "asc"
-    rows.sort(key=lambda row: row.get("recall") or -1, reverse=reverse)
+    metric_sort_key = sort_by if sort_by in {"recall", "consideration", "purchase"} else "recall"
+    rows.sort(key=lambda row: row.get(metric_sort_key) or -1, reverse=reverse)
 
     limit_mode = limit_mode.lower()
     if limit_mode == "top10":

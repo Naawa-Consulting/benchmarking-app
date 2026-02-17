@@ -7,9 +7,6 @@ export const getMetricValue = (
 ) => {
   if (metric === "purchase") return link.w_purchase_raw ?? 0;
   if (metric === "consideration") return link.w_consideration_raw ?? 0;
-  if (metric === "both") {
-    return Math.max(link.w_recall_raw ?? 0, link.w_consideration_raw ?? 0, link.w_purchase_raw ?? 0);
-  }
   return link.w_recall_raw ?? 0;
 };
 

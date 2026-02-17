@@ -7,9 +7,7 @@ import type { HoveredLink } from "../../NetworkCanvas";
 import { buildAggregatedLinks, getLinkId, getMetricValue } from "./helpers";
 import type { DNViewCommonProps } from "./types";
 
-type MatrixViewProps = DNViewCommonProps & {
-  topColumns?: number;
-};
+type MatrixViewProps = DNViewCommonProps;
 
 export default function MatrixView({
   nodes,
@@ -22,7 +20,6 @@ export default function MatrixView({
   onHoverLink,
   onHoverNode,
   onSelectNode,
-  topColumns = 50,
 }: MatrixViewProps) {
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const aggregated = useMemo(() => buildAggregatedLinks(links), [links]);
@@ -45,9 +42,8 @@ export default function MatrixView({
     return nodes
       .filter((node) => node.type === "touchpoint")
       .slice()
-      .sort((a, b) => (totalByTp.get(b.id) || 0) - (totalByTp.get(a.id) || 0))
-      .slice(0, topColumns);
-  }, [aggregated, metricMode, nodes, topColumns]);
+      .sort((a, b) => (totalByTp.get(b.id) || 0) - (totalByTp.get(a.id) || 0));
+  }, [aggregated, metricMode, nodes]);
 
   const brandIndex = useMemo(() => new Map(brands.map((node, idx) => [node.id, idx])), [brands]);
   const tpIndex = useMemo(() => new Map(touchpoints.map((node, idx) => [node.id, idx])), [touchpoints]);
