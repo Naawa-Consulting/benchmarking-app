@@ -8,9 +8,12 @@ import {
   type JourneyBrandGap,
   type JourneyCoverageSummary,
   type JourneyGapByStage,
+  type JourneyIndexConfidence,
+  type JourneyIndexEntry,
   type JourneyLinkAggregate,
   type JourneyMetricValue,
   type JourneyModel,
+  type FunnelHealthEntry,
   type JourneyStage,
   type JourneyStageAggregate,
   type JourneyStageRank,
@@ -24,6 +27,9 @@ const OFFICIAL_CSAT_FIELDS = ["csat_score", "satisfaction_score", "csat"];
 const OFFICIAL_PROMOTERS_FIELDS = ["promoters_pct", "nps_promoters_pct"];
 const OFFICIAL_DETRACTORS_FIELDS = ["detractors_pct", "nps_detractors_pct"];
 const OFFICIAL_NPS_FIELDS = ["nps", "nps_score"];
+const JOURNEY_INDEX_WEIGHTS = { retention: 0.5, gap: 0.3, nps: 0.2 } as const;
+const GAP_CLAMP = 0.15;
+const FUNNEL_HEALTH_THRESHOLDS = { healthy: 10, moderate: 20 } as const;
 
 const stageKey = (stage: JourneyStage) => stage;
 const pairKey = (from: JourneyStage, to: JourneyStage) => `${from} -> ${to}`;
@@ -310,6 +316,140 @@ const coverageSummary = (
   };
 };
 
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const confidenceFromCoverage = (
+  validStages: number,
+  validLinks: number,
+  stageCount: number,
+  studiesCovered: number
+): JourneyIndexConfidence => {
+  if (validStages >= Math.min(4, stageCount) && validLinks >= 3 && studiesCovered >= 4) return "high";
+  if (validStages >= Math.min(3, stageCount) && validLinks >= 2 && studiesCovered >= 2) return "med";
+  return "low";
+};
+
+export function computeRetentionScore(brand: JourneyBrandAggregate): {
+  value100: number | null;
+  validLinks: number;
+  studiesCovered: number;
+} {
+  const points = brand.links
+    .filter((link) => typeof link.conversion === "number")
+    .map((link) => ({ value: link.conversion as number, weight: Math.max(1, link.linkCoverageWeight) }));
+  const score = weightedAverage(points);
+  const validLinks = points.length;
+  const studiesCovered = brand.links.reduce((max, link) => Math.max(max, link.linkCoverageStudies), 0);
+  return { value100: score == null ? null : clamp(score, 0, 1) * 100, validLinks, studiesCovered };
+}
+
+export function computeGapScore(
+  brand: JourneyBrandAggregate,
+  benchmark: JourneyBenchmarkAggregate,
+  clampRange = GAP_CLAMP
+): { value100: number | null; validStages: number } {
+  const benchmarkByStage = new Map(benchmark.stageAggregates.map((item) => [item.stage, item.value]));
+  const points: Array<{ value: number; weight: number }> = [];
+  for (const stage of brand.stageAggregates) {
+    const bench = benchmarkByStage.get(stage.stage);
+    if (typeof stage.value !== "number" || typeof bench !== "number") continue;
+    const normalized = clamp((stage.value - bench) / clampRange, -1, 1);
+    points.push({ value: normalized, weight: Math.max(1, stage.stageCoverageWeight) });
+  }
+  const gap = weightedAverage(points);
+  return { value100: gap == null ? null : ((gap + 1) / 2) * 100, validStages: points.length };
+}
+
+export function computeNpsScore(brand: JourneyBrandAggregate): number | null {
+  const nps = brand.nps.value;
+  if (typeof nps !== "number") return null;
+  if (brand.nps.meta.metricType === "official") {
+    return clamp(((nps * 100 + 100) / 2), 0, 100);
+  }
+  return clamp(nps * 100, 0, 100);
+}
+
+export function computeJourneyIndex(components: {
+  retentionScore100: number | null;
+  gapScore100: number | null;
+  npsScore100: number | null;
+}): { value: number | null; weightsApplied: { retention: number; gap: number; nps: number }; partial: boolean } {
+  const entries = [
+    { key: "retention" as const, value: components.retentionScore100, weight: JOURNEY_INDEX_WEIGHTS.retention },
+    { key: "gap" as const, value: components.gapScore100, weight: JOURNEY_INDEX_WEIGHTS.gap },
+    { key: "nps" as const, value: components.npsScore100, weight: JOURNEY_INDEX_WEIGHTS.nps },
+  ].filter((item) => typeof item.value === "number");
+
+  if (!entries.length) {
+    return {
+      value: null,
+      weightsApplied: { retention: 0, gap: 0, nps: 0 },
+      partial: true,
+    };
+  }
+
+  const weightTotal = entries.reduce((sum, item) => sum + item.weight, 0);
+  const normalized = entries.map((item) => ({ ...item, weight: item.weight / weightTotal }));
+  const indexValue = normalized.reduce((sum, item) => sum + (item.value as number) * item.weight, 0);
+  return {
+    value: clamp(indexValue, 0, 100),
+    weightsApplied: {
+      retention: normalized.find((item) => item.key === "retention")?.weight || 0,
+      gap: normalized.find((item) => item.key === "gap")?.weight || 0,
+      nps: normalized.find((item) => item.key === "nps")?.weight || 0,
+    },
+    partial: entries.length < 3,
+  };
+}
+
+export function computeFunnelHealth(
+  brand: JourneyBrandAggregate,
+  benchmark: JourneyBenchmarkAggregate
+): FunnelHealthEntry {
+  const benchmarkLinkMap = new Map(
+    benchmark.links.map((item) => [`${item.fromStage}->${item.toStage}`, item.dropAbs])
+  );
+  const validDrops = brand.links
+    .filter((link) => typeof link.dropAbs === "number")
+    .map((link) => ({ ...link, dropPts: (link.dropAbs as number) * 100 }));
+
+  if (!validDrops.length) {
+    return {
+      status: "unknown",
+      maxDropPts: null,
+      link: null,
+      benchMaxDropPts: null,
+      confidence: "low",
+      studiesCovered: 0,
+    };
+  }
+
+  const maxDrop = validDrops.reduce((worst, current) => (current.dropPts > worst.dropPts ? current : worst), validDrops[0]);
+  const benchDrop = benchmarkLinkMap.get(`${maxDrop.fromStage}->${maxDrop.toStage}`);
+  const benchMaxDropPts = typeof benchDrop === "number" ? benchDrop * 100 : null;
+
+  let status: FunnelHealthEntry["status"] = "healthy";
+  if (maxDrop.dropPts >= FUNNEL_HEALTH_THRESHOLDS.moderate) status = "critical";
+  else if (maxDrop.dropPts >= FUNNEL_HEALTH_THRESHOLDS.healthy) status = "moderate";
+
+  const validStages = brand.stageAggregates.filter((stage) => typeof stage.value === "number").length;
+  const confidence = confidenceFromCoverage(
+    validStages,
+    validDrops.length,
+    brand.stageAggregates.length,
+    maxDrop.linkCoverageStudies
+  );
+
+  return {
+    status,
+    maxDropPts: maxDrop.dropPts,
+    link: { fromStage: maxDrop.fromStage, toStage: maxDrop.toStage },
+    benchMaxDropPts,
+    confidence,
+    studiesCovered: maxDrop.linkCoverageStudies,
+  };
+}
+
 export function buildJourneyModel(
   rawJourneyResults: unknown,
   _filters: Record<string, unknown> | null,
@@ -369,6 +509,110 @@ export function buildJourneyModel(
 
   const links = benchmarkStageAggregates.links;
   const coverage = coverageSummary(brandStageAggregates, stagesOrdered);
+  const journeyIndexByBrand: Record<string, JourneyIndexEntry> = {};
+  const funnelHealthByBrand: Record<string, FunnelHealthEntry> = {};
+
+  const benchmarkRetention = {
+    value100: weightedAverage(
+      benchmarkStageAggregates.links
+        .filter((link) => typeof link.conversion === "number")
+        .map((link) => ({ value: link.conversion as number, weight: Math.max(1, link.linkCoverageWeight) }))
+    ),
+  };
+  const benchmarkGap = { value100: 50 };
+  const benchmarkNps = (() => {
+    const value = benchmarkStageAggregates.nps.value;
+    if (typeof value !== "number") return null;
+    if (benchmarkStageAggregates.nps.meta.metricType === "official") return clamp(((value * 100 + 100) / 2), 0, 100);
+    return clamp(value * 100, 0, 100);
+  })();
+  const benchmarkIndexComputation = computeJourneyIndex({
+    retentionScore100: benchmarkRetention.value100 == null ? null : clamp(benchmarkRetention.value100, 0, 1) * 100,
+    gapScore100: benchmarkGap.value100,
+    npsScore100: benchmarkNps,
+  });
+  const benchmarkFunnelHealth = computeFunnelHealth(
+    {
+      key: "__benchmark__",
+      brandName: "Benchmark",
+      stageAggregates: benchmarkStageAggregates.stageAggregates,
+      links: benchmarkStageAggregates.links,
+      totalConversion: null,
+      dims: {},
+      csat: benchmarkStageAggregates.csat,
+      nps: benchmarkStageAggregates.nps,
+    },
+    benchmarkStageAggregates
+  );
+
+  for (const brand of brandStageAggregates) {
+    const retention = computeRetentionScore(brand);
+    const gap = computeGapScore(brand, benchmarkStageAggregates);
+    const npsScore = computeNpsScore(brand);
+    const index = computeJourneyIndex({
+      retentionScore100: retention.value100,
+      gapScore100: gap.value100,
+      npsScore100: npsScore,
+    });
+    const validStages = brand.stageAggregates.filter((stage) => typeof stage.value === "number").length;
+    const confidence = confidenceFromCoverage(
+      validStages,
+      retention.validLinks,
+      stagesOrdered.length,
+      retention.studiesCovered
+    );
+    const deltaVsBenchmark =
+      typeof index.value === "number" && typeof benchmarkIndexComputation.value === "number"
+        ? index.value - benchmarkIndexComputation.value
+        : null;
+    journeyIndexByBrand[brand.key] = {
+      value: index.value == null ? null : Number(index.value.toFixed(1)),
+      rank: null,
+      deltaVsBenchmark: deltaVsBenchmark == null ? null : Number(deltaVsBenchmark.toFixed(1)),
+      confidence,
+      validStages,
+      validLinks: retention.validLinks,
+      studiesCovered: retention.studiesCovered,
+      components: {
+        retentionScore100: retention.value100 == null ? null : Number(retention.value100.toFixed(1)),
+        gapScore100: gap.value100 == null ? null : Number(gap.value100.toFixed(1)),
+        npsScore100: npsScore == null ? null : Number(npsScore.toFixed(1)),
+        weightsApplied: index.weightsApplied,
+        partial: index.partial,
+      },
+    };
+    funnelHealthByBrand[brand.key] = computeFunnelHealth(brand, benchmarkStageAggregates);
+  }
+
+  const rankedJourneyIndex = Object.entries(journeyIndexByBrand)
+    .filter(([, entry]) => typeof entry.value === "number")
+    .sort((a, b) => (b[1].value as number) - (a[1].value as number));
+  rankedJourneyIndex.forEach(([key], index) => {
+    journeyIndexByBrand[key].rank = index + 1;
+  });
+
+  const benchmarkJourneyIndex: JourneyIndexEntry = {
+    value: benchmarkIndexComputation.value == null ? null : Number(benchmarkIndexComputation.value.toFixed(1)),
+    rank: 1,
+    deltaVsBenchmark: 0,
+    confidence: confidenceFromCoverage(
+      benchmarkStageAggregates.stageAggregates.filter((stage) => typeof stage.value === "number").length,
+      benchmarkStageAggregates.links.filter((link) => typeof link.conversion === "number").length,
+      stagesOrdered.length,
+      Math.max(...benchmarkStageAggregates.links.map((link) => link.linkCoverageStudies), 0)
+    ),
+    validStages: benchmarkStageAggregates.stageAggregates.filter((stage) => typeof stage.value === "number").length,
+    validLinks: benchmarkStageAggregates.links.filter((link) => typeof link.conversion === "number").length,
+    studiesCovered: Math.max(...benchmarkStageAggregates.links.map((link) => link.linkCoverageStudies), 0),
+    components: {
+      retentionScore100:
+        benchmarkRetention.value100 == null ? null : Number((clamp(benchmarkRetention.value100, 0, 1) * 100).toFixed(1)),
+      gapScore100: benchmarkGap.value100,
+      npsScore100: benchmarkNps == null ? null : Number(benchmarkNps.toFixed(1)),
+      weightsApplied: benchmarkIndexComputation.weightsApplied,
+      partial: benchmarkIndexComputation.partial,
+    },
+  };
 
   for (const stage of stagesOrdered) {
     const coverageEntry = coverage.byStage.find((item) => item.stage === stage);
@@ -386,6 +630,10 @@ export function buildJourneyModel(
     stageGaps,
     links,
     ranksByStage,
+    journeyIndexByBrand,
+    benchmarkJourneyIndex,
+    funnelHealthByBrand,
+    benchmarkFunnelHealth,
     metadata: {
       includeAdAwareness: merged.includeAdAwareness,
       warnings,
@@ -393,4 +641,3 @@ export function buildJourneyModel(
     },
   };
 }
-

@@ -48,6 +48,7 @@ import {
   StudyVariable,
   TaxonomyItem,
 } from "../../lib/types";
+import JourneyDataValidationTables from "../../features/journey/components/JourneyDataValidationTables";
 
 type ActionState = "idle" | "loading" | "success" | "error";
 
@@ -2781,6 +2782,8 @@ export default function RulesStudioPage() {
               </div>
             </div>
           )}
+
+          <JourneyDataValidationTables />
 
           <div className="main-surface rounded-3xl p-6 space-y-3">
             <div className="flex items-center justify-between">

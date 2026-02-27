@@ -116,6 +116,42 @@ export type JourneyModelMetadata = {
   coverage: JourneyCoverageSummary;
 };
 
+export type JourneyIndexConfidence = "high" | "med" | "low";
+
+export type JourneyIndexComponents = {
+  retentionScore100: number | null;
+  gapScore100: number | null;
+  npsScore100: number | null;
+  weightsApplied: {
+    retention: number;
+    gap: number;
+    nps: number;
+  };
+  partial: boolean;
+};
+
+export type JourneyIndexEntry = {
+  value: number | null;
+  rank: number | null;
+  deltaVsBenchmark: number | null;
+  confidence: JourneyIndexConfidence;
+  validStages: number;
+  validLinks: number;
+  studiesCovered: number;
+  components: JourneyIndexComponents;
+};
+
+export type FunnelHealthStatus = "healthy" | "moderate" | "critical" | "unknown";
+
+export type FunnelHealthEntry = {
+  status: FunnelHealthStatus;
+  maxDropPts: number | null;
+  link: { fromStage: JourneyStage; toStage: JourneyStage } | null;
+  benchMaxDropPts: number | null;
+  confidence: JourneyIndexConfidence;
+  studiesCovered: number;
+};
+
 export type JourneyModel = {
   stagesOrdered: JourneyStage[];
   rows: JourneyStageRow[];
@@ -124,6 +160,10 @@ export type JourneyModel = {
   stageGaps: JourneyBrandGap[];
   links: JourneyLinkAggregate[];
   ranksByStage: Record<JourneyStage, JourneyStageRank[]>;
+  journeyIndexByBrand: Record<string, JourneyIndexEntry>;
+  benchmarkJourneyIndex: JourneyIndexEntry;
+  funnelHealthByBrand: Record<string, FunnelHealthEntry>;
+  benchmarkFunnelHealth: FunnelHealthEntry;
   metadata: JourneyModelMetadata;
 };
 
@@ -161,4 +201,3 @@ export const STAGE_ALIAS_TO_CANONICAL: Record<string, JourneyStage> = {
   brandrecommendation: "Brand Recommendation",
   recommendation: "Brand Recommendation",
 };
-

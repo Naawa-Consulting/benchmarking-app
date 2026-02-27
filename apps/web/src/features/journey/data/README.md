@@ -72,3 +72,17 @@
 - Performance:
   - memoized model, heatmap, and insights slices
   - non-critical insights update via `useTransition`
+
+## Journey Index + Funnel Health (Sprint 5)
+- `Journey Strength Index` (0..100) is derived per brand from available components:
+  - retention score (avg valid adjacent conversions)
+  - gap score vs benchmark (clamped stage deltas)
+  - NPS normalized score
+- Default weights: `retention 0.50`, `gap 0.30`, `nps 0.20`.
+- Missing components are reweighted (no zero-imputation); index is marked partial through confidence metadata.
+- `Funnel Health` uses the largest valid adjacent drop-off in percentage points:
+  - `Healthy`: `< 10 pts`
+  - `Moderate`: `10..20 pts`
+  - `Critical`: `> 20 pts`
+  - `Unknown`: no valid links
+- Missing stages are ignored safely; health/index only use valid stages/links with coverage.

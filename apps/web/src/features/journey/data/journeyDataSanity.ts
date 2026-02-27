@@ -88,5 +88,17 @@ export function runJourneyDataSanityChecks() {
   }
   const secondBrand = model.brandStageAggregates.find((item) => item.brandName === "Brand B");
   assert(secondBrand?.nps.meta.metricType === "official", "NPS should be official when promoters/detractors are present.");
+  const firstIndex = firstBrand ? model.journeyIndexByBrand[firstBrand.key] : null;
+  assert(Boolean(firstIndex), "Journey index should be computed for each brand aggregate.");
+  if (firstIndex) {
+    assert(
+      firstIndex.value == null || (firstIndex.value >= 0 && firstIndex.value <= 100),
+      "Journey index should remain in 0..100 range."
+    );
+  }
+  const firstHealth = firstBrand ? model.funnelHealthByBrand[firstBrand.key] : null;
+  assert(Boolean(firstHealth), "Funnel health should exist for each brand aggregate.");
+  if (firstHealth && firstHealth.maxDropPts != null) {
+    assert(firstHealth.maxDropPts >= 0, "Funnel health max drop should be non-negative in points.");
+  }
 }
-

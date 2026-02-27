@@ -30,7 +30,7 @@ export default function TimeScrubber({
   const activeIndex = selectedBucket ? timeBuckets.indexOf(selectedBucket) : -1;
 
   return (
-    <section className="main-surface p-4">
+    <div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <button
           type="button"
@@ -98,7 +98,6 @@ export default function TimeScrubber({
           />
         </div>
       )}
-    </section>
+    </div>
   );
 }
-

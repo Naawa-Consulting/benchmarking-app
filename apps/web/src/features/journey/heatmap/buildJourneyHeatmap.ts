@@ -17,7 +17,7 @@ export type HeatmapColumn =
       clamp: number;
     }
   | {
-      key: "csat" | "nps";
+      key: "csat" | "nps" | "journey_index";
       label: string;
       group: "metric";
       clamp: number;
@@ -51,6 +51,15 @@ const stageVal = (brand: JourneyBrandAggregate, stage: JourneyStage) =>
 const convVal = (brand: JourneyBrandAggregate, fromStage: JourneyStage, toStage: JourneyStage) =>
   brand.links.find((item) => item.fromStage === fromStage && item.toStage === toStage) ?? null;
 
+const stageLabel = (stage: JourneyStage) => {
+  if (stage === "Brand Awareness") return "Brand Awareness";
+  if (stage === "Ad Awareness") return "Ad Awareness";
+  if (stage === "Brand Consideration") return "Brand Consideration";
+  if (stage === "Brand Purchase") return "Brand Purchase";
+  if (stage === "Brand Satisfaction") return "Brand Satisfaction";
+  return "Brand Recommendation";
+};
+
 export function buildJourneyHeatmap(
   model: JourneyModel,
   selectedBrands: string[],
@@ -72,12 +81,7 @@ export function buildJourneyHeatmap(
   for (const stage of model.stagesOrdered) {
     columns.push({
       key: `stage:${stage}`,
-      label: stage
-        .replace("Brand ", "")
-        .replace("Ad Awareness", "Ad Awr")
-        .replace("Consideration", "Consid")
-        .replace("Satisfaction", "Sat")
-        .replace("Recommendation", "Rec"),
+      label: stageLabel(stage),
       group: "stage",
       stage,
       clamp: 0.15,
@@ -88,7 +92,7 @@ export function buildJourneyHeatmap(
     const toStage = model.stagesOrdered[i + 1];
     columns.push({
       key: `conv:${fromStage}->${toStage}`,
-      label: `${fromStage.replace("Brand ", "").replace("Ad Awareness", "Ad")}->${toStage.replace("Brand ", "").replace("Ad Awareness", "Ad")}`,
+      label: `${stageLabel(fromStage)} -> ${stageLabel(toStage)}`,
       group: "conversion",
       fromStage,
       toStage,
@@ -97,6 +101,7 @@ export function buildJourneyHeatmap(
   }
   columns.push({ key: "csat", label: "CSAT", group: "metric", clamp: 0.15 });
   columns.push({ key: "nps", label: "NPS", group: "metric", clamp: 0.15 });
+  columns.push({ key: "journey_index", label: "Journey Index", group: "metric", clamp: 20 });
 
   const benchmarkStageMap = new Map(
     model.benchmarkStageAggregates.stageAggregates.map((item) => [item.stage, item])
@@ -131,7 +136,18 @@ export function buildJourneyHeatmap(
       };
       continue;
     }
-    if (col.key === "csat") {
+    if (col.key === "journey_index") {
+      benchmarkCells[col.key] = {
+        value:
+          typeof model.benchmarkJourneyIndex.value === "number" ? model.benchmarkJourneyIndex.value / 100 : null,
+        benchmarkValue:
+          typeof model.benchmarkJourneyIndex.value === "number" ? model.benchmarkJourneyIndex.value / 100 : null,
+        delta: 0,
+        coverageStudies: model.benchmarkJourneyIndex.studiesCovered,
+        totalStudies,
+        missing: model.benchmarkJourneyIndex.value == null,
+      };
+    } else if (col.key === "csat") {
       benchmarkCells[col.key] = {
         value: model.benchmarkStageAggregates.csat.value,
         benchmarkValue: model.benchmarkStageAggregates.csat.value,
@@ -194,7 +210,20 @@ export function buildJourneyHeatmap(
         };
         continue;
       }
-      if (col.key === "csat") {
+      if (col.key === "journey_index") {
+        const indexEntry = model.journeyIndexByBrand[brand.key];
+        const benchmarkIndex = model.benchmarkJourneyIndex.value;
+        const value = typeof indexEntry?.value === "number" ? indexEntry.value / 100 : null;
+        const benchValue = typeof benchmarkIndex === "number" ? benchmarkIndex / 100 : null;
+        cells[col.key] = {
+          value,
+          benchmarkValue: benchValue,
+          delta: typeof value === "number" && typeof benchValue === "number" ? value - benchValue : null,
+          coverageStudies: indexEntry?.studiesCovered ?? 0,
+          totalStudies,
+          missing: value == null,
+        };
+      } else if (col.key === "csat") {
         const value = brand.csat.value;
         const benchValue = model.benchmarkStageAggregates.csat.value;
         cells[col.key] = {
@@ -232,4 +261,3 @@ export function buildJourneyHeatmap(
     meta: { includeAdAwareness: model.metadata.includeAdAwareness },
   };
 }
-

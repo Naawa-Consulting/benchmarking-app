@@ -75,7 +75,7 @@ export function generateJourneyInsights(
       severity: "warning",
       relatedLink: { fromStage: link.fromStage, toStage: link.toStage },
       coverage: { level: cov, studies: link.linkCoverageStudies, totalStudies },
-      stats: { drop: link.dropAbs, benchmarkDrop: benchDrop },
+      stats: { brand: focusBrand.brandName, drop: link.dropAbs, benchmarkDrop: benchDrop },
       score,
     });
   }
@@ -94,7 +94,7 @@ export function generateJourneyInsights(
       severity: delta >= 0 ? "positive" : "warning",
       relatedStage: stage.stage,
       coverage: { level: cov, studies: stage.stageCoverageStudies, totalStudies },
-      stats: { delta, stageValue: stage.value, benchmarkValue: bench },
+      stats: { brand: focusBrand.brandName, delta, stageValue: stage.value, benchmarkValue: bench },
       score,
     });
   }
@@ -113,7 +113,7 @@ export function generateJourneyInsights(
       severity: delta >= 0 ? "positive" : "warning",
       relatedLink: { fromStage: link.fromStage, toStage: link.toStage },
       coverage: { level: cov, studies: link.linkCoverageStudies, totalStudies },
-      stats: { conversion: link.conversion, benchmarkConversion: bench, delta },
+      stats: { brand: focusBrand.brandName, conversion: link.conversion, benchmarkConversion: bench, delta },
       score,
     });
   }
@@ -155,7 +155,7 @@ export function generateJourneyInsights(
         severity: "info",
         relatedStage: bestDiff.stage,
         coverage: { level: cov, studies: bestDiff.studies, totalStudies },
-        stats: { diff: bestDiff.diff },
+        stats: { brandA: bestDiff.brandA, brandB: bestDiff.brandB, diff: bestDiff.diff },
         score: bestDiff.diff * coverageWeight(cov),
       });
     }
@@ -181,7 +181,7 @@ export function generateJourneyInsights(
           focusBrand.stageAggregates.find((item) => item.stage === "Brand Satisfaction")?.stageCoverageStudies || 0,
         totalStudies,
       },
-      stats: { csat: focusBrand.csat.value, benchmark: csatBench, type: focusBrand.csat.meta.metricType },
+      stats: { brand: focusBrand.brandName, csat: focusBrand.csat.value, benchmark: csatBench, type: focusBrand.csat.meta.metricType },
       score: Math.abs(csatDelta ?? focusBrand.csat.value) * coverageWeight(cov),
     });
   }
@@ -203,7 +203,7 @@ export function generateJourneyInsights(
           focusBrand.stageAggregates.find((item) => item.stage === "Brand Recommendation")?.stageCoverageStudies || 0,
         totalStudies,
       },
-      stats: { nps: focusBrand.nps.value, benchmark: npsBench, type: focusBrand.nps.meta.metricType },
+      stats: { brand: focusBrand.brandName, nps: focusBrand.nps.value, benchmark: npsBench, type: focusBrand.nps.meta.metricType },
       score: Math.abs(npsDelta ?? focusBrand.nps.value) * coverageWeight(cov),
     });
   }
@@ -229,7 +229,7 @@ export function generateJourneyInsights(
           severity: diff >= 0 ? "positive" : "warning",
           relatedStage: stage,
           coverage: { level: cov, studies: coverageStudies, totalStudies },
-          stats: { diff },
+          stats: { brand: focus.brandName, compareBrand: compare.brandName, diff },
           score: Math.abs(diff) * coverageWeight(cov),
         });
       }

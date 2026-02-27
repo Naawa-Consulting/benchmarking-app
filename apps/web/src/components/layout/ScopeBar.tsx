@@ -432,11 +432,16 @@ export default function ScopeBar() {
           >
             <div className="grid gap-3 text-xs text-slate md:grid-cols-2">
               <div className="md:col-span-2">
-                <p className="font-semibold text-ink">Network controls</p>
+                <p className="font-semibold text-ink">{pathname === "/journey" ? "Journey controls" : "Network controls"}</p>
               </div>
               {pathname === "/demand-network" && (
                 <div className="md:col-span-2">
                   <div id="dn-advanced-controls-slot" />
+                </div>
+              )}
+              {pathname === "/journey" && (
+                <div className="md:col-span-2">
+                  <div id="journey-advanced-controls-slot" />
                 </div>
               )}
             </div>

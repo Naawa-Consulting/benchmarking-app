@@ -19,7 +19,7 @@ export default function FocusBar({
 }: FocusBarProps) {
   const compareOptions = availableBrands.filter((brand) => brand !== focusBrand);
   return (
-    <section className="main-surface p-4">
+    <div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className="text-slate">Focus mode</span>
         <select
@@ -58,7 +58,6 @@ export default function FocusBar({
           </>
         )}
       </div>
-    </section>
+    </div>
   );
 }
-
