@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   getFilterDateOptionsDetailed,
@@ -81,6 +81,7 @@ type ScopeContextValue = {
   dateOptions: DateOptions;
   optionsLoading: boolean;
   brands: string[];
+  setTrackingBrandOptions: (brands: string[] | null) => void;
 };
 
 const ScopeContext = createContext<ScopeContextValue | null>(null);
@@ -175,6 +176,7 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
   const [dateOptions, setDateOptions] = useState<DateOptions>({ quarters: [] });
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [brands, setBrands] = useState<string[]>([]);
+  const [trackingBrandOptions, setTrackingBrandOptionsState] = useState<string[] | null>(null);
 
   const selectedStudyIdsOrNull = useMemo<string[] | null>(() => {
     return scope.studyIds.length > 0 ? scope.studyIds : null;
@@ -303,21 +305,48 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
     }
   }, [scope, router, pathname, searchParams]);
 
-  const setScope = (partial: Partial<ScopeState>) => {
+  const setScope = useCallback((partial: Partial<ScopeState>) => {
     setScopeState((prev) => {
-      const merged = { ...prev, ...partial };
-      if (Object.prototype.hasOwnProperty.call(partial, "sector")) {
-        merged.subsector = null;
-        merged.category = null;
-      }
-      if (Object.prototype.hasOwnProperty.call(partial, "subsector")) {
-        merged.category = null;
-      }
-      return merged;
-    });
-  };
+      const merged: ScopeState = { ...prev, ...partial };
 
-  const resetScope = () => setScopeState(DEFAULT_SCOPE);
+      const hasSector = Object.prototype.hasOwnProperty.call(partial, "sector");
+      const hasSubsector = Object.prototype.hasOwnProperty.call(partial, "subsector");
+      const hasCategory = Object.prototype.hasOwnProperty.call(partial, "category");
+
+      if (hasSector && partial.sector !== prev.sector) {
+        if (!hasSubsector) merged.subsector = null;
+        if (!hasCategory) merged.category = null;
+      }
+      if (hasSubsector && partial.subsector !== prev.subsector) {
+        if (!hasCategory) merged.category = null;
+      }
+
+      const changed =
+        merged.studyIds.join("|") !== prev.studyIds.join("|") ||
+        merged.brands.join("|") !== prev.brands.join("|") ||
+        merged.sector !== prev.sector ||
+        merged.subsector !== prev.subsector ||
+        merged.category !== prev.category ||
+        merged.gender.join("|") !== prev.gender.join("|") ||
+        merged.nse.join("|") !== prev.nse.join("|") ||
+        merged.state.join("|") !== prev.state.join("|") ||
+        merged.ageMin !== prev.ageMin ||
+        merged.ageMax !== prev.ageMax ||
+        merged.timeGranularity !== prev.timeGranularity ||
+        merged.quarterFrom !== prev.quarterFrom ||
+        merged.quarterTo !== prev.quarterTo;
+
+      return changed ? merged : prev;
+    });
+  }, []);
+
+  const resetScope = useCallback(() => setScopeState(DEFAULT_SCOPE), []);
+
+  const effectiveBrands = trackingBrandOptions ?? brands;
+
+  const setTrackingBrandOptions = useCallback((nextBrands: string[] | null) => {
+    setTrackingBrandOptionsState(nextBrands);
+  }, []);
 
   const value = useMemo<ScopeContextValue>(
     () => ({
@@ -329,9 +358,21 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
       demographics,
       dateOptions,
       optionsLoading,
-      brands,
+      brands: effectiveBrands,
+      setTrackingBrandOptions,
     }),
-    [scope, studies, taxonomyItems, demographics, dateOptions, optionsLoading, brands]
+    [
+      scope,
+      setScope,
+      resetScope,
+      studies,
+      taxonomyItems,
+      demographics,
+      dateOptions,
+      optionsLoading,
+      effectiveBrands,
+      setTrackingBrandOptions,
+    ]
   );
 
   return <ScopeContext.Provider value={value}>{children}</ScopeContext.Provider>;

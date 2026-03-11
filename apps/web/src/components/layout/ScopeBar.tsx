@@ -11,11 +11,28 @@ function summaryLabel(values: string[], fallback: string) {
   return `${values.length} selected`;
 }
 
+function extractYear(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const match = String(value).match(/(19|20)\d{2}/);
+  return match ? match[0] : null;
+}
+
+function quarterOrder(value: string): number {
+  const normalized = value.trim();
+  const yearQuarter = normalized.match(/(\d{4})\D*Q([1-4])/i);
+  if (yearQuarter) return Number(yearQuarter[1]) * 10 + Number(yearQuarter[2]);
+  const quarterYear = normalized.match(/Q([1-4])\D*(\d{4})/i);
+  if (quarterYear) return Number(quarterYear[2]) * 10 + Number(quarterYear[1]);
+  const yearOnly = normalized.match(/(19|20)\d{2}/);
+  if (yearOnly) return Number(yearOnly[0]) * 10;
+  return Number.MAX_SAFE_INTEGER;
+}
+
 export default function ScopeBar() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const { scope, setScope, resetScope, taxonomyItems, demographics, dateOptions, optionsLoading, brands } =
+  const { scope, setScope, resetScope, studies, taxonomyItems, demographics, dateOptions, optionsLoading, brands } =
     useScope();
 
   const advancedOpen = searchParams.get("scope_advanced") === "1";
@@ -30,6 +47,7 @@ export default function ScopeBar() {
   const timeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const isPresentationMode = pathname === "/demand-network" && searchParams.get("presentation") === "1";
+  const isJourneyBrandsEnabled = pathname !== "/journey" || searchParams.get("journey_brands") === "1";
 
   const setAdvancedOpen = (nextOpen: boolean) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -41,39 +59,98 @@ export default function ScopeBar() {
     router.replace(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`, { scroll: false });
   };
 
+  const scopedStudies = useMemo(
+    () =>
+      scope.studyIds.length
+        ? studies.filter((study) => scope.studyIds.includes(study.study_id))
+        : studies,
+    [scope.studyIds, studies]
+  );
+
   const sectorOptions = useMemo(
     () => Array.from(new Set(taxonomyItems.map((item) => item.sector))).sort(),
     [taxonomyItems]
   );
 
   const subsectorOptions = useMemo(() => {
-    if (!scope.sector) {
-      return Array.from(new Set(taxonomyItems.map((item) => item.subsector))).sort();
-    }
+    if (!scope.sector) return [];
     return Array.from(
       new Set(taxonomyItems.filter((item) => item.sector === scope.sector).map((item) => item.subsector))
     ).sort();
-  }, [taxonomyItems, scope.sector]);
+  }, [scope.sector, taxonomyItems]);
 
   const categoryOptions = useMemo(() => {
-    if (!scope.sector && !scope.subsector) {
-      return Array.from(new Set(taxonomyItems.map((item) => item.category))).sort();
-    }
+    if (!scope.sector || !scope.subsector) return [];
     return Array.from(
       new Set(
         taxonomyItems
-          .filter((item) => (scope.sector ? item.sector === scope.sector : true))
-          .filter((item) => (scope.subsector ? item.subsector === scope.subsector : true))
+          .filter((item) => item.sector === scope.sector)
+          .filter((item) => item.subsector === scope.subsector)
           .map((item) => item.category)
       )
     ).sort();
-  }, [taxonomyItems, scope.sector, scope.subsector]);
+  }, [scope.sector, scope.subsector, taxonomyItems]);
+
+  const enabledSectors = useMemo(
+    () =>
+      new Set(
+        scopedStudies
+          .map((study) => (typeof study.sector === "string" ? study.sector.trim() : ""))
+          .filter(Boolean)
+      ),
+    [scopedStudies]
+  );
+
+  const enabledSubsectors = useMemo(() => {
+    if (!scope.sector) return new Set<string>();
+    return new Set(
+      scopedStudies
+        .filter((study) => study.sector === scope.sector)
+        .map((study) => (typeof study.subsector === "string" ? study.subsector.trim() : ""))
+        .filter(Boolean)
+    );
+  }, [scope.sector, scopedStudies]);
+
+  const enabledCategories = useMemo(() => {
+    if (!scope.sector || !scope.subsector) return new Set<string>();
+    return new Set(
+      scopedStudies
+        .filter((study) => study.sector === scope.sector && study.subsector === scope.subsector)
+        .map((study) => (typeof study.category === "string" ? study.category.trim() : ""))
+        .filter(Boolean)
+    );
+  }, [scope.sector, scope.subsector, scopedStudies]);
 
   const filteredBrands = useMemo(() => {
     const needle = brandSearch.trim().toLowerCase();
     if (!needle) return brands;
     return brands.filter((brand) => brand.toLowerCase().includes(needle));
   }, [brandSearch, brands]);
+
+  const years = useMemo(() => {
+    const set = new Set<string>();
+    for (const value of dateOptions.quarters) {
+      const year = extractYear(value);
+      if (year) set.add(year);
+    }
+    return Array.from(set).sort((a, b) => Number(a) - Number(b));
+  }, [dateOptions.quarters]);
+
+  const yearQuarterRange = useMemo(() => {
+    const map = new Map<string, { from: string; to: string }>();
+    const sorted = [...dateOptions.quarters].sort((a, b) => quarterOrder(a) - quarterOrder(b));
+    for (const quarter of sorted) {
+      const year = extractYear(quarter);
+      if (!year) continue;
+      const existing = map.get(year);
+      if (!existing) {
+        map.set(year, { from: quarter, to: quarter });
+      } else {
+        map.set(year, { from: existing.from, to: quarter });
+      }
+    }
+    return map;
+  }, [dateOptions.quarters]);
 
   const closeBrandsPopover = () => {
     setBrandsOpen(false);
@@ -115,6 +192,28 @@ export default function ScopeBar() {
     return () => window.clearTimeout(timer);
   }, [brands, scope.brands, setScope]);
 
+  useEffect(() => {
+    if (scope.sector && !enabledSectors.has(scope.sector)) {
+      setScope({ sector: null, subsector: null, category: null, brands: [] });
+      return;
+    }
+    if (scope.subsector && !enabledSubsectors.has(scope.subsector)) {
+      setScope({ subsector: null, category: null, brands: [] });
+      return;
+    }
+    if (scope.category && !enabledCategories.has(scope.category)) {
+      setScope({ category: null, brands: [] });
+    }
+  }, [
+    enabledCategories,
+    enabledSectors,
+    enabledSubsectors,
+    scope.category,
+    scope.sector,
+    scope.subsector,
+    setScope,
+  ]);
+
   if (isPresentationMode) {
     return null;
   }
@@ -131,115 +230,121 @@ export default function ScopeBar() {
           >
             <option value="">Sector: All</option>
             {sectorOptions.map((value) => (
-              <option key={value} value={value}>
+              <option key={value} value={value} disabled={!enabledSectors.has(value)}>
                 {value}
               </option>
             ))}
           </select>
 
           <select
-            className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm"
+            className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate"
             value={scope.subsector || ""}
             onChange={(event) => setScope({ subsector: event.target.value || null })}
             aria-label="Subsector filter"
+            disabled={!scope.sector}
+            title={!scope.sector ? "Select Sector first" : undefined}
           >
             <option value="">Subsector: All</option>
             {subsectorOptions.map((value) => (
-              <option key={value} value={value}>
+              <option key={value} value={value} disabled={!enabledSubsectors.has(value)}>
                 {value}
               </option>
             ))}
           </select>
 
           <select
-            className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm"
+            className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate"
             value={scope.category || ""}
             onChange={(event) => setScope({ category: event.target.value || null })}
             aria-label="Category filter"
+            disabled={!scope.subsector}
+            title={!scope.subsector ? "Select Subsector first" : undefined}
           >
             <option value="">Category: All</option>
             {categoryOptions.map((value) => (
-              <option key={value} value={value}>
+              <option key={value} value={value} disabled={!enabledCategories.has(value)}>
                 {value}
               </option>
             ))}
           </select>
 
-          <Popover.Root
-            open={brandsOpen}
-            onOpenChange={(nextOpen) => {
-              setBrandsOpen(nextOpen);
-              if (nextOpen) {
-                setAdvancedOpen(false);
-                closeDemographicsPopover();
-                closeTimePopover();
-              }
-            }}
-          >
-            <Popover.Trigger asChild>
-              <button
-                ref={brandsButtonRef}
-                type="button"
-                className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!brands.length}
-                title={!brands.length ? "Load studies to populate brands" : undefined}
-                aria-label="Brands filter"
-              >
-                Brands:{" "}
-                {scope.brands.length === 0 || scope.brands.length === brands.length ? "All" : scope.brands.length}
-              </button>
-            </Popover.Trigger>
-            <Popover.Portal>
-              {/* Portal + Popper keeps the dropdown anchored under the trigger across scroll/stacking contexts. */}
-              <Popover.Content
-                side="bottom"
-                align="start"
-                sideOffset={8}
-                alignOffset={0}
-                avoidCollisions
-                collisionPadding={8}
-                className="z-[80] w-[var(--radix-popover-trigger-width)] min-w-[280px] max-w-[420px] rounded-2xl border border-ink/10 bg-white p-3 shadow-xl focus:outline-none"
-              >
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-xs font-semibold text-ink">Brands</p>
-                    <div className="flex gap-2 text-[11px]">
-                      <button
-                        type="button"
-                        className="text-[#008a67] hover:underline"
-                        onClick={() => setScope({ brands: filteredBrands })}
-                      >
-                        Select all
-                      </button>
-                      <button type="button" className="text-slate hover:underline" onClick={() => setScope({ brands: [] })}>
-                        Clear
-                      </button>
+          {isJourneyBrandsEnabled && (
+            <Popover.Root
+              open={brandsOpen}
+              onOpenChange={(nextOpen) => {
+                setBrandsOpen(nextOpen);
+                if (nextOpen) {
+                  setAdvancedOpen(false);
+                  closeDemographicsPopover();
+                  closeTimePopover();
+                }
+              }}
+            >
+              <Popover.Trigger asChild>
+                <button
+                  ref={brandsButtonRef}
+                  type="button"
+                  className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={!scope.category || !brands.length}
+                  title={!scope.category ? "Select Category first" : !brands.length ? "Load studies to populate brands" : undefined}
+                  aria-label="Brands filter"
+                >
+                  Brands:{" "}
+                  {scope.brands.length === 0 || scope.brands.length === brands.length ? "All" : scope.brands.length}
+                </button>
+              </Popover.Trigger>
+              <Popover.Portal>
+                {/* Portal + Popper keeps the dropdown anchored under the trigger across scroll/stacking contexts. */}
+                <Popover.Content
+                  side="bottom"
+                  align="start"
+                  sideOffset={8}
+                  alignOffset={0}
+                  avoidCollisions
+                  collisionPadding={8}
+                  className="z-[80] w-[var(--radix-popover-trigger-width)] min-w-[280px] max-w-[420px] rounded-2xl border border-ink/10 bg-white p-3 shadow-xl focus:outline-none"
+                >
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-semibold text-ink">Brands</p>
+                      <div className="flex gap-2 text-[11px]">
+                        <button
+                          type="button"
+                          className="text-[#008a67] hover:underline"
+                          onClick={() => setScope({ brands: filteredBrands })}
+                        >
+                          Select all
+                        </button>
+                        <button type="button" className="text-slate hover:underline" onClick={() => setScope({ brands: [] })}>
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      type="text"
+                      value={brandSearch}
+                      onChange={(event) => setBrandSearch(event.target.value)}
+                      placeholder="Search brands"
+                      className="sticky top-0 z-[1] w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                    />
+                    <div className="max-h-[320px] space-y-1 overflow-auto pr-1">
+                      {filteredBrands.map((brand) => (
+                        <label key={brand} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-slate-50">
+                          <input
+                            type="checkbox"
+                            checked={scope.brands.includes(brand)}
+                            onChange={() => toggleListValue("brands", brand)}
+                          />
+                          <span className="text-xs text-ink">{brand}</span>
+                        </label>
+                      ))}
+                      {!filteredBrands.length && <p className="px-2 py-3 text-xs text-slate">No brands match your search.</p>}
                     </div>
                   </div>
-                  <input
-                    type="text"
-                    value={brandSearch}
-                    onChange={(event) => setBrandSearch(event.target.value)}
-                    placeholder="Search brands"
-                    className="sticky top-0 z-[1] w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
-                  />
-                  <div className="max-h-[320px] space-y-1 overflow-auto pr-1">
-                    {filteredBrands.map((brand) => (
-                      <label key={brand} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-slate-50">
-                        <input
-                          type="checkbox"
-                          checked={scope.brands.includes(brand)}
-                          onChange={() => toggleListValue("brands", brand)}
-                        />
-                        <span className="text-xs text-ink">{brand}</span>
-                      </label>
-                    ))}
-                    {!filteredBrands.length && <p className="px-2 py-3 text-xs text-slate">No brands match your search.</p>}
-                  </div>
-                </div>
-              </Popover.Content>
-            </Popover.Portal>
-          </Popover.Root>
+                </Popover.Content>
+              </Popover.Portal>
+            </Popover.Root>
+          )}
 
           <Popover.Root
             open={demographicsOpen}
@@ -358,7 +463,7 @@ export default function ScopeBar() {
                 type="button"
                 className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm transition hover:bg-slate-50"
               >
-                Time: Quarter
+                Time: Year
               </button>
             </Popover.Trigger>
             <Popover.Portal>
@@ -372,14 +477,18 @@ export default function ScopeBar() {
                 className="z-[80] w-[320px] max-w-[92vw] rounded-2xl border border-ink/10 bg-white p-3 shadow-xl focus:outline-none"
               >
                 <div className="max-h-[320px] overflow-auto">
-                  <p className="mb-2 text-xs font-semibold text-ink">Quarter range</p>
+                  <p className="mb-2 text-xs font-semibold text-ink">Year range</p>
                   <select
                     className="mb-2 w-full rounded-xl border border-ink/10 px-3 py-2 text-xs"
-                    value={scope.quarterFrom || ""}
-                    onChange={(event) => setScope({ quarterFrom: event.target.value || null })}
+                    value={extractYear(scope.quarterFrom) || ""}
+                    onChange={(event) => {
+                      const nextYear = event.target.value || null;
+                      const quarterRange = nextYear ? yearQuarterRange.get(nextYear) : null;
+                      setScope({ quarterFrom: quarterRange?.from || null });
+                    }}
                   >
-                    <option value="">From quarter</option>
-                    {dateOptions.quarters.map((value) => (
+                    <option value="">From year</option>
+                    {years.map((value) => (
                       <option key={`from-${value}`} value={value}>
                         {value}
                       </option>
@@ -387,11 +496,15 @@ export default function ScopeBar() {
                   </select>
                   <select
                     className="w-full rounded-xl border border-ink/10 px-3 py-2 text-xs"
-                    value={scope.quarterTo || ""}
-                    onChange={(event) => setScope({ quarterTo: event.target.value || null })}
+                    value={extractYear(scope.quarterTo) || ""}
+                    onChange={(event) => {
+                      const nextYear = event.target.value || null;
+                      const quarterRange = nextYear ? yearQuarterRange.get(nextYear) : null;
+                      setScope({ quarterTo: quarterRange?.to || null });
+                    }}
                   >
-                    <option value="">To quarter</option>
-                    {dateOptions.quarters.map((value) => (
+                    <option value="">To year</option>
+                    {years.map((value) => (
                       <option key={`to-${value}`} value={value}>
                         {value}
                       </option>
@@ -432,7 +545,13 @@ export default function ScopeBar() {
           >
             <div className="grid gap-3 text-xs text-slate md:grid-cols-2">
               <div className="md:col-span-2">
-                <p className="font-semibold text-ink">{pathname === "/journey" ? "Journey controls" : "Network controls"}</p>
+                <p className="font-semibold text-ink">
+                  {pathname === "/journey"
+                    ? "Journey controls"
+                    : pathname === "/tracking"
+                      ? "Tracking controls"
+                      : "Network controls"}
+                </p>
               </div>
               {pathname === "/demand-network" && (
                 <div className="md:col-span-2">
@@ -442,6 +561,11 @@ export default function ScopeBar() {
               {pathname === "/journey" && (
                 <div className="md:col-span-2">
                   <div id="journey-advanced-controls-slot" />
+                </div>
+              )}
+              {pathname === "/tracking" && (
+                <div className="md:col-span-2">
+                  <div id="tracking-advanced-controls-slot" />
                 </div>
               )}
             </div>

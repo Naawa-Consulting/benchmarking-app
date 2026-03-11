@@ -19,6 +19,10 @@ type HeroSankeyProps = {
   focusBrandName?: string | null;
   compareBrandName?: string | null;
   timeBucketLabel?: string | null;
+  benchmarkLabel?: string;
+  title?: string;
+  subtitle?: string;
+  primaryLegendLabel?: string;
 };
 
 type SankeyUnit = {
@@ -53,6 +57,8 @@ type StageGeometry = {
   rank: number | null;
 };
 
+const isVisibleFunnelStage = (stage: JourneyStage) => stage !== "Ad Awareness";
+
 const stageShortLabel = (stage: JourneyStage) => {
   if (stage === "Brand Awareness") return "Awareness";
   if (stage === "Ad Awareness") return "Ad Awareness";
@@ -79,24 +85,29 @@ const healthBadgeLabel = (status: FunnelHealthEntry["status"] | "unknown") => {
 };
 
 function buildConversionBadges(unit: SankeyUnit): ConversionBadge[] {
-  if (unit.stagesOrdered.length < 2) return [];
+  const visibleStages = unit.stagesOrdered.filter(isVisibleFunnelStage);
+  if (visibleStages.length < 2) return [];
   const linksByKey = new Map(unit.links.map((item) => [`${item.fromStage}->${item.toStage}`, item]));
-  const transitions = unit.stagesOrdered.length - 1;
+  const transitions = visibleStages.length - 1;
   const badges: ConversionBadge[] = [];
 
   for (let i = 0; i < transitions; i += 1) {
-    const from = unit.stagesOrdered[i];
-    const to = unit.stagesOrdered[i + 1];
+    const from = visibleStages[i];
+    const to = visibleStages[i + 1];
     const link = linksByKey.get(`${from}->${to}`);
     if (!link || typeof link.conversion !== "number") continue;
     const conversion = link.conversion;
     const pctInt = Math.round(conversion * 100);
-    const toneClass = conversion >= 0.95
+    const toneClass = conversion > 1
+      ? "border-rose-300 bg-rose-50 text-rose-700"
+      : conversion >= 0.95
       ? "border-emerald-300 bg-emerald-50 text-emerald-700"
       : conversion >= 0.75
         ? "border-amber-300 bg-amber-50 text-amber-700"
         : "border-rose-300 bg-rose-50 text-rose-700";
-    const hint = conversion >= 0.95
+    const hint = conversion > 1
+      ? "Conversion anomaly detected. Segment excluded from Journey Index."
+      : conversion >= 0.95
       ? "High conversion segment."
       : conversion >= 0.75
         ? "Average conversion segment."
@@ -142,12 +153,14 @@ function FunnelRibbonChart({
   totalStudies,
   ranksByStage,
   showBenchmarkOverlay,
+  benchmarkLabel,
 }: {
   unit: SankeyUnit;
   benchmark: JourneyBenchmarkAggregate;
   totalStudies: number;
   ranksByStage: JourneyModel["ranksByStage"];
   showBenchmarkOverlay: boolean;
+  benchmarkLabel: string;
 }) {
   const { ref, size } = useElementSize<HTMLDivElement>();
   const [hoveredStage, setHoveredStage] = useState<string | null>(null);
@@ -158,9 +171,18 @@ function FunnelRibbonChart({
     const height = size.height;
     if (width <= 0 || height <= 0) return null;
 
-    const byStage = new Map(unit.stageAggregates.map((item) => [item.stage, item]));
-    const benchmarkByStage = new Map(benchmark.stageAggregates.map((item) => [item.stage, item]));
-    const count = unit.stagesOrdered.length;
+    const visibleStages = unit.stagesOrdered.filter(isVisibleFunnelStage);
+    const byStage = new Map(
+      unit.stageAggregates
+        .filter((item) => isVisibleFunnelStage(item.stage))
+        .map((item) => [item.stage, item])
+    );
+    const benchmarkByStage = new Map(
+      benchmark.stageAggregates
+        .filter((item) => isVisibleFunnelStage(item.stage))
+        .map((item) => [item.stage, item])
+    );
+    const count = visibleStages.length;
     if (!count) return null;
 
     const sidePad = 44;
@@ -168,15 +190,15 @@ function FunnelRibbonChart({
     const trackWidth = Math.max(1, width - sidePad * 2);
     const step = count > 1 ? trackWidth / (count - 1) : 0;
     const maxValue = Math.max(
-      ...unit.stagesOrdered.map((stage) => byStage.get(stage)?.value ?? 0),
-      ...unit.stagesOrdered.map((stage) => benchmarkByStage.get(stage)?.value ?? 0),
+      ...visibleStages.map((stage) => byStage.get(stage)?.value ?? 0),
+      ...visibleStages.map((stage) => benchmarkByStage.get(stage)?.value ?? 0),
       0.0001
     );
     const maxBarHeight = Math.min(height - 120, 300);
     const minBarHeight = 28;
     const centerY = height * 0.5;
 
-    const stageGeom: StageGeometry[] = unit.stagesOrdered.map((stage, index) => {
+    const stageGeom: StageGeometry[] = visibleStages.map((stage, index) => {
       const info = byStage.get(stage);
       const value = typeof info?.value === "number" ? info.value : null;
       const ratio = value == null ? 0 : Math.max(0, Math.min(1, value / maxValue));
@@ -196,7 +218,7 @@ function FunnelRibbonChart({
       };
     });
 
-    const benchGeom = unit.stagesOrdered.map((stage, index) => {
+    const benchGeom = visibleStages.map((stage, index) => {
       const info = benchmarkByStage.get(stage);
       const value = typeof info?.value === "number" ? info.value : null;
       const ratio = value == null ? 0 : Math.max(0, Math.min(1, value / maxValue));
@@ -214,11 +236,21 @@ function FunnelRibbonChart({
   }, [benchmark.stageAggregates, ranksByStage, size.height, size.width, unit.stageAggregates, unit.stagesOrdered, unit.title]);
 
   const linksByKey = useMemo(
-    () => new Map(unit.links.map((item) => [`${item.fromStage}->${item.toStage}`, item])),
+    () =>
+      new Map(
+        unit.links
+          .filter((item) => isVisibleFunnelStage(item.fromStage) && isVisibleFunnelStage(item.toStage))
+          .map((item) => [`${item.fromStage}->${item.toStage}`, item])
+      ),
     [unit.links]
   );
   const benchmarkLinksByKey = useMemo(
-    () => new Map(benchmark.links.map((item) => [`${item.fromStage}->${item.toStage}`, item])),
+    () =>
+      new Map(
+        benchmark.links
+          .filter((item) => isVisibleFunnelStage(item.fromStage) && isVisibleFunnelStage(item.toStage))
+          .map((item) => [`${item.fromStage}->${item.toStage}`, item])
+      ),
     [benchmark.links]
   );
 
@@ -259,7 +291,7 @@ function FunnelRibbonChart({
                   style={{ transition: "opacity 180ms ease, stroke-width 180ms ease" }}
                 >
                   <title>
-                    {`Benchmark transition\nFrom: ${stageShortLabel(from.stage)}\nTo: ${stageShortLabel(to.stage)}\nConversion: ${pct(typeof link?.conversion === "number" ? link.conversion : null)}\nDrop-off: ${pct(typeof link?.dropAbs === "number" ? link.dropAbs : null)}\nCoverage: ${link?.linkCoverageStudies ?? 0}/${totalStudies} studies`}
+                    {`${benchmarkLabel} transition\nFrom: ${stageShortLabel(from.stage)}\nTo: ${stageShortLabel(to.stage)}\nConversion: ${pct(typeof link?.conversion === "number" ? link.conversion : null)}\nDrop-off: ${pct(typeof link?.dropAbs === "number" ? link.dropAbs : null)}\nPopulation base (weighted N): ${Math.round(link?.linkCoverageWeight ?? 0)}\nCoverage: ${link?.linkCoverageStudies ?? 0}/${totalStudies} studies${link?.anomalyFlag ? "\nQuality: anomaly detected" : ""}${link?.excludedFromIndex ? "\nJourney Index: excluded segment" : ""}`}
                   </title>
                 </path>
               );
@@ -288,7 +320,7 @@ function FunnelRibbonChart({
                 }}
               >
                 <title>
-                  {`Brand transition\nFrom: ${stageShortLabel(from.stage)}\nTo: ${stageShortLabel(to.stage)}\nConversion: ${pct(typeof link?.conversion === "number" ? link.conversion : null)}\nDrop-off: ${pct(typeof link?.dropAbs === "number" ? link.dropAbs : null)}\nCoverage: ${link?.linkCoverageStudies ?? 0}/${totalStudies} studies`}
+                  {`Brand transition\nFrom: ${stageShortLabel(from.stage)}\nTo: ${stageShortLabel(to.stage)}\nConversion: ${pct(typeof link?.conversion === "number" ? link.conversion : null)}\nDrop-off: ${pct(typeof link?.dropAbs === "number" ? link.dropAbs : null)}\nPopulation base (weighted N): ${Math.round(link?.linkCoverageWeight ?? 0)}\nCoverage: ${link?.linkCoverageStudies ?? 0}/${totalStudies} studies${link?.anomalyFlag ? "\nQuality: anomaly detected" : ""}${link?.excludedFromIndex ? "\nJourney Index: excluded segment" : ""}`}
                 </title>
               </path>
             );
@@ -320,7 +352,7 @@ function FunnelRibbonChart({
                   <title>
                     {stage.value == null
                       ? `${stage.stage}\nNot available in selected studies.`
-                      : `Stage: ${stage.stage}\nValue: ${pct(stage.value)}\nCoverage: ${stage.coverageStudies}/${totalStudies} studies${stage.rank ? `\nRank: #${stage.rank}` : ""}`}
+                      : `Stage: ${stage.stage}\nValue: ${pct(stage.value)}\nPopulation base (weighted N): ${Math.round(unit.stageAggregates.find((item) => item.stage === stage.stage)?.stageCoverageWeight ?? 0)}\nCoverage: ${stage.coverageStudies}/${totalStudies} studies${stage.rank ? `\nRank: #${stage.rank}` : ""}`}
                   </title>
                 </rect>
 
@@ -345,12 +377,14 @@ const SankeyBrandCard = memo(function SankeyBrandCard({
   totalStudies,
   ranksByStage,
   showBenchmarkOverlay,
+  benchmarkLabel,
 }: {
   unit: SankeyUnit;
   benchmark: JourneyBenchmarkAggregate;
   totalStudies: number;
   ranksByStage: JourneyModel["ranksByStage"];
   showBenchmarkOverlay: boolean;
+  benchmarkLabel: string;
 }) {
   const badges = useMemo(() => buildConversionBadges(unit), [unit]);
 
@@ -383,7 +417,12 @@ const SankeyBrandCard = memo(function SankeyBrandCard({
         </div>
       </div>
 
-      <JourneyKpiStrip brand={unit} benchmark={benchmark} journeyIndex={unit.journeyIndex} />
+      <JourneyKpiStrip
+        brand={unit}
+        benchmark={benchmark}
+        journeyIndex={unit.journeyIndex}
+        benchmarkLabel={benchmarkLabel}
+      />
 
       <div className="relative mt-4 h-[420px] w-full rounded-2xl border border-ink/10 bg-white/90">
         <div className="pointer-events-none absolute left-0 right-0 top-6 z-10 h-8">
@@ -404,6 +443,7 @@ const SankeyBrandCard = memo(function SankeyBrandCard({
           totalStudies={totalStudies}
           ranksByStage={ranksByStage}
           showBenchmarkOverlay={showBenchmarkOverlay}
+          benchmarkLabel={benchmarkLabel}
         />
       </div>
     </article>
@@ -416,6 +456,10 @@ export default function HeroSankey({
   focusBrandName = null,
   compareBrandName = null,
   timeBucketLabel = null,
+  benchmarkLabel = "Benchmark",
+  title = "Brand Funnel",
+  subtitle,
+  primaryLegendLabel = "Brand",
 }: HeroSankeyProps) {
   const [showBenchmarkOverlay, setShowBenchmarkOverlay] = useState(true);
 
@@ -437,11 +481,19 @@ export default function HeroSankey({
   }, [model.brandStageAggregates, model.stagesOrdered, selectedBrandNames]);
 
   const limitedBrands = useMemo(() => {
+    const getJourneyIndex = (brand: JourneyBrandAggregate) => {
+      const value = model.journeyIndexByBrand[brand.key]?.value;
+      return typeof value === "number" ? value : Number.NEGATIVE_INFINITY;
+    };
     const sorted = selectedBrands
       .slice()
-      .sort((a, b) => (b.totalConversion || 0) - (a.totalConversion || 0));
+      .sort((a, b) => {
+        const indexDelta = getJourneyIndex(b) - getJourneyIndex(a);
+        if (indexDelta !== 0) return indexDelta;
+        return (b.totalConversion || 0) - (a.totalConversion || 0);
+      });
     return sorted.slice(0, 5);
-  }, [selectedBrands]);
+  }, [model.journeyIndexByBrand, selectedBrands]);
 
   const hiddenCount = Math.max(0, selectedBrands.length - limitedBrands.length);
 
@@ -449,9 +501,11 @@ export default function HeroSankey({
     const makeUnit = (brand: JourneyBrandAggregate): SankeyUnit => ({
       key: brand.key,
       title: brand.brandName,
-      stagesOrdered: model.stagesOrdered,
-      stageAggregates: brand.stageAggregates,
-      links: brand.links,
+      stagesOrdered: model.stagesOrdered.filter(isVisibleFunnelStage),
+      stageAggregates: brand.stageAggregates.filter((item) => isVisibleFunnelStage(item.stage)),
+      links: brand.links.filter(
+        (item) => isVisibleFunnelStage(item.fromStage) && isVisibleFunnelStage(item.toStage)
+      ),
       csat: brand.csat,
       nps: brand.nps,
       journeyIndex: model.journeyIndexByBrand[brand.key] ?? null,
@@ -486,11 +540,13 @@ export default function HeroSankey({
     <section className="main-surface p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-xl font-semibold">Brand Funnel</h3>
+          <h3 className="text-xl font-semibold">{title}</h3>
           <p className="text-sm text-slate">
-            {focusBrandName
-              ? `Focus: ${focusBrandName}${compareBrandName ? ` vs ${compareBrandName}` : ""}`
-              : "Evolución por etapa y comparativa vs benchmark de categoría."}
+            {subtitle
+              ? subtitle
+              : focusBrandName
+                ? `Focus: ${focusBrandName}${compareBrandName ? ` vs ${compareBrandName}` : ""}`
+                : `Evolución por etapa y comparativa vs ${benchmarkLabel.toLowerCase()}.`}
             {timeBucketLabel ? ` · ${timeBucketLabel}` : ""}
           </p>
         </div>
@@ -505,10 +561,11 @@ export default function HeroSankey({
             Show benchmark overlay
           </label>
           <div className="flex items-center gap-2 text-[11px] text-slate">
-            <span className="inline-block h-0.5 w-4 rounded bg-sky-400" /> Brand
+            <span className="inline-block h-0.5 w-4 rounded bg-sky-400" /> {primaryLegendLabel}
             {showBenchmarkOverlay && (
               <>
-                <span className="ml-2 inline-block h-0.5 w-4 rounded border-t border-dashed border-slate-500" /> Benchmark
+                <span className="ml-2 inline-block h-0.5 w-4 rounded border-t border-dashed border-slate-500" />{" "}
+                {benchmarkLabel}
               </>
             )}
           </div>
@@ -532,6 +589,7 @@ export default function HeroSankey({
             totalStudies={totalStudies}
             ranksByStage={model.ranksByStage}
             showBenchmarkOverlay={showBenchmarkOverlay}
+            benchmarkLabel={benchmarkLabel}
           />
         ))}
       </div>

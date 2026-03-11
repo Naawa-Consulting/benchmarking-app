@@ -1,4 +1,10 @@
-import type { JourneyBrandAggregate, JourneyModel, JourneyStage } from "../data/journeySchema";
+import type {
+  JourneyBenchmarkAggregate,
+  JourneyBrandAggregate,
+  JourneyIndexEntry,
+  JourneyModel,
+  JourneyStage,
+} from "../data/journeySchema";
 
 export type HeatmapColumn =
   | {
@@ -30,6 +36,8 @@ export type HeatmapCell = {
   coverageStudies: number;
   totalStudies: number;
   missing: boolean;
+  anomalyFlag?: boolean;
+  excludedFromIndex?: boolean;
 };
 
 export type HeatmapRow = {
@@ -45,11 +53,24 @@ export type JourneyHeatmapMatrix = {
   meta: { includeAdAwareness: boolean };
 };
 
+type BuildJourneyHeatmapOptions = {
+  benchmarkMode?: "selection" | "global";
+  selectionBenchmark?: {
+    aggregate: JourneyBenchmarkAggregate;
+    journeyIndex: JourneyIndexEntry;
+  };
+  globalBenchmark?: {
+    aggregate: JourneyBenchmarkAggregate;
+    journeyIndex: JourneyIndexEntry;
+  };
+};
+
 const stageVal = (brand: JourneyBrandAggregate, stage: JourneyStage) =>
   brand.stageAggregates.find((item) => item.stage === stage) ?? null;
 
 const convVal = (brand: JourneyBrandAggregate, fromStage: JourneyStage, toStage: JourneyStage) =>
   brand.links.find((item) => item.fromStage === fromStage && item.toStage === toStage) ?? null;
+const isAdAwarenessStage = (stage: JourneyStage) => stage === "Ad Awareness";
 
 const stageLabel = (stage: JourneyStage) => {
   if (stage === "Brand Awareness") return "Brand Awareness";
@@ -63,7 +84,8 @@ const stageLabel = (stage: JourneyStage) => {
 export function buildJourneyHeatmap(
   model: JourneyModel,
   selectedBrands: string[],
-  maxBrands = 10
+  maxBrands = 10,
+  options?: BuildJourneyHeatmapOptions
 ): JourneyHeatmapMatrix {
   const totalStudies = new Set(model.rows.map((row) => row.studyId)).size;
   const selected = model.brandStageAggregates.filter(
@@ -87,9 +109,10 @@ export function buildJourneyHeatmap(
       clamp: 0.15,
     });
   }
-  for (let i = 0; i < model.stagesOrdered.length - 1; i += 1) {
-    const fromStage = model.stagesOrdered[i];
-    const toStage = model.stagesOrdered[i + 1];
+  const conversionStages = model.stagesOrdered.filter((stage) => !isAdAwarenessStage(stage));
+  for (let i = 0; i < conversionStages.length - 1; i += 1) {
+    const fromStage = conversionStages[i];
+    const toStage = conversionStages[i + 1];
     columns.push({
       key: `conv:${fromStage}->${toStage}`,
       label: `${stageLabel(fromStage)} -> ${stageLabel(toStage)}`,
@@ -103,77 +126,106 @@ export function buildJourneyHeatmap(
   columns.push({ key: "nps", label: "NPS", group: "metric", clamp: 0.15 });
   columns.push({ key: "journey_index", label: "Journey Index", group: "metric", clamp: 20 });
 
-  const benchmarkStageMap = new Map(
-    model.benchmarkStageAggregates.stageAggregates.map((item) => [item.stage, item])
+  const selectionBenchmark = options?.selectionBenchmark ?? {
+    aggregate: model.benchmarkStageAggregates,
+    journeyIndex: model.benchmarkJourneyIndex,
+  };
+  const globalBenchmark = options?.globalBenchmark ?? selectionBenchmark;
+  const activeBenchmark = (options?.benchmarkMode ?? "selection") === "global" ? globalBenchmark : selectionBenchmark;
+
+  const activeBenchmarkStageMap = new Map(
+    activeBenchmark.aggregate.stageAggregates.map((item) => [item.stage, item])
   );
-  const benchmarkLinkMap = new Map(
-    model.benchmarkStageAggregates.links.map((item) => [`${item.fromStage}->${item.toStage}`, item])
+  const activeBenchmarkLinkMap = new Map(
+    activeBenchmark.aggregate.links.map((item) => [`${item.fromStage}->${item.toStage}`, item])
   );
 
-  const benchmarkCells: Record<string, HeatmapCell> = {};
-  for (const col of columns) {
-    if (col.group === "stage") {
-      const stage = benchmarkStageMap.get(col.stage);
-      benchmarkCells[col.key] = {
-        value: stage?.value ?? null,
-        benchmarkValue: stage?.value ?? null,
-        delta: 0,
-        coverageStudies: stage?.stageCoverageStudies ?? 0,
-        totalStudies,
-        missing: stage?.value == null,
-      };
-      continue;
+  const createBenchmarkCells = (
+    aggregate: JourneyBenchmarkAggregate,
+    journeyIndex: JourneyIndexEntry
+  ): Record<string, HeatmapCell> => {
+    const stageMap = new Map(aggregate.stageAggregates.map((item) => [item.stage, item]));
+    const linkMap = new Map(aggregate.links.map((item) => [`${item.fromStage}->${item.toStage}`, item]));
+    const cells: Record<string, HeatmapCell> = {};
+    for (const col of columns) {
+      if (col.group === "stage") {
+        const stage = stageMap.get(col.stage);
+        cells[col.key] = {
+          value: stage?.value ?? null,
+          benchmarkValue: stage?.value ?? null,
+          delta: 0,
+          coverageStudies: stage?.stageCoverageStudies ?? 0,
+          totalStudies,
+          missing: stage?.value == null,
+          anomalyFlag: false,
+          excludedFromIndex: false,
+        };
+        continue;
+      }
+      if (col.group === "conversion") {
+        const link = linkMap.get(`${col.fromStage}->${col.toStage}`);
+        cells[col.key] = {
+          value: link?.conversion ?? null,
+          benchmarkValue: link?.conversion ?? null,
+          delta: 0,
+          coverageStudies: link?.linkCoverageStudies ?? 0,
+          totalStudies,
+          missing: link?.conversion == null,
+          anomalyFlag: link?.anomalyFlag ?? false,
+          excludedFromIndex: link?.excludedFromIndex ?? false,
+        };
+        continue;
+      }
+      if (col.key === "journey_index") {
+        cells[col.key] = {
+          value: typeof journeyIndex.value === "number" ? journeyIndex.value / 100 : null,
+          benchmarkValue: typeof journeyIndex.value === "number" ? journeyIndex.value / 100 : null,
+          delta: 0,
+          coverageStudies: journeyIndex.studiesCovered,
+          totalStudies,
+          missing: journeyIndex.value == null,
+          anomalyFlag: false,
+          excludedFromIndex: false,
+        };
+      } else if (col.key === "csat") {
+        cells[col.key] = {
+          value: aggregate.csat.value,
+          benchmarkValue: aggregate.csat.value,
+          delta: 0,
+          coverageStudies: stageMap.get("Brand Satisfaction")?.stageCoverageStudies ?? 0,
+          totalStudies,
+          missing: aggregate.csat.value == null,
+          anomalyFlag: false,
+          excludedFromIndex: false,
+        };
+      } else {
+        cells[col.key] = {
+          value: aggregate.nps.value,
+          benchmarkValue: aggregate.nps.value,
+          delta: 0,
+          coverageStudies: stageMap.get("Brand Recommendation")?.stageCoverageStudies ?? 0,
+          totalStudies,
+          missing: aggregate.nps.value == null,
+          anomalyFlag: false,
+          excludedFromIndex: false,
+        };
+      }
     }
-    if (col.group === "conversion") {
-      const link = benchmarkLinkMap.get(`${col.fromStage}->${col.toStage}`);
-      benchmarkCells[col.key] = {
-        value: link?.conversion ?? null,
-        benchmarkValue: link?.conversion ?? null,
-        delta: 0,
-        coverageStudies: link?.linkCoverageStudies ?? 0,
-        totalStudies,
-        missing: link?.conversion == null,
-      };
-      continue;
-    }
-    if (col.key === "journey_index") {
-      benchmarkCells[col.key] = {
-        value:
-          typeof model.benchmarkJourneyIndex.value === "number" ? model.benchmarkJourneyIndex.value / 100 : null,
-        benchmarkValue:
-          typeof model.benchmarkJourneyIndex.value === "number" ? model.benchmarkJourneyIndex.value / 100 : null,
-        delta: 0,
-        coverageStudies: model.benchmarkJourneyIndex.studiesCovered,
-        totalStudies,
-        missing: model.benchmarkJourneyIndex.value == null,
-      };
-    } else if (col.key === "csat") {
-      benchmarkCells[col.key] = {
-        value: model.benchmarkStageAggregates.csat.value,
-        benchmarkValue: model.benchmarkStageAggregates.csat.value,
-        delta: 0,
-        coverageStudies: benchmarkStageMap.get("Brand Satisfaction")?.stageCoverageStudies ?? 0,
-        totalStudies,
-        missing: model.benchmarkStageAggregates.csat.value == null,
-      };
-    } else {
-      benchmarkCells[col.key] = {
-        value: model.benchmarkStageAggregates.nps.value,
-        benchmarkValue: model.benchmarkStageAggregates.nps.value,
-        delta: 0,
-        coverageStudies: benchmarkStageMap.get("Brand Recommendation")?.stageCoverageStudies ?? 0,
-        totalStudies,
-        missing: model.benchmarkStageAggregates.nps.value == null,
-      };
-    }
-  }
+    return cells;
+  };
 
   const rows: HeatmapRow[] = [
     {
-      key: "benchmark",
-      brandName: "Benchmark",
+      key: "benchmark-global",
+      brandName: "Global Benchmark",
       isBenchmark: true,
-      cells: benchmarkCells,
+      cells: createBenchmarkCells(globalBenchmark.aggregate, globalBenchmark.journeyIndex),
+    },
+    {
+      key: "benchmark-selection",
+      brandName: "Selection Benchmark",
+      isBenchmark: true,
+      cells: createBenchmarkCells(selectionBenchmark.aggregate, selectionBenchmark.journeyIndex),
     },
   ];
 
@@ -182,7 +234,7 @@ export function buildJourneyHeatmap(
     for (const col of columns) {
       if (col.group === "stage") {
         const val = stageVal(brand, col.stage);
-        const b = benchmarkStageMap.get(col.stage);
+        const b = activeBenchmarkStageMap.get(col.stage);
         const value = val?.value ?? null;
         const benchValue = b?.value ?? null;
         cells[col.key] = {
@@ -192,12 +244,14 @@ export function buildJourneyHeatmap(
           coverageStudies: val?.stageCoverageStudies ?? 0,
           totalStudies,
           missing: value == null,
+          anomalyFlag: false,
+          excludedFromIndex: false,
         };
         continue;
       }
       if (col.group === "conversion") {
         const val = convVal(brand, col.fromStage, col.toStage);
-        const b = benchmarkLinkMap.get(`${col.fromStage}->${col.toStage}`);
+        const b = activeBenchmarkLinkMap.get(`${col.fromStage}->${col.toStage}`);
         const value = val?.conversion ?? null;
         const benchValue = b?.conversion ?? null;
         cells[col.key] = {
@@ -207,12 +261,14 @@ export function buildJourneyHeatmap(
           coverageStudies: val?.linkCoverageStudies ?? 0,
           totalStudies,
           missing: value == null,
+          anomalyFlag: val?.anomalyFlag ?? false,
+          excludedFromIndex: val?.excludedFromIndex ?? false,
         };
         continue;
       }
       if (col.key === "journey_index") {
         const indexEntry = model.journeyIndexByBrand[brand.key];
-        const benchmarkIndex = model.benchmarkJourneyIndex.value;
+        const benchmarkIndex = activeBenchmark.journeyIndex.value;
         const value = typeof indexEntry?.value === "number" ? indexEntry.value / 100 : null;
         const benchValue = typeof benchmarkIndex === "number" ? benchmarkIndex / 100 : null;
         cells[col.key] = {
@@ -222,10 +278,12 @@ export function buildJourneyHeatmap(
           coverageStudies: indexEntry?.studiesCovered ?? 0,
           totalStudies,
           missing: value == null,
+          anomalyFlag: false,
+          excludedFromIndex: false,
         };
       } else if (col.key === "csat") {
         const value = brand.csat.value;
-        const benchValue = model.benchmarkStageAggregates.csat.value;
+        const benchValue = activeBenchmark.aggregate.csat.value;
         cells[col.key] = {
           value,
           benchmarkValue: benchValue,
@@ -233,10 +291,12 @@ export function buildJourneyHeatmap(
           coverageStudies: stageVal(brand, "Brand Satisfaction")?.stageCoverageStudies ?? 0,
           totalStudies,
           missing: value == null,
+          anomalyFlag: false,
+          excludedFromIndex: false,
         };
       } else {
         const value = brand.nps.value;
-        const benchValue = model.benchmarkStageAggregates.nps.value;
+        const benchValue = activeBenchmark.aggregate.nps.value;
         cells[col.key] = {
           value,
           benchmarkValue: benchValue,
@@ -244,6 +304,8 @@ export function buildJourneyHeatmap(
           coverageStudies: stageVal(brand, "Brand Recommendation")?.stageCoverageStudies ?? 0,
           totalStudies,
           missing: value == null,
+          anomalyFlag: false,
+          excludedFromIndex: false,
         };
       }
     }

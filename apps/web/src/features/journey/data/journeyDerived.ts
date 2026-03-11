@@ -27,12 +27,16 @@ const OFFICIAL_CSAT_FIELDS = ["csat_score", "satisfaction_score", "csat"];
 const OFFICIAL_PROMOTERS_FIELDS = ["promoters_pct", "nps_promoters_pct"];
 const OFFICIAL_DETRACTORS_FIELDS = ["detractors_pct", "nps_detractors_pct"];
 const OFFICIAL_NPS_FIELDS = ["nps", "nps_score"];
-const JOURNEY_INDEX_WEIGHTS = { retention: 0.5, gap: 0.3, nps: 0.2 } as const;
+const JOURNEY_INDEX_WEIGHTS = { retention: 0.5, gap: 0.3, csat: 0.1, nps: 0.1 } as const;
 const GAP_CLAMP = 0.15;
 const FUNNEL_HEALTH_THRESHOLDS = { healthy: 10, moderate: 20 } as const;
 
 const stageKey = (stage: JourneyStage) => stage;
 const pairKey = (from: JourneyStage, to: JourneyStage) => `${from} -> ${to}`;
+const isCoreConversionLink = (from: JourneyStage, to: JourneyStage) =>
+  from !== "Ad Awareness" && to !== "Ad Awareness";
+const toCoreConversionStages = (orderedStages: JourneyStage[]) =>
+  orderedStages.filter((stage) => stage !== "Ad Awareness");
 
 const toOrderedStages = (includeAdAwareness: boolean): JourneyStage[] =>
   includeAdAwareness ? [...JOURNEY_STAGES] : JOURNEY_STAGES.filter((stage) => stage !== "Ad Awareness");
@@ -94,17 +98,54 @@ const computeStageAggregates = (
       bucket.weight += row.weight;
     }
   }
-  const stageAggregates = orderedStages.map((stage) => ({
+  const stageAggregatesRaw = orderedStages.map((stage) => ({
     stage,
     value: weightedAverage((byStage.get(stage) || []).map((point) => ({ value: point.value, weight: point.weight }))),
     stageCoverageStudies: coverage.get(stage)?.studies.size || 0,
     stageCoverageWeight: coverage.get(stage)?.weight || 0,
   }));
+  const values = new Map<JourneyStage, number | null>(
+    stageAggregatesRaw.map((item) => [item.stage, item.value])
+  );
+  const awareness = values.get("Brand Awareness");
+  if (typeof awareness === "number") {
+    for (const stage of [
+      "Brand Consideration",
+      "Brand Purchase",
+      "Brand Satisfaction",
+      "Brand Recommendation",
+    ] as const) {
+      const current = values.get(stage);
+      if (typeof current === "number" && current > awareness) {
+        values.set(stage, awareness);
+      }
+    }
+  }
+  const purchase = values.get("Brand Purchase");
+  if (typeof purchase === "number") {
+    for (const stage of ["Brand Satisfaction", "Brand Recommendation"] as const) {
+      const current = values.get(stage);
+      if (typeof current === "number" && current > purchase) {
+        values.set(stage, purchase);
+      }
+    }
+  }
+  const stageAggregates = stageAggregatesRaw.map((item) => ({
+    ...item,
+    value: values.get(item.stage) ?? null,
+  }));
   return { stageAggregates, byStageCoverage: coverage };
 };
 
-const computeLinkAggregates = (rows: JourneyStageRow[], orderedStages: JourneyStage[]): JourneyLinkAggregate[] => {
+const computeLinkAggregates = (
+  rows: JourneyStageRow[],
+  orderedStages: JourneyStage[],
+  stageAggregates: JourneyStageAggregate[]
+): JourneyLinkAggregate[] => {
   const byStudy = new Map<string, Map<JourneyStage, { value: number; weight: number }>>();
+  const stageValueMap = new Map<JourneyStage, number | null>(
+    stageAggregates.map((item) => [item.stage, item.value])
+  );
   for (const row of rows) {
     if (!orderedStages.includes(row.stage)) continue;
     if (!byStudy.has(row.studyId)) byStudy.set(row.studyId, new Map());
@@ -119,10 +160,11 @@ const computeLinkAggregates = (rows: JourneyStageRow[], orderedStages: JourneySt
   for (let i = 0; i < orderedStages.length - 1; i += 1) {
     const fromStage = orderedStages[i];
     const toStage = orderedStages[i + 1];
-    const pointsDrop: Array<{ value: number; weight: number }> = [];
-    const pointsConv: Array<{ value: number; weight: number }> = [];
+    const fromStageValue = stageValueMap.get(fromStage);
+    const toStageValue = stageValueMap.get(toStage);
     const studies = new Set<string>();
     let weightTotal = 0;
+    let anomalyStudies = 0;
 
     for (const [studyId, stages] of byStudy) {
       const from = stages.get(fromStage);
@@ -130,42 +172,54 @@ const computeLinkAggregates = (rows: JourneyStageRow[], orderedStages: JourneySt
       if (!from || !to) continue;
       const weight = Math.min(from.weight, to.weight);
       if (weight <= 0) continue;
-      pointsDrop.push({ value: from.value - to.value, weight });
-      if (from.value > 0) pointsConv.push({ value: to.value / from.value, weight });
+      if (from.value <= 0 || to.value > from.value) {
+        anomalyStudies += 1;
+      }
       studies.add(studyId);
       weightTotal += weight;
     }
 
+    const conversionRaw =
+      typeof fromStageValue === "number" &&
+      typeof toStageValue === "number" &&
+      fromStageValue > 0
+        ? toStageValue / fromStageValue
+        : null;
+    const conversionForIndex =
+      typeof conversionRaw === "number" && conversionRaw <= 1 ? conversionRaw : null;
+    const anomalyFlag =
+      anomalyStudies > 0 ||
+      (typeof conversionRaw === "number" && conversionRaw > 1) ||
+      (typeof fromStageValue === "number" &&
+        typeof toStageValue === "number" &&
+        toStageValue > fromStageValue);
+
     links.push({
       fromStage,
       toStage,
-      dropAbs: weightedAverage(pointsDrop),
-      conversion: weightedAverage(pointsConv),
+      dropAbs:
+        typeof fromStageValue === "number" && typeof toStageValue === "number"
+          ? fromStageValue - toStageValue
+          : null,
+      conversion: conversionRaw,
+      conversionForIndex,
       linkCoverageStudies: studies.size,
       linkCoverageWeight: weightTotal,
+      anomalyFlag,
+      anomalyStudies,
+      excludedFromIndex: anomalyFlag,
     });
   }
   return links;
 };
 
-const computeTotalConversion = (rows: JourneyStageRow[], orderedStages: JourneyStage[]) => {
+const computeTotalConversion = (stageAggregates: JourneyStageAggregate[], orderedStages: JourneyStage[]) => {
   const firstStage = orderedStages[0];
   const lastStage = orderedStages[orderedStages.length - 1];
-  const byStudy = new Map<string, { first?: JourneyStageRow; last?: JourneyStageRow }>();
-  for (const row of rows) {
-    if (!byStudy.has(row.studyId)) byStudy.set(row.studyId, {});
-    const bucket = byStudy.get(row.studyId)!;
-    if (row.stage === firstStage) bucket.first = row;
-    if (row.stage === lastStage) bucket.last = row;
-  }
-  const points: Array<{ value: number; weight: number }> = [];
-  for (const pair of byStudy.values()) {
-    if (!pair.first || !pair.last) continue;
-    if (pair.first.value <= 0) continue;
-    const weight = Math.min(pair.first.weight, pair.last.weight);
-    points.push({ value: pair.last.value / pair.first.value, weight });
-  }
-  return weightedAverage(points);
+  const firstValue = stageAggregates.find((item) => item.stage === firstStage)?.value ?? null;
+  const lastValue = stageAggregates.find((item) => item.stage === lastStage)?.value ?? null;
+  if (typeof firstValue !== "number" || typeof lastValue !== "number" || firstValue <= 0) return null;
+  return lastValue / firstValue;
 };
 
 const getOfficialMetric = (rows: JourneyStageRow[], fields: string[]) => {
@@ -194,7 +248,13 @@ const computeCsnMetrics = (rows: JourneyStageRow[], stageAggregates: JourneyStag
 
   const csat: JourneyMetricValue =
     officialCsat != null
-      ? { value: officialCsat, meta: { metricType: "official", explanation: "Direct CSAT field from source." } }
+      ? {
+          value: officialCsat,
+          meta: {
+            metricType: "official",
+            explanation: "CSAT = (% values 4-5 - % values 1-2) among purchasers.",
+          },
+        }
       : {
           value: stageSatisfaction,
           meta: { metricType: "proxy", explanation: "CSAT proxy from Brand Satisfaction stage." },
@@ -222,11 +282,12 @@ const computeCsnMetrics = (rows: JourneyStageRow[], stageAggregates: JourneyStag
 const computeBenchmark = (
   rows: JourneyStageRow[],
   orderedStages: JourneyStage[],
+  conversionStages: JourneyStage[],
   benchmarkScope: JourneyBenchmarkScope
 ): JourneyBenchmarkAggregate => {
   const scopedRows = rows;
   const { stageAggregates } = computeStageAggregates(scopedRows, orderedStages);
-  const links = computeLinkAggregates(scopedRows, orderedStages);
+  const links = computeLinkAggregates(scopedRows, conversionStages, stageAggregates);
   const { csat, nps } = computeCsnMetrics(scopedRows, stageAggregates);
   return {
     scope: benchmarkScope,
@@ -335,8 +396,11 @@ export function computeRetentionScore(brand: JourneyBrandAggregate): {
   studiesCovered: number;
 } {
   const points = brand.links
-    .filter((link) => typeof link.conversion === "number")
-    .map((link) => ({ value: link.conversion as number, weight: Math.max(1, link.linkCoverageWeight) }));
+    .filter(
+      (link) =>
+        isCoreConversionLink(link.fromStage, link.toStage) && typeof link.conversionForIndex === "number"
+    )
+    .map((link) => ({ value: link.conversionForIndex as number, weight: Math.max(1, link.linkCoverageWeight) }));
   const score = weightedAverage(points);
   const validLinks = points.length;
   const studiesCovered = brand.links.reduce((max, link) => Math.max(max, link.linkCoverageStudies), 0);
@@ -369,21 +433,33 @@ export function computeNpsScore(brand: JourneyBrandAggregate): number | null {
   return clamp(nps * 100, 0, 100);
 }
 
+export function computeCsatScore(brand: JourneyBrandAggregate): number | null {
+  const csat = brand.csat.value;
+  if (typeof csat !== "number") return null;
+  return clamp(csat * 100, 0, 100);
+}
+
 export function computeJourneyIndex(components: {
   retentionScore100: number | null;
   gapScore100: number | null;
+  csatScore100: number | null;
   npsScore100: number | null;
-}): { value: number | null; weightsApplied: { retention: number; gap: number; nps: number }; partial: boolean } {
+}): {
+  value: number | null;
+  weightsApplied: { retention: number; gap: number; csat: number; nps: number };
+  partial: boolean;
+} {
   const entries = [
     { key: "retention" as const, value: components.retentionScore100, weight: JOURNEY_INDEX_WEIGHTS.retention },
     { key: "gap" as const, value: components.gapScore100, weight: JOURNEY_INDEX_WEIGHTS.gap },
+    { key: "csat" as const, value: components.csatScore100, weight: JOURNEY_INDEX_WEIGHTS.csat },
     { key: "nps" as const, value: components.npsScore100, weight: JOURNEY_INDEX_WEIGHTS.nps },
   ].filter((item) => typeof item.value === "number");
 
   if (!entries.length) {
     return {
       value: null,
-      weightsApplied: { retention: 0, gap: 0, nps: 0 },
+      weightsApplied: { retention: 0, gap: 0, csat: 0, nps: 0 },
       partial: true,
     };
   }
@@ -396,6 +472,7 @@ export function computeJourneyIndex(components: {
     weightsApplied: {
       retention: normalized.find((item) => item.key === "retention")?.weight || 0,
       gap: normalized.find((item) => item.key === "gap")?.weight || 0,
+      csat: normalized.find((item) => item.key === "csat")?.weight || 0,
       nps: normalized.find((item) => item.key === "nps")?.weight || 0,
     },
     partial: entries.length < 3,
@@ -410,7 +487,9 @@ export function computeFunnelHealth(
     benchmark.links.map((item) => [`${item.fromStage}->${item.toStage}`, item.dropAbs])
   );
   const validDrops = brand.links
-    .filter((link) => typeof link.dropAbs === "number")
+    .filter(
+      (link) => isCoreConversionLink(link.fromStage, link.toStage) && typeof link.dropAbs === "number"
+    )
     .map((link) => ({ ...link, dropPts: (link.dropAbs as number) * 100 }));
 
   if (!validDrops.length) {
@@ -455,10 +534,17 @@ export function buildJourneyModel(
   _filters: Record<string, unknown> | null,
   options?: BuildJourneyOptions
 ): JourneyModel {
-  const merged = { ...DEFAULT_BUILD_JOURNEY_OPTIONS, ...(options || {}) };
+  const merged = {
+    includeAdAwareness: options?.includeAdAwareness ?? DEFAULT_BUILD_JOURNEY_OPTIONS.includeAdAwareness ?? true,
+    benchmarkScope: options?.benchmarkScope ?? DEFAULT_BUILD_JOURNEY_OPTIONS.benchmarkScope ?? "category",
+    benchmarkRows: options?.benchmarkRows,
+  };
   const rowsAll = normalizeJourneyResults(rawJourneyResults);
+  const benchmarkRowsAll = options?.benchmarkRows ? normalizeJourneyResults(options.benchmarkRows) : rowsAll;
   const stagesOrdered = toOrderedStages(merged.includeAdAwareness);
+  const conversionStages = toCoreConversionStages(stagesOrdered);
   const rows = rowsAll.filter((row) => stagesOrdered.includes(row.stage));
+  const benchmarkRowsSource = benchmarkRowsAll.filter((row) => stagesOrdered.includes(row.stage));
 
   const grouped = new Map<string, JourneyStageRow[]>();
   for (const row of rows) {
@@ -472,8 +558,8 @@ export function buildJourneyModel(
   for (const [key, groupRows] of grouped) {
     const first = groupRows[0];
     const { stageAggregates } = computeStageAggregates(groupRows, stagesOrdered);
-    const links = computeLinkAggregates(groupRows, stagesOrdered);
-    const totalConversion = computeTotalConversion(groupRows, stagesOrdered);
+    const links = computeLinkAggregates(groupRows, conversionStages, stageAggregates);
+    const totalConversion = computeTotalConversion(stageAggregates, conversionStages);
     const { csat, nps } = computeCsnMetrics(groupRows, stageAggregates);
     brandStageAggregates.push({
       key,
@@ -490,16 +576,21 @@ export function buildJourneyModel(
 
   const benchmarkRows: JourneyStageRow[] = [];
   if (merged.benchmarkScope === "category") {
-    const keys = new Set(rows.map((row) => benchmarkKey(row, "category")));
+    const keys = new Set(benchmarkRowsSource.map((row) => benchmarkKey(row, "category")));
     for (const key of keys) {
-      const scoped = rows.filter((row) => benchmarkKey(row, "category") === key);
+      const scoped = benchmarkRowsSource.filter((row) => benchmarkKey(row, "category") === key);
       benchmarkRows.push(...scoped);
     }
   } else {
-    benchmarkRows.push(...rows);
+    benchmarkRows.push(...benchmarkRowsSource);
   }
 
-  const benchmarkStageAggregates = computeBenchmark(benchmarkRows, stagesOrdered, merged.benchmarkScope);
+  const benchmarkStageAggregates = computeBenchmark(
+    benchmarkRows,
+    stagesOrdered,
+    conversionStages,
+    merged.benchmarkScope
+  );
   const stageGaps = computeGaps(brandStageAggregates, benchmarkStageAggregates);
 
   const ranksByStage = {} as Record<JourneyStage, JourneyStageRank[]>;
@@ -511,15 +602,24 @@ export function buildJourneyModel(
   const coverage = coverageSummary(brandStageAggregates, stagesOrdered);
   const journeyIndexByBrand: Record<string, JourneyIndexEntry> = {};
   const funnelHealthByBrand: Record<string, FunnelHealthEntry> = {};
+  const indexExclusions: JourneyModel["metadata"]["indexExclusions"] = [];
 
   const benchmarkRetention = {
     value100: weightedAverage(
       benchmarkStageAggregates.links
-        .filter((link) => typeof link.conversion === "number")
-        .map((link) => ({ value: link.conversion as number, weight: Math.max(1, link.linkCoverageWeight) }))
+        .filter(
+          (link) =>
+            isCoreConversionLink(link.fromStage, link.toStage) && typeof link.conversionForIndex === "number"
+        )
+        .map((link) => ({ value: link.conversionForIndex as number, weight: Math.max(1, link.linkCoverageWeight) }))
     ),
   };
   const benchmarkGap = { value100: 50 };
+  const benchmarkCsat = (() => {
+    const value = benchmarkStageAggregates.csat.value;
+    if (typeof value !== "number") return null;
+    return clamp(value * 100, 0, 100);
+  })();
   const benchmarkNps = (() => {
     const value = benchmarkStageAggregates.nps.value;
     if (typeof value !== "number") return null;
@@ -529,6 +629,7 @@ export function buildJourneyModel(
   const benchmarkIndexComputation = computeJourneyIndex({
     retentionScore100: benchmarkRetention.value100 == null ? null : clamp(benchmarkRetention.value100, 0, 1) * 100,
     gapScore100: benchmarkGap.value100,
+    csatScore100: benchmarkCsat,
     npsScore100: benchmarkNps,
   });
   const benchmarkFunnelHealth = computeFunnelHealth(
@@ -548,10 +649,12 @@ export function buildJourneyModel(
   for (const brand of brandStageAggregates) {
     const retention = computeRetentionScore(brand);
     const gap = computeGapScore(brand, benchmarkStageAggregates);
+    const csatScore = computeCsatScore(brand);
     const npsScore = computeNpsScore(brand);
     const index = computeJourneyIndex({
       retentionScore100: retention.value100,
       gapScore100: gap.value100,
+      csatScore100: csatScore,
       npsScore100: npsScore,
     });
     const validStages = brand.stageAggregates.filter((stage) => typeof stage.value === "number").length;
@@ -576,11 +679,23 @@ export function buildJourneyModel(
       components: {
         retentionScore100: retention.value100 == null ? null : Number(retention.value100.toFixed(1)),
         gapScore100: gap.value100 == null ? null : Number(gap.value100.toFixed(1)),
+        csatScore100: csatScore == null ? null : Number(csatScore.toFixed(1)),
         npsScore100: npsScore == null ? null : Number(npsScore.toFixed(1)),
         weightsApplied: index.weightsApplied,
         partial: index.partial,
       },
     };
+    for (const link of brand.links) {
+      if (!link.excludedFromIndex) continue;
+      indexExclusions.push({
+        brandKey: brand.key,
+        brandName: brand.brandName,
+        fromStage: link.fromStage,
+        toStage: link.toStage,
+        reason: "Conversion anomaly (>100% or non-monotonic stage relation).",
+        anomalyStudies: link.anomalyStudies,
+      });
+    }
     funnelHealthByBrand[brand.key] = computeFunnelHealth(brand, benchmarkStageAggregates);
   }
 
@@ -597,17 +712,24 @@ export function buildJourneyModel(
     deltaVsBenchmark: 0,
     confidence: confidenceFromCoverage(
       benchmarkStageAggregates.stageAggregates.filter((stage) => typeof stage.value === "number").length,
-      benchmarkStageAggregates.links.filter((link) => typeof link.conversion === "number").length,
+      benchmarkStageAggregates.links.filter(
+        (link) =>
+          isCoreConversionLink(link.fromStage, link.toStage) && typeof link.conversionForIndex === "number"
+      ).length,
       stagesOrdered.length,
       Math.max(...benchmarkStageAggregates.links.map((link) => link.linkCoverageStudies), 0)
     ),
     validStages: benchmarkStageAggregates.stageAggregates.filter((stage) => typeof stage.value === "number").length,
-    validLinks: benchmarkStageAggregates.links.filter((link) => typeof link.conversion === "number").length,
+    validLinks: benchmarkStageAggregates.links.filter(
+      (link) =>
+        isCoreConversionLink(link.fromStage, link.toStage) && typeof link.conversionForIndex === "number"
+    ).length,
     studiesCovered: Math.max(...benchmarkStageAggregates.links.map((link) => link.linkCoverageStudies), 0),
     components: {
       retentionScore100:
         benchmarkRetention.value100 == null ? null : Number((clamp(benchmarkRetention.value100, 0, 1) * 100).toFixed(1)),
       gapScore100: benchmarkGap.value100,
+      csatScore100: benchmarkCsat == null ? null : Number(benchmarkCsat.toFixed(1)),
       npsScore100: benchmarkNps == null ? null : Number(benchmarkNps.toFixed(1)),
       weightsApplied: benchmarkIndexComputation.weightsApplied,
       partial: benchmarkIndexComputation.partial,
@@ -620,6 +742,11 @@ export function buildJourneyModel(
     if (coverageEntry.studies === 0) {
       warnings.push(`${stage} missing in 100% of studies for the current selection.`);
     }
+  }
+  if (indexExclusions.length) {
+    warnings.push(
+      `${indexExclusions.length} conversion segments were excluded from Journey Index due to data-quality anomalies.`
+    );
   }
 
   return {
@@ -638,6 +765,7 @@ export function buildJourneyModel(
       includeAdAwareness: merged.includeAdAwareness,
       warnings,
       coverage,
+      indexExclusions,
     },
   };
 }

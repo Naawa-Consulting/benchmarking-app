@@ -24,7 +24,15 @@ const VALUE_COLUMN_CANDIDATES = [
   "journey_pct",
   "journey_value",
 ];
-const WEIGHT_COLUMN_CANDIDATES = ["weight", "base_n", "baseN", "sample_n", "n"];
+const WEIGHT_COLUMN_CANDIDATES = [
+  "base_n_population",
+  "aggregation_weight_n",
+  "weight",
+  "base_n",
+  "baseN",
+  "sample_n",
+  "n",
+];
 const BRAND_COLUMN_CANDIDATES = ["brand", "brand_name", "brandName"];
 const BRAND_ID_COLUMN_CANDIDATES = ["brand_id", "brandId"];
 const STUDY_COLUMN_CANDIDATES = ["study_id", "studyId"];
@@ -83,11 +91,18 @@ const normalizeDims = (row: Record<string, unknown>): JourneyDims => ({
   time: (readField(row, TIME_COLUMN_CANDIDATES) as string | null | undefined) ?? null,
 });
 
-const normalizeWeight = (row: Record<string, unknown>): { weight: number; baseN: number | null } => {
+const normalizeWeight = (
+  row: Record<string, unknown>
+): { weight: number; baseN: number | null; basePopulationN: number | null } => {
+  const popKey = findField(row, ["base_n_population"]);
+  const popValue = popKey ? toNumber(row[popKey]) : null;
+  if (popValue && popValue > 0) {
+    return { weight: popValue, baseN: popValue, basePopulationN: popValue };
+  }
   const key = findField(row, WEIGHT_COLUMN_CANDIDATES);
   const value = key ? toNumber(row[key]) : null;
-  if (value && value > 0) return { weight: value, baseN: value };
-  return { weight: 1, baseN: null };
+  if (value && value > 0) return { weight: value, baseN: value, basePopulationN: null };
+  return { weight: 1, baseN: null, basePopulationN: null };
 };
 
 const normalizeStudyAndBrand = (row: Record<string, unknown>) => {
@@ -119,7 +134,7 @@ export function normalizeJourneyResults(rawJourneyResults: unknown): JourneyStag
     const { studyId, brandName, brandId } = normalizeStudyAndBrand(row);
     if (!studyId || !brandName) continue;
     const dims = normalizeDims(row);
-    const { weight, baseN } = normalizeWeight(row);
+    const { weight, baseN, basePopulationN } = normalizeWeight(row);
 
     if (rowLooksLong(row)) {
       const stage = normalizeStage(readField(row, STAGE_COLUMN_CANDIDATES));
@@ -134,6 +149,7 @@ export function normalizeJourneyResults(rawJourneyResults: unknown): JourneyStag
         value: normalizePct(valueRaw),
         weight,
         baseN,
+        basePopulationN,
         raw: row,
       });
       continue;
@@ -154,6 +170,7 @@ export function normalizeJourneyResults(rawJourneyResults: unknown): JourneyStag
         value: normalizePct(valueRaw),
         weight,
         baseN,
+        basePopulationN,
         raw: row,
       });
     }
@@ -161,4 +178,3 @@ export function normalizeJourneyResults(rawJourneyResults: unknown): JourneyStag
 
   return normalized;
 }
-

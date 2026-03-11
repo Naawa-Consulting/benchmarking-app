@@ -108,6 +108,10 @@ const formatPts = (value: number | null) => {
   const points = value * 100;
   return `${points >= 0 ? "+" : ""}${points.toFixed(1)} pts`;
 };
+const formatPct = (value: number | null) => {
+  if (typeof value !== "number") return "--";
+  return `${(value * 100).toFixed(1)}%`;
+};
 
 function InsightHeroCard({
   title,
@@ -179,14 +183,14 @@ function ExperienceSignalCard({
         <div className="rounded-xl border border-ink/10 bg-white/60 p-3">
           <div className="flex items-center justify-between gap-2">
             <p className="text-slate">CSAT</p>
-            <p className="font-semibold text-ink">{typeof csat.value === "number" ? `${csat.value.toFixed(1)} pts` : "--"}</p>
+            <p className="font-semibold text-ink">{formatPct(csat.value)}</p>
           </div>
           <p className={`mt-1 text-[11px] ${deltaTone(csat.value, csat.benchmark)}`}>{deltaText(csat.value, csat.benchmark)}</p>
         </div>
         <div className="rounded-xl border border-ink/10 bg-white/60 p-3">
           <div className="flex items-center justify-between gap-2">
             <p className="text-slate">NPS</p>
-            <p className="font-semibold text-ink">{typeof nps.value === "number" ? `${nps.value.toFixed(1)} pts` : "--"}</p>
+            <p className="font-semibold text-ink">{formatPct(nps.value)}</p>
           </div>
           <p className={`mt-1 text-[11px] ${deltaTone(nps.value, nps.benchmark)}`}>{deltaText(nps.value, nps.benchmark)}</p>
         </div>

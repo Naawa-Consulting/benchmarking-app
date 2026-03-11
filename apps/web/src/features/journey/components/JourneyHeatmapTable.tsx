@@ -8,6 +8,7 @@ type JourneyHeatmapTableProps = {
   matrix: JourneyHeatmapMatrix;
   focusedBrandName?: string | null;
   onFocusBrand?: (brandName: string | null) => void;
+  benchmarkLabel?: string;
 };
 
 type HeatmapTab = "levels" | "conversion" | "gap";
@@ -50,11 +51,17 @@ const conversionCellColor = (value: number | null) => {
 const formatValue = (col: HeatmapColumn, value: number | null) => {
   if (value == null) return "--";
   if (col.key === "journey_index") return `${Math.round(value * 100)}`;
-  if (col.key === "nps") return `${(value * 100).toFixed(1)}`;
+  if (col.key === "nps" || col.key === "csat") return `${(value * 100).toFixed(1)}%`;
   return pct(value);
 };
 
-const buildTooltip = (tab: HeatmapTab, rowLabel: string, col: HeatmapColumn, cell: HeatmapCell | undefined) => {
+const buildTooltip = (
+  tab: HeatmapTab,
+  rowLabel: string,
+  col: HeatmapColumn,
+  cell: HeatmapCell | undefined,
+  benchmarkLabel: string
+) => {
   if (!cell) return "";
   if (cell.missing) return `${rowLabel} - ${col.label}\nNo disponible para esta seleccion.`;
 
@@ -67,18 +74,27 @@ const buildTooltip = (tab: HeatmapTab, rowLabel: string, col: HeatmapColumn, cel
   }
 
   if (tab === "conversion") {
+    const quality = cell.anomalyFlag
+      ? [
+          "Quality: anomaly detected (conversion >100% or non-monotonic stages).",
+          cell.excludedFromIndex ? "Journey Index: this segment is excluded." : null,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : null;
     return [
       `${rowLabel} - ${col.label}`,
       `Conversion: ${pct(cell.value)}`,
       `Drop vs bench: ${pts(cell.delta)}`,
       `Coverage: ${cell.coverageStudies}/${cell.totalStudies} studies`,
+      quality,
     ].join("\n");
   }
 
   return [
     `${rowLabel} - ${col.label}`,
     `Value: ${formatValue(col, cell.value)}`,
-    `Benchmark: ${formatValue(col, cell.benchmarkValue)}`,
+    `${benchmarkLabel}: ${formatValue(col, cell.benchmarkValue)}`,
     `Delta: ${pts(cell.delta)}`,
     `Coverage: ${cell.coverageStudies}/${cell.totalStudies} studies`,
   ].join("\n");
@@ -88,6 +104,7 @@ export default function JourneyHeatmapTable({
   matrix,
   focusedBrandName = null,
   onFocusBrand,
+  benchmarkLabel = "Benchmark",
 }: JourneyHeatmapTableProps) {
   const [sortKey, setSortKey] = useState<string>("stage:Brand Awareness");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -115,7 +132,7 @@ export default function JourneyHeatmapTable({
   }, [columns, sortKey]);
 
   const sortedRows = useMemo(() => {
-    const benchmark = matrix.rows.find((row) => row.isBenchmark) || null;
+    const benchmarkRows = matrix.rows.filter((row) => row.isBenchmark);
     const nonBenchmark = matrix.rows.filter((row) => !row.isBenchmark);
     const ordered = nonBenchmark.slice().sort((a, b) => {
       const av = a.cells[sortKey]?.value;
@@ -126,7 +143,7 @@ export default function JourneyHeatmapTable({
     });
 
     const body = rowMode === "all" ? ordered : ordered.slice(0, 25);
-    return { benchmark, body };
+    return { benchmarkRows, body };
   }, [matrix.rows, rowMode, sortDir, sortKey]);
 
   const updateShadows = () => {
@@ -253,26 +270,31 @@ export default function JourneyHeatmapTable({
               </tr>
             </thead>
 
-            {sortedRows.benchmark && (
+            {sortedRows.benchmarkRows.length > 0 && (
               <tbody>
-                <tr className="border-b border-ink/10">
-                  <td className="sticky left-0 top-[33px] z-[19] border-r border-ink/10 bg-slate-100 px-3 py-2 font-semibold text-ink">
-                    Benchmark
-                  </td>
-                  {columns.map((col) => {
-                    const cell = sortedRows.benchmark?.cells[col.key];
-                    return (
-                      <td
-                        key={`benchmark-${col.key}`}
-                        className="sticky top-[33px] z-[18] min-w-[96px] px-2 py-2 text-center text-ink"
-                        style={{ background: "rgba(241,245,249,1)" }}
-                        title={buildTooltip(activeTab, "Benchmark", col, cell)}
-                      >
-                        {cell?.missing ? <span className="text-slate">—</span> : <p>{formatValue(col, cell?.value ?? null)}</p>}
-                      </td>
-                    );
-                  })}
-                </tr>
+                {sortedRows.benchmarkRows.map((benchmarkRow, idx) => (
+                  <tr key={benchmarkRow.key} className="border-b border-ink/10">
+                    <td
+                      className="sticky left-0 z-[19] border-r border-ink/10 bg-slate-100 px-3 py-2 font-semibold text-ink"
+                      style={{ top: `${33 + idx * 33}px` }}
+                    >
+                      {benchmarkRow.brandName}
+                    </td>
+                    {columns.map((col) => {
+                      const cell = benchmarkRow.cells[col.key];
+                      return (
+                        <td
+                          key={`${benchmarkRow.key}-${col.key}`}
+                          className="sticky z-[18] min-w-[96px] px-2 py-2 text-center text-ink"
+                          style={{ top: `${33 + idx * 33}px`, background: "rgba(241,245,249,1)" }}
+                          title={buildTooltip(activeTab, benchmarkRow.brandName, col, cell, benchmarkLabel)}
+                        >
+                          {cell?.missing ? <span className="text-slate">—</span> : <p>{formatValue(col, cell?.value ?? null)}</p>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
               </tbody>
             )}
 
@@ -306,7 +328,7 @@ export default function JourneyHeatmapTable({
 
                     {columns.map((col) => {
                       const cell = row.cells[col.key];
-                      const tooltip = buildTooltip(activeTab, row.brandName, col, cell);
+                      const tooltip = buildTooltip(activeTab, row.brandName, col, cell, benchmarkLabel);
                       const background = getCellBackground(col, cell);
                       return (
                         <td
@@ -319,7 +341,14 @@ export default function JourneyHeatmapTable({
                             <span className="text-slate">—</span>
                           ) : (
                             <div className="leading-tight">
-                              <p>{formatValue(col, cell?.value ?? null)}</p>
+                              <p>
+                                {formatValue(col, cell?.value ?? null)}
+                                {activeTab === "conversion" && cell?.anomalyFlag ? (
+                                  <span className="ml-1 inline-block rounded-full border border-amber-500/40 bg-amber-500/15 px-1 py-0 text-[9px] text-amber-700">
+                                    !
+                                  </span>
+                                ) : null}
+                              </p>
                               {activeTab !== "levels" && (
                                 <p className="text-[10px] text-slate">{cell?.delta == null ? "—" : pts(cell.delta)}</p>
                               )}

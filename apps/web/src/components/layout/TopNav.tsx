@@ -9,9 +9,9 @@ type NavItem = {
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Overview", href: "/" },
   { label: "Journey", href: "/journey" },
-  { label: "Demand Network", href: "/demand-network" },
+  { label: "Network", href: "/demand-network" },
+  { label: "Tracking", href: "/tracking" },
   { label: "Admin", href: "/admin" },
 ];
 
@@ -37,14 +37,14 @@ export default function TopNav() {
   return (
     <header className="fixed inset-x-0 top-0 z-40 border-b border-ink/10 bg-[#f7f8fa]/95 backdrop-blur">
       <div className="mx-auto flex h-[68px] w-full max-w-[1800px] items-center gap-4 px-4 sm:px-6 lg:px-8">
-        <Link href="/" className="min-w-0 shrink-0 leading-tight">
+        <Link href="/journey" className="min-w-0 shrink-0 leading-tight">
           <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate">BBS</p>
           <p className="truncate text-sm font-semibold text-ink">Brand Benchmark Suite</p>
         </Link>
 
         <nav className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-visible py-1">
           {NAV_ITEMS.map((item) => {
-            const active = item.href === "/" ? pathname === "/" : pathname?.startsWith(item.href);
+            const active = pathname?.startsWith(item.href);
             return <NavTab key={item.href} item={item} active={Boolean(active)} />;
           })}
         </nav>

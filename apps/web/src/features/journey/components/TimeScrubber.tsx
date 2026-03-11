@@ -41,7 +41,7 @@ export default function TimeScrubber({
           }`}
           onClick={() => onToggleEnabled(!enabled)}
         >
-          Time Mode: {enabled ? "On" : "Off"}
+          Year Mode: {enabled ? "On" : "Off"}
         </button>
 
         {enabled && (
@@ -80,7 +80,7 @@ export default function TimeScrubber({
               <option value="2">2x</option>
             </select>
             <span className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-slate">
-              {selectedBucket ? `Time: ${selectedBucket}` : "Time: --"}
+              {selectedBucket ? `Year: ${selectedBucket}` : "Year: --"}
             </span>
           </>
         )}

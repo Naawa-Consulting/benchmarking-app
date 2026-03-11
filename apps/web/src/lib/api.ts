@@ -63,16 +63,28 @@ export function postJourneyTableMultiDetailed(
   payload: unknown,
   limitMode: "top10" | "top25" | "all",
   sortBy = "brand_awareness",
-  sortDir: "asc" | "desc" = "desc"
+  sortDir: "asc" | "desc" = "desc",
+  options?: {
+    includeGlobalBenchmark?: boolean;
+    signal?: AbortSignal;
+    responseMode?: "benchmark_global" | "benchmark_selection" | "full";
+  }
 ) {
   const params = new URLSearchParams({
     limit_mode: limitMode,
     sort_by: sortBy,
     sort_dir: sortDir,
   });
+  if (options?.includeGlobalBenchmark) {
+    params.set("include_global_benchmark", "1");
+  }
+  if (options?.responseMode) {
+    params.set("response_mode", options.responseMode);
+  }
   return requestDetailed(`/analytics/journey/table_multi?${params.toString()}`, {
     method: "POST",
     body: JSON.stringify(payload),
+    signal: options?.signal,
   });
 }
 

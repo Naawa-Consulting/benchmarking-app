@@ -56,6 +56,23 @@ type FilterBarProps = {
   onClear: () => void;
 };
 
+const extractYear = (value: string | null | undefined): string | null => {
+  if (!value) return null;
+  const match = String(value).match(/(19|20)\d{2}/);
+  return match ? match[0] : null;
+};
+
+const quarterOrder = (value: string): number => {
+  const normalized = value.trim();
+  const yearQuarter = normalized.match(/(\d{4})\D*Q([1-4])/i);
+  if (yearQuarter) return Number(yearQuarter[1]) * 10 + Number(yearQuarter[2]);
+  const quarterYear = normalized.match(/Q([1-4])\D*(\d{4})/i);
+  if (quarterYear) return Number(quarterYear[2]) * 10 + Number(quarterYear[1]);
+  const yearOnly = normalized.match(/(19|20)\d{2}/);
+  if (yearOnly) return Number(yearOnly[0]) * 10;
+  return Number.MAX_SAFE_INTEGER;
+};
+
 export function FilterBar({
   state,
   studies,
@@ -91,6 +108,28 @@ export function FilterBar({
       )
     ).sort();
   }, [taxonomyItems, state.sector, state.subsector]);
+
+  const years = useMemo(() => {
+    const set = new Set<string>();
+    for (const value of dateOptions.quarters) {
+      const year = extractYear(value);
+      if (year) set.add(year);
+    }
+    return Array.from(set).sort((a, b) => Number(a) - Number(b));
+  }, [dateOptions.quarters]);
+
+  const yearQuarterRange = useMemo(() => {
+    const map = new Map<string, { from: string; to: string }>();
+    const sorted = [...dateOptions.quarters].sort((a, b) => quarterOrder(a) - quarterOrder(b));
+    for (const quarter of sorted) {
+      const year = extractYear(quarter);
+      if (!year) continue;
+      const existing = map.get(year);
+      if (!existing) map.set(year, { from: quarter, to: quarter });
+      else map.set(year, { from: existing.from, to: quarter });
+    }
+    return map;
+  }, [dateOptions.quarters]);
 
   return (
     <section className="main-surface rounded-3xl p-6">
@@ -237,14 +276,18 @@ export function FilterBar({
         </div>
 
         <div className="space-y-3">
-          <label className="text-sm font-medium text-slate">Date (Quarter)</label>
+          <label className="text-sm font-medium text-slate">Date (Year)</label>
           <select
             className="w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
-            value={state.quarterFrom || ""}
-            onChange={(event) => onChange({ quarterFrom: event.target.value || null })}
+            value={extractYear(state.quarterFrom) || ""}
+            onChange={(event) => {
+              const nextYear = event.target.value || null;
+              const quarterRange = nextYear ? yearQuarterRange.get(nextYear) : null;
+              onChange({ quarterFrom: quarterRange?.from || null });
+            }}
           >
-            <option value="">From quarter</option>
-            {dateOptions.quarters.map((value) => (
+            <option value="">From year</option>
+            {years.map((value) => (
               <option key={`from-${value}`} value={value}>
                 {value}
               </option>
@@ -252,11 +295,15 @@ export function FilterBar({
           </select>
           <select
             className="w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
-            value={state.quarterTo || ""}
-            onChange={(event) => onChange({ quarterTo: event.target.value || null })}
+            value={extractYear(state.quarterTo) || ""}
+            onChange={(event) => {
+              const nextYear = event.target.value || null;
+              const quarterRange = nextYear ? yearQuarterRange.get(nextYear) : null;
+              onChange({ quarterTo: quarterRange?.to || null });
+            }}
           >
-            <option value="">To quarter</option>
-            {dateOptions.quarters.map((value) => (
+            <option value="">To year</option>
+            {years.map((value) => (
               <option key={`to-${value}`} value={value}>
                 {value}
               </option>

@@ -27,6 +27,7 @@ export type JourneyStageRow = {
   value: number;
   weight: number;
   baseN?: number | null;
+  basePopulationN?: number | null;
   raw?: Record<string, unknown>;
 };
 
@@ -42,8 +43,12 @@ export type JourneyLinkAggregate = {
   toStage: JourneyStage;
   dropAbs: number | null;
   conversion: number | null;
+  conversionForIndex: number | null;
   linkCoverageStudies: number;
   linkCoverageWeight: number;
+  anomalyFlag: boolean;
+  anomalyStudies: number;
+  excludedFromIndex: boolean;
 };
 
 export type JourneyMetricMeta = {
@@ -114,6 +119,14 @@ export type JourneyModelMetadata = {
   includeAdAwareness: boolean;
   warnings: string[];
   coverage: JourneyCoverageSummary;
+  indexExclusions: Array<{
+    brandKey: string;
+    brandName: string;
+    fromStage: JourneyStage;
+    toStage: JourneyStage;
+    reason: string;
+    anomalyStudies: number;
+  }>;
 };
 
 export type JourneyIndexConfidence = "high" | "med" | "low";
@@ -121,10 +134,12 @@ export type JourneyIndexConfidence = "high" | "med" | "low";
 export type JourneyIndexComponents = {
   retentionScore100: number | null;
   gapScore100: number | null;
+  csatScore100: number | null;
   npsScore100: number | null;
   weightsApplied: {
     retention: number;
     gap: number;
+    csat: number;
     nps: number;
   };
   partial: boolean;
@@ -170,6 +185,7 @@ export type JourneyModel = {
 export type BuildJourneyOptions = {
   includeAdAwareness?: boolean;
   benchmarkScope?: JourneyBenchmarkScope;
+  benchmarkRows?: unknown;
 };
 
 export type BrandGroupDims = JourneyDims & {
@@ -177,7 +193,7 @@ export type BrandGroupDims = JourneyDims & {
   brandId?: string | null;
 };
 
-export const DEFAULT_BUILD_JOURNEY_OPTIONS: Required<BuildJourneyOptions> = {
+export const DEFAULT_BUILD_JOURNEY_OPTIONS: BuildJourneyOptions = {
   includeAdAwareness: true,
   benchmarkScope: "category",
 };
