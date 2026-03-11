@@ -113,6 +113,9 @@ export default function JourneyHeatmapTable({
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const [showLeftShadow, setShowLeftShadow] = useState(false);
   const [showRightShadow, setShowRightShadow] = useState(false);
+  const [scrollTop, setScrollTop] = useState(0);
+  const ROW_HEIGHT = 33;
+  const VIEWPORT_HEIGHT = 620;
 
   const columns = useMemo(() => {
     const levels = matrix.columns.filter((col) => col.group === "stage" || col.group === "metric");
@@ -146,6 +149,26 @@ export default function JourneyHeatmapTable({
     return { benchmarkRows, body };
   }, [matrix.rows, rowMode, sortDir, sortKey]);
 
+  const bodyWindow = useMemo(() => {
+    const shouldVirtualize = rowMode === "all" && sortedRows.body.length > 120;
+    if (!shouldVirtualize) {
+      return {
+        rows: sortedRows.body,
+        topSpacer: 0,
+        bottomSpacer: 0,
+      };
+    }
+    const overscan = 12;
+    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - overscan);
+    const visibleCount = Math.ceil(VIEWPORT_HEIGHT / ROW_HEIGHT) + overscan * 2;
+    const end = Math.min(sortedRows.body.length, start + visibleCount);
+    return {
+      rows: sortedRows.body.slice(start, end),
+      topSpacer: start * ROW_HEIGHT,
+      bottomSpacer: Math.max(0, (sortedRows.body.length - end) * ROW_HEIGHT),
+    };
+  }, [rowMode, scrollTop, sortedRows.body]);
+
   const updateShadows = () => {
     const node = scrollerRef.current;
     if (!node) return;
@@ -158,7 +181,10 @@ export default function JourneyHeatmapTable({
     updateShadows();
     const node = scrollerRef.current;
     if (!node) return;
-    const onScroll = () => updateShadows();
+    const onScroll = () => {
+      updateShadows();
+      setScrollTop(node.scrollTop);
+    };
     node.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", onScroll);
     return () => {
@@ -299,7 +325,12 @@ export default function JourneyHeatmapTable({
             )}
 
             <tbody>
-              {sortedRows.body.map((row) => {
+              {bodyWindow.topSpacer > 0 && (
+                <tr>
+                  <td colSpan={columns.length + 1} style={{ height: `${bodyWindow.topSpacer}px` }} />
+                </tr>
+              )}
+              {bodyWindow.rows.map((row) => {
                 const isFocused = !!focusedBrandName && row.brandName === focusedBrandName;
                 const shouldDim = !!focusedBrandName && row.brandName !== focusedBrandName;
                 return (
@@ -360,6 +391,11 @@ export default function JourneyHeatmapTable({
                   </tr>
                 );
               })}
+              {bodyWindow.bottomSpacer > 0 && (
+                <tr>
+                  <td colSpan={columns.length + 1} style={{ height: `${bodyWindow.bottomSpacer}px` }} />
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

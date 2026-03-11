@@ -1,5 +1,4 @@
 import json
-import json
 import time
 from pathlib import Path
 
@@ -166,11 +165,16 @@ def _collect_journey_rows(
     root: Path,
     study_ids: list[str],
     filters: dict,
+    classification_cache: dict[str, dict[str, str | None]] | None = None,
 ) -> tuple[list[dict], list[str], int]:
     rows: list[dict] = []
     matched_studies: list[str] = []
+    local_classification_cache = classification_cache if classification_cache is not None else {}
     for study_id in study_ids:
-        classification = _classification_for_study(root, study_id)
+        classification = local_classification_cache.get(study_id)
+        if classification is None:
+            classification = _classification_for_study(root, study_id)
+            local_classification_cache[study_id] = classification
         if not _study_matches_taxonomy(filters, classification):
             continue
         safe_classification = {
@@ -475,528 +479,270 @@ def _classification_for_study(root: Path, study_id: str) -> dict[str, str | None
         return json.loads(classification_path.read_text(encoding="utf-8-sig"))
 
 
-def _compute_table_rows(study_id: str) -> list[dict]:
+def _compute_table_rows_internal(
+    study_id: str,
+    respondent_cte: str | None,
+    respondent_params: list,
+    strict_missing: bool,
+) -> list[dict]:
     root = get_repo_root()
     curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
     if not curated_path.exists():
-        raise HTTPException(status_code=404, detail="Curated mart not found for study.")
+        if strict_missing:
+            raise HTTPException(status_code=404, detail="Curated mart not found for study.")
+        return []
 
     conn = get_duckdb_connection()
-    load_parquet_as_view(conn, "journey_table", str(curated_path))
-    has_value_raw = (
-        conn.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.columns
-            WHERE table_name = 'journey_table' AND column_name = 'value_raw'
-            """
-        ).fetchone()[0]
-        > 0
-    )
-    value_expr = (
-        "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
-        if has_value_raw
-        else "TRY_CAST(value AS INTEGER)"
-    )
-    query = f"""
-        WITH base AS (
+    try:
+        load_parquet_as_view(conn, "journey_table", str(curated_path))
+        has_value_raw = (
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_name = 'journey_table' AND column_name = 'value_raw'
+                """
+            ).fetchone()[0]
+            > 0
+        )
+        value_expr = (
+            "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
+            if has_value_raw
+            else "TRY_CAST(value AS INTEGER)"
+        )
+        respondent_filter = (
+            "AND respondent_id IN (SELECT respondent_id FROM filtered_respondents)"
+            if respondent_cte
+            else ""
+        )
+        cte_prefix = f"{respondent_cte}," if respondent_cte else ""
+        query = f"""
+            WITH {cte_prefix}
+            base AS (
+                SELECT
+                    LOWER(stage) AS stage,
+                    brand,
+                    respondent_id,
+                    {value_expr} AS v_int
+                FROM journey_table
+                WHERE study_id = ?
+                  AND brand IS NOT NULL
+                  AND TRIM(CAST(brand AS VARCHAR)) <> ''
+                  {respondent_filter}
+            ),
+            population AS (
+                SELECT
+                    COUNT(DISTINCT respondent_id) AS population_n
+                FROM (
+                    SELECT respondent_id
+                    FROM journey_table
+                    WHERE study_id = ?
+                      AND respondent_id IS NOT NULL
+                      {respondent_filter}
+                ) pop
+            ),
+            stage_stats AS (
+                SELECT stage, MAX(v_int) AS max_v
+                FROM base
+                WHERE v_int IS NOT NULL
+                GROUP BY stage
+            ),
+            stage_nums AS (
+                SELECT
+                    b.brand,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'awareness' AND b.v_int = 1 THEN b.respondent_id END) AS awareness_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'ad_awareness' AND b.v_int = 1 THEN b.respondent_id END) AS ad_awareness_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'consideration' AND b.v_int = 1 THEN b.respondent_id END) AS consideration_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'purchase' AND b.v_int = 1 THEN b.respondent_id END) AS purchase_num,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN b.stage = 'satisfaction'
+                                 AND (
+                                    (ss.max_v IS NOT NULL AND ss.max_v >= 5 AND b.v_int IN (4, 5))
+                                    OR (ss.max_v IS NOT NULL AND ss.max_v < 5 AND b.v_int = 1)
+                                 )
+                            THEN b.respondent_id
+                        END
+                    ) AS satisfaction_num,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN b.stage = 'recommendation'
+                                 AND (
+                                    (rs.max_v IS NOT NULL AND rs.max_v >= 9 AND b.v_int IN (9, 10))
+                                    OR (rs.max_v IS NOT NULL AND rs.max_v < 9 AND b.v_int = 1)
+                                 )
+                            THEN b.respondent_id
+                        END
+                    ) AS recommendation_num
+                FROM base b
+                LEFT JOIN stage_stats ss ON ss.stage = 'satisfaction'
+                LEFT JOIN stage_stats rs ON rs.stage = 'recommendation'
+                WHERE b.v_int IS NOT NULL
+                GROUP BY b.brand
+            ),
+            purchasers AS (
+                SELECT brand, respondent_id
+                FROM base
+                WHERE stage = 'purchase' AND v_int = 1 AND respondent_id IS NOT NULL
+                GROUP BY brand, respondent_id
+            ),
+            satisfaction_by_resp AS (
+                SELECT brand, respondent_id, MAX(v_int) AS sat_v
+                FROM base
+                WHERE stage = 'satisfaction' AND v_int IS NOT NULL AND respondent_id IS NOT NULL
+                GROUP BY brand, respondent_id
+            ),
+            recommendation_by_resp AS (
+                SELECT brand, respondent_id, MAX(v_int) AS rec_v
+                FROM base
+                WHERE stage = 'recommendation' AND v_int IS NOT NULL AND respondent_id IS NOT NULL
+                GROUP BY brand, respondent_id
+            ),
+            experience AS (
+                SELECT
+                    p.brand,
+                    COUNT(DISTINCT p.respondent_id) AS purchase_n,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN ss.max_v IS NOT NULL AND ss.max_v >= 5 AND s.sat_v IN (4, 5) THEN p.respondent_id
+                            WHEN ss.max_v IS NOT NULL AND ss.max_v < 5 AND s.sat_v = 1 THEN p.respondent_id
+                            ELSE NULL
+                        END
+                    ) AS top2_n,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN ss.max_v IS NOT NULL AND ss.max_v >= 5 AND s.sat_v IN (1, 2) THEN p.respondent_id
+                            ELSE NULL
+                        END
+                    ) AS bottom2_n,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN rs.max_v IS NOT NULL AND rs.max_v >= 9 AND r.rec_v IN (9, 10) THEN p.respondent_id
+                            WHEN rs.max_v IS NOT NULL AND rs.max_v < 9 AND r.rec_v = 1 THEN p.respondent_id
+                            ELSE NULL
+                        END
+                    ) AS promoters_n,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN rs.max_v IS NOT NULL AND rs.max_v >= 9 AND r.rec_v BETWEEN 0 AND 6 THEN p.respondent_id
+                            WHEN rs.max_v IS NOT NULL AND rs.max_v < 9 AND r.rec_v = 0 THEN p.respondent_id
+                            ELSE NULL
+                        END
+                    ) AS detractors_n
+                FROM purchasers p
+                LEFT JOIN satisfaction_by_resp s
+                  ON s.brand = p.brand AND s.respondent_id = p.respondent_id
+                LEFT JOIN recommendation_by_resp r
+                  ON r.brand = p.brand AND r.respondent_id = p.respondent_id
+                LEFT JOIN stage_stats ss ON ss.stage = 'satisfaction'
+                LEFT JOIN stage_stats rs ON rs.stage = 'recommendation'
+                GROUP BY p.brand, ss.max_v, rs.max_v
+            ),
+            brands AS (
+                SELECT brand FROM stage_nums
+                UNION
+                SELECT brand FROM experience
+            )
             SELECT
-                LOWER(stage) AS stage,
-                brand,
-                respondent_id,
-                {value_expr} AS v_int
-            FROM journey_table
-            WHERE study_id = ?
-              AND brand IS NOT NULL
-              AND TRIM(CAST(brand AS VARCHAR)) <> ''
-        ),
-        population AS (
-            SELECT COUNT(DISTINCT respondent_id) AS population_n
-            FROM journey_table
-            WHERE study_id = ?
-              AND respondent_id IS NOT NULL
-        ),
-        stage_stats AS (
-            SELECT stage, MAX(v_int) AS max_v
-            FROM base
-            WHERE v_int IS NOT NULL
-            GROUP BY stage
-        ),
-        nums AS (
-            SELECT b.stage, b.brand, COUNT(DISTINCT b.respondent_id) AS num
-            FROM base b
-            LEFT JOIN stage_stats s ON s.stage = b.stage
-            WHERE b.v_int IS NOT NULL
-              AND (
-                (b.stage IN ('awareness', 'ad_awareness', 'consideration', 'purchase') AND b.v_int = 1)
-                OR (
-                    b.stage = 'satisfaction'
-                    AND (
-                        (s.max_v IS NOT NULL AND s.max_v >= 5 AND b.v_int IN (4, 5))
-                        OR (s.max_v IS NOT NULL AND s.max_v < 5 AND b.v_int = 1)
-                    )
-                )
-                OR (
-                    b.stage = 'recommendation'
-                    AND (
-                        (s.max_v IS NOT NULL AND s.max_v >= 9 AND b.v_int IN (9, 10))
-                        OR (s.max_v IS NOT NULL AND s.max_v < 9 AND b.v_int = 1)
-                    )
-                )
-              )
-            GROUP BY b.stage, b.brand
-        )
-        SELECT
-            n.stage,
-            n.brand,
-            n.num,
-            p.population_n
-        FROM nums n
-        CROSS JOIN population p
-    """
-    rows = conn.execute(query, [study_id, study_id]).fetchall()
-    if not rows:
-        raise HTTPException(status_code=404, detail=f"No curated data for {study_id}.")
+                b.brand,
+                p.population_n,
+                s.awareness_num,
+                s.ad_awareness_num,
+                s.consideration_num,
+                s.purchase_num,
+                s.satisfaction_num,
+                s.recommendation_num,
+                e.purchase_n,
+                e.top2_n,
+                e.bottom2_n,
+                e.promoters_n,
+                e.detractors_n
+            FROM brands b
+            CROSS JOIN population p
+            LEFT JOIN stage_nums s ON s.brand = b.brand
+            LEFT JOIN experience e ON e.brand = b.brand
+        """
+        params = [*respondent_params, study_id, study_id]
+        rows = conn.execute(query, params).fetchall()
+        if not rows:
+            if strict_missing:
+                raise HTTPException(status_code=404, detail=f"No curated data for {study_id}.")
+            return []
 
-    table: dict[str, dict[str, float | None]] = {}
-    for stage, brand, num, population_n in rows:
-        if stage not in TABLE_STAGE_MAP:
-            continue
-        metric_key = TABLE_STAGE_MAP[stage]
-        if brand not in table:
-            table[brand] = {value: None for value in TABLE_STAGE_MAP.values()}
-            table[brand]["base_n_population"] = None
-            table[brand]["aggregation_weight_n"] = None
-        pct = None
-        if population_n and population_n > 0:
-            pct = round((num / population_n) * 100, 1)
-        table[brand][metric_key] = pct
-        table[brand]["base_n_population"] = population_n if population_n and population_n > 0 else None
-        table[brand]["aggregation_weight_n"] = population_n if population_n and population_n > 0 else None
+        result_rows: list[dict] = []
+        for (
+            brand,
+            population_n,
+            awareness_num,
+            ad_awareness_num,
+            consideration_num,
+            purchase_num,
+            satisfaction_num,
+            recommendation_num,
+            purchaser_n,
+            top2_n,
+            bottom2_n,
+            promoters_n,
+            detractors_n,
+        ) in rows:
+            if not brand:
+                continue
+            values: dict[str, float | None] = {value: None for value in TABLE_STAGE_MAP.values()}
+            values["base_n_population"] = population_n if population_n and population_n > 0 else None
+            values["aggregation_weight_n"] = population_n if population_n and population_n > 0 else None
 
-    csat_query = f"""
-        WITH
-        base AS (
-            SELECT
-                LOWER(stage) AS stage,
-                brand,
-                respondent_id,
-                {value_expr} AS v_int
-            FROM journey_table
-            WHERE study_id = ?
-              AND brand IS NOT NULL
-              AND TRIM(CAST(brand AS VARCHAR)) <> ''
-        ),
-        stage_stats AS (
-            SELECT stage, MAX(v_int) AS max_v
-            FROM base
-            WHERE v_int IS NOT NULL
-            GROUP BY stage
-        ),
-        purchasers AS (
-            SELECT brand, respondent_id
-            FROM base
-            WHERE stage = 'purchase' AND v_int = 1 AND respondent_id IS NOT NULL
-            GROUP BY brand, respondent_id
-        ),
-        satisfaction_by_resp AS (
-            SELECT brand, respondent_id, MAX(v_int) AS sat_v
-            FROM base
-            WHERE stage = 'satisfaction' AND v_int IS NOT NULL AND respondent_id IS NOT NULL
-            GROUP BY brand, respondent_id
-        )
-        SELECT
-            p.brand,
-            COUNT(DISTINCT p.respondent_id) AS purchase_n,
-            COUNT(
-                DISTINCT CASE
-                    WHEN ss.max_v IS NOT NULL AND ss.max_v >= 5 AND s.sat_v IN (4, 5) THEN p.respondent_id
-                    WHEN ss.max_v IS NOT NULL AND ss.max_v < 5 AND s.sat_v = 1 THEN p.respondent_id
-                    ELSE NULL
-                END
-            ) AS top2_n,
-            COUNT(
-                DISTINCT CASE
-                    WHEN ss.max_v IS NOT NULL AND ss.max_v >= 5 AND s.sat_v IN (1, 2) THEN p.respondent_id
-                    ELSE NULL
-                END
-            ) AS bottom2_n
-        FROM purchasers p
-        LEFT JOIN satisfaction_by_resp s
-          ON s.brand = p.brand AND s.respondent_id = p.respondent_id
-        LEFT JOIN stage_stats ss
-          ON ss.stage = 'satisfaction'
-        GROUP BY p.brand, ss.max_v
-    """
-    csat_rows = conn.execute(csat_query, [study_id]).fetchall()
-    for brand, purchase_n, top2_n, bottom2_n in csat_rows:
-        if brand not in table:
-            table[brand] = {value: None for value in TABLE_STAGE_MAP.values()}
-            table[brand]["base_n_population"] = None
-            table[brand]["aggregation_weight_n"] = None
-        if purchase_n and purchase_n > 0:
-            csat_pct = round(((top2_n - bottom2_n) / purchase_n) * 100, 1)
-            table[brand]["csat"] = csat_pct
-        else:
-            table[brand]["csat"] = None
+            if population_n and population_n > 0:
+                numerator_map = {
+                    "brand_awareness": awareness_num,
+                    "ad_awareness": ad_awareness_num,
+                    "brand_consideration": consideration_num,
+                    "brand_purchase": purchase_num,
+                    "brand_satisfaction": satisfaction_num,
+                    "brand_recommendation": recommendation_num,
+                }
+                for metric, numerator in numerator_map.items():
+                    if numerator is None:
+                        continue
+                    values[metric] = round((float(numerator) / float(population_n)) * 100, 1)
 
-    nps_query = f"""
-        WITH
-        base AS (
-            SELECT
-                LOWER(stage) AS stage,
-                brand,
-                respondent_id,
-                {value_expr} AS v_int
-            FROM journey_table
-            WHERE study_id = ?
-              AND brand IS NOT NULL
-              AND TRIM(CAST(brand AS VARCHAR)) <> ''
-        ),
-        stage_stats AS (
-            SELECT stage, MAX(v_int) AS max_v
-            FROM base
-            WHERE v_int IS NOT NULL
-            GROUP BY stage
-        ),
-        purchasers AS (
-            SELECT brand, respondent_id
-            FROM base
-            WHERE stage = 'purchase' AND v_int = 1 AND respondent_id IS NOT NULL
-            GROUP BY brand, respondent_id
-        ),
-        recommendation_by_resp AS (
-            SELECT brand, respondent_id, MAX(v_int) AS rec_v
-            FROM base
-            WHERE stage = 'recommendation' AND v_int IS NOT NULL AND respondent_id IS NOT NULL
-            GROUP BY brand, respondent_id
-        )
-        SELECT
-            p.brand,
-            COUNT(DISTINCT p.respondent_id) AS purchase_n,
-            COUNT(
-                DISTINCT CASE
-                    WHEN rs.max_v IS NOT NULL AND rs.max_v >= 9 AND r.rec_v IN (9, 10) THEN p.respondent_id
-                    WHEN rs.max_v IS NOT NULL AND rs.max_v < 9 AND r.rec_v = 1 THEN p.respondent_id
-                    ELSE NULL
-                END
-            ) AS promoters_n,
-            COUNT(
-                DISTINCT CASE
-                    WHEN rs.max_v IS NOT NULL AND rs.max_v >= 9 AND r.rec_v BETWEEN 0 AND 6 THEN p.respondent_id
-                    WHEN rs.max_v IS NOT NULL AND rs.max_v < 9 AND r.rec_v = 0 THEN p.respondent_id
-                    ELSE NULL
-                END
-            ) AS detractors_n
-        FROM purchasers p
-        LEFT JOIN recommendation_by_resp r
-          ON r.brand = p.brand AND r.respondent_id = p.respondent_id
-        LEFT JOIN stage_stats rs
-          ON rs.stage = 'recommendation'
-        GROUP BY p.brand, rs.max_v
-    """
-    nps_rows = conn.execute(nps_query, [study_id]).fetchall()
-    for brand, purchase_n, promoters_n, detractors_n in nps_rows:
-        if brand not in table:
-            table[brand] = {value: None for value in TABLE_STAGE_MAP.values()}
-            table[brand]["base_n_population"] = None
-            table[brand]["aggregation_weight_n"] = None
-        if purchase_n and purchase_n > 0:
-            nps_pct = round(((promoters_n - detractors_n) / purchase_n) * 100, 1)
-            table[brand]["nps"] = nps_pct
-        else:
-            table[brand]["nps"] = None
+            if purchaser_n and purchaser_n > 0:
+                values["csat"] = round(((float(top2_n or 0) - float(bottom2_n or 0)) / float(purchaser_n)) * 100, 1)
+                values["nps"] = round(((float(promoters_n or 0) - float(detractors_n or 0)) / float(purchaser_n)) * 100, 1)
+            else:
+                values["csat"] = None
+                values["nps"] = None
 
-    result_rows = []
-    for brand, values in table.items():
-        awareness_ceiling_applied = _apply_awareness_ceiling(values)
-        result_rows.append(
-            {
-                "brand": brand,
-                "brand_awareness": values.get("brand_awareness"),
-                "ad_awareness": values.get("ad_awareness"),
-                "brand_consideration": values.get("brand_consideration"),
-                "brand_purchase": values.get("brand_purchase"),
-                "brand_satisfaction": values.get("brand_satisfaction"),
-                "brand_recommendation": values.get("brand_recommendation"),
-                "csat": values.get("csat"),
-                "nps": values.get("nps"),
-                "awareness_ceiling_applied": awareness_ceiling_applied,
-            }
-        )
-    return result_rows
+            awareness_ceiling_applied = _apply_awareness_ceiling(values)
+            result_rows.append(
+                {
+                    "brand": brand,
+                    "brand_awareness": values.get("brand_awareness"),
+                    "ad_awareness": values.get("ad_awareness"),
+                    "brand_consideration": values.get("brand_consideration"),
+                    "brand_purchase": values.get("brand_purchase"),
+                    "brand_satisfaction": values.get("brand_satisfaction"),
+                    "brand_recommendation": values.get("brand_recommendation"),
+                    "csat": values.get("csat"),
+                    "nps": values.get("nps"),
+                    "base_n_population": values.get("base_n_population"),
+                    "aggregation_weight_n": values.get("aggregation_weight_n"),
+                    "awareness_ceiling_applied": awareness_ceiling_applied,
+                }
+            )
+
+        return result_rows
+    finally:
+        conn.close()
+
+
+def _compute_table_rows(study_id: str) -> list[dict]:
+    return _compute_table_rows_internal(study_id, None, [], True)
 
 
 def _compute_table_rows_filtered(study_id: str, filters: dict) -> list[dict]:
-    root = get_repo_root()
-    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-    if not curated_path.exists():
-        return []
-
     respondent_cte, respondent_params, eligible = _respondent_filter_cte(study_id, filters)
     if not eligible:
         return []
-
-    conn = get_duckdb_connection()
-    load_parquet_as_view(conn, "journey_table", str(curated_path))
-    has_value_raw = (
-        conn.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.columns
-            WHERE table_name = 'journey_table' AND column_name = 'value_raw'
-            """
-        ).fetchone()[0]
-        > 0
-    )
-    value_expr = (
-        "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
-        if has_value_raw
-        else "TRY_CAST(value AS INTEGER)"
-    )
-    respondent_filter = (
-        "AND respondent_id IN (SELECT respondent_id FROM filtered_respondents)"
-        if respondent_cte
-        else ""
-    )
-    cte_prefix = f"{respondent_cte}," if respondent_cte else ""
-    query = f"""
-        WITH {cte_prefix}
-        base AS (
-            SELECT
-                LOWER(stage) AS stage,
-                brand,
-                respondent_id,
-                {value_expr} AS v_int
-            FROM journey_table
-            WHERE study_id = ?
-              AND brand IS NOT NULL
-              AND TRIM(CAST(brand AS VARCHAR)) <> ''
-              {respondent_filter}
-        ),
-        population AS (
-            SELECT
-                COUNT(DISTINCT respondent_id) AS population_n
-            FROM (
-                SELECT respondent_id
-                FROM journey_table
-                WHERE study_id = ?
-                  AND respondent_id IS NOT NULL
-                  {respondent_filter}
-            ) pop
-        ),
-        stage_stats AS (
-            SELECT stage, MAX(v_int) AS max_v
-            FROM base
-            WHERE v_int IS NOT NULL
-            GROUP BY stage
-        ),
-        nums AS (
-            SELECT b.stage, b.brand, COUNT(DISTINCT b.respondent_id) AS num
-            FROM base b
-            LEFT JOIN stage_stats s ON s.stage = b.stage
-            WHERE b.v_int IS NOT NULL
-              AND (
-                (b.stage IN ('awareness', 'ad_awareness', 'consideration', 'purchase') AND b.v_int = 1)
-                OR (
-                    b.stage = 'satisfaction'
-                    AND (
-                        (s.max_v IS NOT NULL AND s.max_v >= 5 AND b.v_int IN (4, 5))
-                        OR (s.max_v IS NOT NULL AND s.max_v < 5 AND b.v_int = 1)
-                    )
-                )
-                OR (
-                    b.stage = 'recommendation'
-                    AND (
-                        (s.max_v IS NOT NULL AND s.max_v >= 9 AND b.v_int IN (9, 10))
-                        OR (s.max_v IS NOT NULL AND s.max_v < 9 AND b.v_int = 1)
-                    )
-                )
-              )
-            GROUP BY b.stage, b.brand
-        )
-        SELECT
-            n.stage,
-            n.brand,
-            n.num,
-            p.population_n
-        FROM nums n
-        CROSS JOIN population p
-    """
-    params = [*respondent_params, study_id, study_id]
-    rows = conn.execute(query, params).fetchall()
-    if not rows:
-        return []
-
-    table: dict[str, dict[str, float | None]] = {}
-    for stage, brand, num, population_n in rows:
-        if stage not in TABLE_STAGE_MAP:
-            continue
-        metric_key = TABLE_STAGE_MAP[stage]
-        if brand not in table:
-            table[brand] = {value: None for value in TABLE_STAGE_MAP.values()}
-            table[brand]["base_n_population"] = None
-            table[brand]["aggregation_weight_n"] = None
-        pct = None
-        if population_n and population_n > 0:
-            pct = round((num / population_n) * 100, 1)
-        table[brand][metric_key] = pct
-        table[brand]["base_n_population"] = population_n if population_n and population_n > 0 else None
-        table[brand]["aggregation_weight_n"] = population_n if population_n and population_n > 0 else None
-
-    csat_query = f"""
-        WITH {cte_prefix}
-        base AS (
-            SELECT
-                LOWER(stage) AS stage,
-                brand,
-                respondent_id,
-                {value_expr} AS v_int
-            FROM journey_table
-            WHERE study_id = ?
-              AND brand IS NOT NULL
-              AND TRIM(CAST(brand AS VARCHAR)) <> ''
-              {respondent_filter}
-        ),
-        stage_stats AS (
-            SELECT stage, MAX(v_int) AS max_v
-            FROM base
-            WHERE v_int IS NOT NULL
-            GROUP BY stage
-        ),
-        purchasers AS (
-            SELECT brand, respondent_id
-            FROM base
-            WHERE stage = 'purchase' AND v_int = 1 AND respondent_id IS NOT NULL
-            GROUP BY brand, respondent_id
-        ),
-        satisfaction_by_resp AS (
-            SELECT brand, respondent_id, MAX(v_int) AS sat_v
-            FROM base
-            WHERE stage = 'satisfaction' AND v_int IS NOT NULL AND respondent_id IS NOT NULL
-            GROUP BY brand, respondent_id
-        )
-        SELECT
-            p.brand,
-            COUNT(DISTINCT p.respondent_id) AS purchase_n,
-            COUNT(
-                DISTINCT CASE
-                    WHEN ss.max_v IS NOT NULL AND ss.max_v >= 5 AND s.sat_v IN (4, 5) THEN p.respondent_id
-                    WHEN ss.max_v IS NOT NULL AND ss.max_v < 5 AND s.sat_v = 1 THEN p.respondent_id
-                    ELSE NULL
-                END
-            ) AS top2_n,
-            COUNT(
-                DISTINCT CASE
-                    WHEN ss.max_v IS NOT NULL AND ss.max_v >= 5 AND s.sat_v IN (1, 2) THEN p.respondent_id
-                    ELSE NULL
-                END
-            ) AS bottom2_n
-        FROM purchasers p
-        LEFT JOIN satisfaction_by_resp s
-          ON s.brand = p.brand AND s.respondent_id = p.respondent_id
-        LEFT JOIN stage_stats ss
-          ON ss.stage = 'satisfaction'
-        GROUP BY p.brand, ss.max_v
-    """
-    csat_params = [*respondent_params, study_id]
-    csat_rows = conn.execute(csat_query, csat_params).fetchall()
-    for brand, purchase_n, top2_n, bottom2_n in csat_rows:
-        if brand not in table:
-            table[brand] = {value: None for value in TABLE_STAGE_MAP.values()}
-            table[brand]["base_n_population"] = None
-            table[brand]["aggregation_weight_n"] = None
-        if purchase_n and purchase_n > 0:
-            csat_pct = round(((top2_n - bottom2_n) / purchase_n) * 100, 1)
-            table[brand]["csat"] = csat_pct
-        else:
-            table[brand]["csat"] = None
-
-    nps_query = f"""
-        WITH {cte_prefix}
-        base AS (
-            SELECT
-                LOWER(stage) AS stage,
-                brand,
-                respondent_id,
-                {value_expr} AS v_int
-            FROM journey_table
-            WHERE study_id = ?
-              AND brand IS NOT NULL
-              AND TRIM(CAST(brand AS VARCHAR)) <> ''
-              {respondent_filter}
-        ),
-        stage_stats AS (
-            SELECT stage, MAX(v_int) AS max_v
-            FROM base
-            WHERE v_int IS NOT NULL
-            GROUP BY stage
-        ),
-        purchasers AS (
-            SELECT brand, respondent_id
-            FROM base
-            WHERE stage = 'purchase' AND v_int = 1 AND respondent_id IS NOT NULL
-            GROUP BY brand, respondent_id
-        ),
-        recommendation_by_resp AS (
-            SELECT brand, respondent_id, MAX(v_int) AS rec_v
-            FROM base
-            WHERE stage = 'recommendation' AND v_int IS NOT NULL AND respondent_id IS NOT NULL
-            GROUP BY brand, respondent_id
-        )
-        SELECT
-            p.brand,
-            COUNT(DISTINCT p.respondent_id) AS purchase_n,
-            COUNT(
-                DISTINCT CASE
-                    WHEN rs.max_v IS NOT NULL AND rs.max_v >= 9 AND r.rec_v IN (9, 10) THEN p.respondent_id
-                    WHEN rs.max_v IS NOT NULL AND rs.max_v < 9 AND r.rec_v = 1 THEN p.respondent_id
-                    ELSE NULL
-                END
-            ) AS promoters_n,
-            COUNT(
-                DISTINCT CASE
-                    WHEN rs.max_v IS NOT NULL AND rs.max_v >= 9 AND r.rec_v BETWEEN 0 AND 6 THEN p.respondent_id
-                    WHEN rs.max_v IS NOT NULL AND rs.max_v < 9 AND r.rec_v = 0 THEN p.respondent_id
-                    ELSE NULL
-                END
-            ) AS detractors_n
-        FROM purchasers p
-        LEFT JOIN recommendation_by_resp r
-          ON r.brand = p.brand AND r.respondent_id = p.respondent_id
-        LEFT JOIN stage_stats rs
-          ON rs.stage = 'recommendation'
-        GROUP BY p.brand, rs.max_v
-    """
-    nps_params = [*respondent_params, study_id]
-    nps_rows = conn.execute(nps_query, nps_params).fetchall()
-    for brand, purchase_n, promoters_n, detractors_n in nps_rows:
-        if brand not in table:
-            table[brand] = {value: None for value in TABLE_STAGE_MAP.values()}
-            table[brand]["base_n_population"] = None
-            table[brand]["aggregation_weight_n"] = None
-        if purchase_n and purchase_n > 0:
-            nps_pct = round(((promoters_n - detractors_n) / purchase_n) * 100, 1)
-            table[brand]["nps"] = nps_pct
-        else:
-            table[brand]["nps"] = None
-
-    result_rows = []
-    for brand, values in table.items():
-        awareness_ceiling_applied = _apply_awareness_ceiling(values)
-        result_rows.append(
-            {
-                "brand": brand,
-                "brand_awareness": values.get("brand_awareness"),
-                "ad_awareness": values.get("ad_awareness"),
-                "brand_consideration": values.get("brand_consideration"),
-                "brand_purchase": values.get("brand_purchase"),
-                "brand_satisfaction": values.get("brand_satisfaction"),
-                "brand_recommendation": values.get("brand_recommendation"),
-                "csat": values.get("csat"),
-                "nps": values.get("nps"),
-                "awareness_ceiling_applied": awareness_ceiling_applied,
-            }
-        )
-    return result_rows
+    return _compute_table_rows_internal(study_id, respondent_cte, respondent_params, False)
 
 
 def _compute_touchpoint_rows(study_id: str) -> list[dict]:
@@ -1313,13 +1059,16 @@ def _journey_table_multi_filtered(
                 "cache_hit": False,
                 "studies_processed": 0,
                 "query_ms": 0,
+                "collect_ms": 0,
+                "aggregate_ms": 0,
                 "total_ms": round((time.perf_counter() - started_at) * 1000, 2),
             },
         }
         _journey_table_multi_set_cached(cache_key, payload)
         return payload
 
-    query_started = time.perf_counter()
+    classification_cache: dict[str, dict[str, str | None]] = {}
+    collect_started = time.perf_counter()
     selection_rows_all: list[dict] = []
     selection_rows: list[dict] = []
     selection_studies: list[str] = []
@@ -1329,17 +1078,27 @@ def _journey_table_multi_filtered(
     processed = len(study_ids)
 
     if normalized_mode in {"benchmark_selection", "full"}:
-        selection_rows_all, selection_studies, processed = _collect_journey_rows(root, study_ids, filters)
-        selection_rows = _sort_and_limit_journey_rows(selection_rows_all, sort_metric, sort_dir, normalized_limit)
+        selection_rows_all, selection_studies, processed = _collect_journey_rows(
+            root, study_ids, filters, classification_cache
+        )
 
     if normalized_mode in {"benchmark_global"} or include_global_benchmark:
         global_filters = dict(filters)
         global_filters["sector"] = None
         global_filters["subsector"] = None
         global_filters["category"] = None
-        global_rows_all, global_studies, _ = _collect_journey_rows(root, study_ids, global_filters)
+        global_rows_all, global_studies, _ = _collect_journey_rows(
+            root, study_ids, global_filters, classification_cache
+        )
+    collect_ms = round((time.perf_counter() - collect_started) * 1000, 2)
+
+    aggregate_started = time.perf_counter()
+    if normalized_mode in {"benchmark_selection", "full"}:
+        selection_rows = _sort_and_limit_journey_rows(selection_rows_all, sort_metric, sort_dir, normalized_limit)
+    if normalized_mode in {"benchmark_global"} or include_global_benchmark:
         global_rows = _sort_and_limit_journey_rows(global_rows_all, sort_metric, sort_dir, normalized_limit)
-    query_ms = round((time.perf_counter() - query_started) * 1000, 2)
+    aggregate_ms = round((time.perf_counter() - aggregate_started) * 1000, 2)
+    query_ms = round(collect_ms + aggregate_ms, 2)
 
     payload: dict = {
         "rows": selection_rows,
@@ -1352,6 +1111,8 @@ def _journey_table_multi_filtered(
             "cache_hit": False,
             "studies_processed": processed,
             "query_ms": query_ms,
+            "collect_ms": collect_ms,
+            "aggregate_ms": aggregate_ms,
             "total_ms": round((time.perf_counter() - started_at) * 1000, 2),
             "response_mode": normalized_mode,
         },

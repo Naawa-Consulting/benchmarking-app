@@ -43,6 +43,8 @@ type JourneyTableMultiPayload = {
     cache_hit?: boolean;
     total_ms?: number;
     query_ms?: number;
+    collect_ms?: number;
+    aggregate_ms?: number;
     studies_processed?: number;
     response_mode?: string;
   };
@@ -278,6 +280,9 @@ export default function JourneyPage() {
   const coreAbortRef = useRef<AbortController | null>(null);
   const selectionAbortRef = useRef<AbortController | null>(null);
   const detailAbortRef = useRef<AbortController | null>(null);
+  const coreFingerprintRef = useRef<string>("");
+  const selectionFingerprintRef = useRef<string>("");
+  const detailFingerprintRef = useRef<string>("");
 
   const activeSelectionRows = useMemo(() => {
     if (brandsEnabled && detailRows && detailRows.length) return detailRows;
@@ -325,6 +330,55 @@ export default function JourneyPage() {
     return map;
   }, [dateOptions.quarters]);
 
+  const scopeKey = useMemo(
+    () =>
+      JSON.stringify({
+        studyIds: scope.studyIds,
+        sector: scope.sector,
+        subsector: scope.subsector,
+        category: scope.category,
+        gender: scope.gender,
+        nse: scope.nse,
+        state: scope.state,
+        ageMin: scope.ageMin,
+        ageMax: scope.ageMax,
+        timeGranularity: scope.timeGranularity,
+        quarterFrom: scope.quarterFrom,
+        quarterTo: scope.quarterTo,
+      }),
+    [
+      scope.ageMax,
+      scope.ageMin,
+      scope.category,
+      scope.gender,
+      scope.nse,
+      scope.quarterFrom,
+      scope.quarterTo,
+      scope.sector,
+      scope.state,
+      scope.studyIds,
+      scope.subsector,
+      scope.timeGranularity,
+    ]
+  );
+
+  const modelFilters = useMemo(
+    () => ({
+      studyIds: scope.studyIds,
+      sector: scope.sector,
+      subsector: scope.subsector,
+      category: scope.category,
+      gender: scope.gender,
+      nse: scope.nse,
+      state: scope.state,
+      ageMin: scope.ageMin,
+      ageMax: scope.ageMax,
+      quarterFrom: scope.quarterFrom,
+      quarterTo: scope.quarterTo,
+    }),
+    [scopeKey]
+  );
+
   const fetchInputs = useMemo(() => {
     const animatedYearRange = timeMode && selectedTimeBucket ? yearQuarterRange.get(selectedTimeBucket) : null;
     const effectiveQuarterFrom = animatedYearRange?.from ?? scope.quarterFrom;
@@ -343,13 +397,9 @@ export default function JourneyPage() {
       quarter_from: effectiveQuarterFrom,
       quarter_to: effectiveQuarterTo,
     };
-    const fingerprint = JSON.stringify({
-      payload,
-      includeAdAwareness,
-      selectedTimeBucket: timeMode ? selectedTimeBucket : null,
-    });
+    const fingerprint = JSON.stringify(payload);
     return { payload, fingerprint };
-  }, [includeAdAwareness, scope, selectedTimeBucket, timeMode, yearQuarterRange]);
+  }, [scopeKey, selectedTimeBucket, timeMode, yearQuarterRange]);
 
   useEffect(() => {
     const includeAd = searchParams.get("include_ad_awareness");
@@ -409,21 +459,14 @@ export default function JourneyPage() {
     router.replace(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`, { scroll: false });
   };
 
+  const selectionSourceRows = useMemo(
+    () => (selectionRows.length ? selectionRows : coreRows),
+    [selectionRows, coreRows]
+  );
+
   const selectionJourneyModel = useMemo(() => {
     const t0 = performance.now();
-    const model = buildJourneyModel(activeSelectionRows, {
-        studyIds: scope.studyIds,
-        sector: scope.sector,
-        subsector: scope.subsector,
-        category: scope.category,
-        gender: scope.gender,
-        nse: scope.nse,
-        state: scope.state,
-        ageMin: scope.ageMin,
-        ageMax: scope.ageMax,
-        quarterFrom: scope.quarterFrom,
-        quarterTo: scope.quarterTo,
-      },
+    const model = buildJourneyModel(selectionSourceRows, modelFilters,
       { includeAdAwareness, benchmarkScope: "category" }
     );
     if (process.env.NODE_ENV !== "production") {
@@ -431,33 +474,21 @@ export default function JourneyPage() {
       console.debug("[JourneyPerf] model_ms", Number((t1 - t0).toFixed(2)));
     }
     return model;
-  }, [activeSelectionRows, includeAdAwareness, scope]);
+  }, [selectionSourceRows, includeAdAwareness, modelFilters]);
 
-  const globalBenchmarkJourneyModel = useMemo(
-    () =>
-      buildJourneyModel(
-        activeSelectionRows,
-        {
-          studyIds: scope.studyIds,
-          sector: scope.sector,
-          subsector: scope.subsector,
-          category: scope.category,
-          gender: scope.gender,
-          nse: scope.nse,
-          state: scope.state,
-          ageMin: scope.ageMin,
-          ageMax: scope.ageMax,
-          quarterFrom: scope.quarterFrom,
-          quarterTo: scope.quarterTo,
-        },
-        {
-          includeAdAwareness,
-          benchmarkScope: "category",
-          benchmarkRows: globalBenchmarkRows,
-        }
-      ),
-    [activeSelectionRows, globalBenchmarkRows, includeAdAwareness, scope]
-  );
+  const globalBenchmarkJourneyModel = useMemo(() => {
+    const t0 = performance.now();
+    const model = buildJourneyModel(selectionSourceRows, modelFilters, {
+      includeAdAwareness,
+      benchmarkScope: "category",
+      benchmarkRows: globalBenchmarkRows,
+    });
+    if (process.env.NODE_ENV !== "production") {
+      const t1 = performance.now();
+      console.debug("[JourneyPerf] global_model_ms", Number((t1 - t0).toFixed(2)));
+    }
+    return model;
+  }, [selectionSourceRows, globalBenchmarkRows, includeAdAwareness, modelFilters]);
 
   const benchmarkLabel = benchmarkMode === "global" ? "Global Benchmark" : "Selection Benchmark";
   const journeyModel = benchmarkMode === "global" ? globalBenchmarkJourneyModel : selectionJourneyModel;
@@ -532,6 +563,9 @@ export default function JourneyPage() {
 
   useEffect(() => {
     startInsightsTransition(() => {
+      if (brandsEnabled && detailLoading) {
+        return;
+      }
       if (!brandsEnabled) {
         setInsightsState(buildBenchmarkOnlyInsights(selectionJourneyModel, globalBenchmarkJourneyModel));
         return;
@@ -551,6 +585,7 @@ export default function JourneyPage() {
   }, [
     brandsEnabled,
     compareBrand,
+    detailLoading,
     focusBrand,
     globalBenchmarkJourneyModel,
     journeyModel,
@@ -621,6 +656,7 @@ export default function JourneyPage() {
   useEffect(() => {
     const seq = coreReqSeqRef.current + 1;
     coreReqSeqRef.current = seq;
+    coreFingerprintRef.current = fetchInputs.fingerprint;
     coreAbortRef.current?.abort();
     const abortController = new AbortController();
     coreAbortRef.current = abortController;
@@ -634,7 +670,12 @@ export default function JourneyPage() {
       signal: abortController.signal,
     })
       .then((result) => {
-        if (abortController.signal.aborted || seq !== coreReqSeqRef.current) return;
+        if (
+          abortController.signal.aborted ||
+          seq !== coreReqSeqRef.current ||
+          coreFingerprintRef.current !== fetchInputs.fingerprint
+        )
+          return;
         if (!result.ok) {
           const message =
             result.data && typeof result.data === "object" && "detail" in result.data
@@ -655,15 +696,27 @@ export default function JourneyPage() {
             requestSeq: seq,
             cacheHit: payload.meta?.cache_hit ?? false,
             rows: globalRows.length,
+            collectMs: payload.meta?.collect_ms ?? null,
+            aggregateMs: payload.meta?.aggregate_ms ?? null,
           });
         }
       })
       .catch((error) => {
-        if (abortController.signal.aborted || seq !== coreReqSeqRef.current) return;
+        if (
+          abortController.signal.aborted ||
+          seq !== coreReqSeqRef.current ||
+          coreFingerprintRef.current !== fetchInputs.fingerprint
+        )
+          return;
         setCoreMessage(error instanceof Error ? error.message : "Unable to load global benchmark.");
       })
       .finally(() => {
-        if (abortController.signal.aborted || seq !== coreReqSeqRef.current) return;
+        if (
+          abortController.signal.aborted ||
+          seq !== coreReqSeqRef.current ||
+          coreFingerprintRef.current !== fetchInputs.fingerprint
+        )
+          return;
         setCoreLoading(false);
       });
 
@@ -675,6 +728,7 @@ export default function JourneyPage() {
   useEffect(() => {
     const seq = selectionReqSeqRef.current + 1;
     selectionReqSeqRef.current = seq;
+    selectionFingerprintRef.current = fetchInputs.fingerprint;
     selectionAbortRef.current?.abort();
     const abortController = new AbortController();
     selectionAbortRef.current = abortController;
@@ -688,7 +742,12 @@ export default function JourneyPage() {
       signal: abortController.signal,
     })
       .then((result) => {
-        if (abortController.signal.aborted || seq !== selectionReqSeqRef.current) return;
+        if (
+          abortController.signal.aborted ||
+          seq !== selectionReqSeqRef.current ||
+          selectionFingerprintRef.current !== fetchInputs.fingerprint
+        )
+          return;
         if (!result.ok) {
           const message =
             result.data && typeof result.data === "object" && "detail" in result.data
@@ -705,15 +764,27 @@ export default function JourneyPage() {
             requestSeq: seq,
             cacheHit: payload.meta?.cache_hit ?? false,
             rows: rows.length,
+            collectMs: payload.meta?.collect_ms ?? null,
+            aggregateMs: payload.meta?.aggregate_ms ?? null,
           });
         }
       })
       .catch((error) => {
-        if (abortController.signal.aborted || seq !== selectionReqSeqRef.current) return;
+        if (
+          abortController.signal.aborted ||
+          seq !== selectionReqSeqRef.current ||
+          selectionFingerprintRef.current !== fetchInputs.fingerprint
+        )
+          return;
         setSelectionMessage(error instanceof Error ? error.message : "Unable to load selection benchmark.");
       })
       .finally(() => {
-        if (abortController.signal.aborted || seq !== selectionReqSeqRef.current) return;
+        if (
+          abortController.signal.aborted ||
+          seq !== selectionReqSeqRef.current ||
+          selectionFingerprintRef.current !== fetchInputs.fingerprint
+        )
+          return;
         setSelectionLoading(false);
       });
 
@@ -731,6 +802,7 @@ export default function JourneyPage() {
     }
     const seq = detailReqSeqRef.current + 1;
     detailReqSeqRef.current = seq;
+    detailFingerprintRef.current = fetchInputs.fingerprint;
     detailAbortRef.current?.abort();
     const abortController = new AbortController();
     detailAbortRef.current = abortController;
@@ -744,7 +816,12 @@ export default function JourneyPage() {
       signal: abortController.signal,
     })
       .then((result) => {
-        if (abortController.signal.aborted || seq !== detailReqSeqRef.current) return;
+        if (
+          abortController.signal.aborted ||
+          seq !== detailReqSeqRef.current ||
+          detailFingerprintRef.current !== fetchInputs.fingerprint
+        )
+          return;
         if (!result.ok) {
           const message =
             result.data && typeof result.data === "object" && "detail" in result.data
@@ -761,15 +838,27 @@ export default function JourneyPage() {
             requestSeq: seq,
             cacheHit: payload.meta?.cache_hit ?? false,
             rows: rows.length,
+            collectMs: payload.meta?.collect_ms ?? null,
+            aggregateMs: payload.meta?.aggregate_ms ?? null,
           });
         }
       })
       .catch((error) => {
-        if (abortController.signal.aborted || seq !== detailReqSeqRef.current) return;
+        if (
+          abortController.signal.aborted ||
+          seq !== detailReqSeqRef.current ||
+          detailFingerprintRef.current !== fetchInputs.fingerprint
+        )
+          return;
         setDetailMessage(error instanceof Error ? error.message : "Unable to load brand detail.");
       })
       .finally(() => {
-        if (abortController.signal.aborted || seq !== detailReqSeqRef.current) return;
+        if (
+          abortController.signal.aborted ||
+          seq !== detailReqSeqRef.current ||
+          detailFingerprintRef.current !== fetchInputs.fingerprint
+        )
+          return;
         setDetailLoading(false);
       });
 
