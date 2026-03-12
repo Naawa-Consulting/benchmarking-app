@@ -752,20 +752,21 @@ def _compute_touchpoint_rows(study_id: str) -> list[dict]:
         return []
 
     conn = get_duckdb_connection()
-    load_parquet_as_view(conn, "touchpoints_table", str(curated_path))
-    has_touchpoint = (
-        conn.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.columns
-            WHERE table_name = 'touchpoints_table' AND column_name = 'touchpoint'
-            """
-        ).fetchone()[0]
-        > 0
-    )
-    if not has_touchpoint:
-        return []
+    try:
+        load_parquet_as_view(conn, "touchpoints_table", str(curated_path))
+        has_touchpoint = (
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_name = 'touchpoints_table' AND column_name = 'touchpoint'
+                """
+            ).fetchone()[0]
+            > 0
+        )
+        if not has_touchpoint:
+            return []
 
-    query = f"""
+        query = f"""
         WITH base AS (
             SELECT
                 LOWER(stage) AS stage,
@@ -802,36 +803,38 @@ def _compute_touchpoint_rows(study_id: str) -> list[dict]:
         FROM denoms d
         LEFT JOIN nums n
             ON n.stage = d.stage AND n.brand = d.brand AND n.touchpoint = d.touchpoint
-    """
-    rows = conn.execute(query, [study_id]).fetchall()
-    if not rows:
-        return []
+        """
+        rows = conn.execute(query, [study_id]).fetchall()
+        if not rows:
+            return []
 
-    values_by_pair: dict[tuple[str, str], dict[str, float | None]] = {}
-    for stage, brand, touchpoint, num, denom in rows:
-        metric = TOUCHPOINT_STAGE_METRICS.get(str(stage).lower())
-        if not metric:
-            continue
-        key = (brand, touchpoint)
-        if key not in values_by_pair:
-            values_by_pair[key] = {"recall": None, "consideration": None, "purchase": None}
-        value = None
-        if denom and denom > 0:
-            value = round((float(num or 0) / denom) * 100, 1)
-        values_by_pair[key][metric] = value
+        values_by_pair: dict[tuple[str, str], dict[str, float | None]] = {}
+        for stage, brand, touchpoint, num, denom in rows:
+            metric = TOUCHPOINT_STAGE_METRICS.get(str(stage).lower())
+            if not metric:
+                continue
+            key = (brand, touchpoint)
+            if key not in values_by_pair:
+                values_by_pair[key] = {"recall": None, "consideration": None, "purchase": None}
+            value = None
+            if denom and denom > 0:
+                value = round((float(num or 0) / denom) * 100, 1)
+            values_by_pair[key][metric] = value
 
-    result_rows = []
-    for (brand, touchpoint), values in values_by_pair.items():
-        result_rows.append(
-            {
-                "brand": brand,
-                "touchpoint": touchpoint,
-                "recall": values.get("recall"),
-                "consideration": values.get("consideration"),
-                "purchase": values.get("purchase"),
-            }
-        )
-    return result_rows
+        result_rows = []
+        for (brand, touchpoint), values in values_by_pair.items():
+            result_rows.append(
+                {
+                    "brand": brand,
+                    "touchpoint": touchpoint,
+                    "recall": values.get("recall"),
+                    "consideration": values.get("consideration"),
+                    "purchase": values.get("purchase"),
+                }
+            )
+        return result_rows
+    finally:
+        conn.close()
 
 
 def _compute_touchpoint_rows_filtered(study_id: str, filters: dict) -> list[dict]:
@@ -845,41 +848,42 @@ def _compute_touchpoint_rows_filtered(study_id: str, filters: dict) -> list[dict
         return []
 
     conn = get_duckdb_connection()
-    load_parquet_as_view(conn, "touchpoints_table", str(curated_path))
-    has_touchpoint = (
-        conn.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.columns
-            WHERE table_name = 'touchpoints_table' AND column_name = 'touchpoint'
-            """
-        ).fetchone()[0]
-        > 0
-    )
-    if not has_touchpoint:
-        return []
+    try:
+        load_parquet_as_view(conn, "touchpoints_table", str(curated_path))
+        has_touchpoint = (
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_name = 'touchpoints_table' AND column_name = 'touchpoint'
+                """
+            ).fetchone()[0]
+            > 0
+        )
+        if not has_touchpoint:
+            return []
 
-    has_value_raw = (
-        conn.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.columns
-            WHERE table_name = 'touchpoints_table' AND column_name = 'value_raw'
-            """
-        ).fetchone()[0]
-        > 0
-    )
-    value_expr = (
-        "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
-        if has_value_raw
-        else "TRY_CAST(value AS INTEGER)"
-    )
+        has_value_raw = (
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_name = 'touchpoints_table' AND column_name = 'value_raw'
+                """
+            ).fetchone()[0]
+            > 0
+        )
+        value_expr = (
+            "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
+            if has_value_raw
+            else "TRY_CAST(value AS INTEGER)"
+        )
 
-    respondent_filter = (
-        "AND respondent_id IN (SELECT respondent_id FROM filtered_respondents)"
-        if respondent_cte
-        else ""
-    )
-    cte_prefix = f"{respondent_cte}," if respondent_cte else ""
-    query = f"""
+        respondent_filter = (
+            "AND respondent_id IN (SELECT respondent_id FROM filtered_respondents)"
+            if respondent_cte
+            else ""
+        )
+        cte_prefix = f"{respondent_cte}," if respondent_cte else ""
+        query = f"""
         WITH {cte_prefix}
         base AS (
             SELECT
@@ -918,37 +922,39 @@ def _compute_touchpoint_rows_filtered(study_id: str, filters: dict) -> list[dict
         FROM denoms d
         LEFT JOIN nums n
             ON n.stage = d.stage AND n.brand = d.brand AND n.touchpoint = d.touchpoint
-    """
-    params = [*respondent_params, study_id]
-    rows = conn.execute(query, params).fetchall()
-    if not rows:
-        return []
+        """
+        params = [*respondent_params, study_id]
+        rows = conn.execute(query, params).fetchall()
+        if not rows:
+            return []
 
-    values_by_pair: dict[tuple[str, str], dict[str, float | None]] = {}
-    for stage, brand, touchpoint, num, denom in rows:
-        metric = TOUCHPOINT_STAGE_METRICS.get(str(stage).lower())
-        if not metric:
-            continue
-        key = (brand, touchpoint)
-        if key not in values_by_pair:
-            values_by_pair[key] = {"recall": None, "consideration": None, "purchase": None}
-        value = None
-        if denom and denom > 0:
-            value = round((float(num or 0) / denom) * 100, 1)
-        values_by_pair[key][metric] = value
+        values_by_pair: dict[tuple[str, str], dict[str, float | None]] = {}
+        for stage, brand, touchpoint, num, denom in rows:
+            metric = TOUCHPOINT_STAGE_METRICS.get(str(stage).lower())
+            if not metric:
+                continue
+            key = (brand, touchpoint)
+            if key not in values_by_pair:
+                values_by_pair[key] = {"recall": None, "consideration": None, "purchase": None}
+            value = None
+            if denom and denom > 0:
+                value = round((float(num or 0) / denom) * 100, 1)
+            values_by_pair[key][metric] = value
 
-    result_rows = []
-    for (brand, touchpoint), values in values_by_pair.items():
-        result_rows.append(
-            {
-                "brand": brand,
-                "touchpoint": touchpoint,
-                "recall": values.get("recall"),
-                "consideration": values.get("consideration"),
-                "purchase": values.get("purchase"),
-            }
-        )
-    return result_rows
+        result_rows = []
+        for (brand, touchpoint), values in values_by_pair.items():
+            result_rows.append(
+                {
+                    "brand": brand,
+                    "touchpoint": touchpoint,
+                    "recall": values.get("recall"),
+                    "consideration": values.get("consideration"),
+                    "purchase": values.get("purchase"),
+                }
+            )
+        return result_rows
+    finally:
+        conn.close()
 
 
 @router.get("/journey", response_model=JourneyResponse)
@@ -961,8 +967,8 @@ def journey_analytics(study_id: str = Query(..., description="Study id")) -> Jou
     else:
         raise HTTPException(status_code=404, detail="Curated mart not found for study.")
 
+    conn = get_duckdb_connection()
     try:
-        conn = get_duckdb_connection()
         load_parquet_as_view(conn, "journey", str(parquet_path))
         query = """
             SELECT stage, brand, AVG(value) * 100 AS percentage
@@ -976,6 +982,8 @@ def journey_analytics(study_id: str = Query(..., description="Study id")) -> Jou
         rows = conn.execute(query, [study_id]).fetchall()
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"No data available for {study_id}") from exc
+    finally:
+        conn.close()
 
     if not rows:
         raise HTTPException(status_code=404, detail=f"No data available for {study_id}")

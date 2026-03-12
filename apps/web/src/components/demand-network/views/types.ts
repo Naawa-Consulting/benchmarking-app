@@ -29,6 +29,7 @@ export type DNLink = {
 
 export type DNMetric = "recall" | "consideration" | "purchase";
 export type DNLayout = "auto" | "spacious";
+export type DNDistanceMode = "off" | "consideration" | "purchase";
 export type DNSecondaryCluster = "off" | "category";
 export type DNViewMode = "network" | "matrix" | "sankey" | "multiples";
 

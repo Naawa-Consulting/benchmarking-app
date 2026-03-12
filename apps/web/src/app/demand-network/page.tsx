@@ -7,7 +7,7 @@ import { createPortal } from "react-dom";
 import { getApiBaseUrl } from "../../lib/api";
 import { type HoveredLink, type NetworkCanvasHandle } from "../../components/NetworkCanvas";
 import DemandNetworkView from "../../components/demand-network/views/DemandNetworkView";
-import type { DNViewMode } from "../../components/demand-network/views/types";
+import type { DNDistanceMode, DNViewMode } from "../../components/demand-network/views/types";
 import {
   ChipToggle,
   ChipToggleGroup,
@@ -109,6 +109,7 @@ const TOOLTIP_COPY = {
   view: "Switch between advanced analytical views using the same filtered dataset.",
   metric: "Choose the primary metric used to render links.",
   layout: "Adjust network spacing density without changing data.",
+  distance: "Set link distance by metric: higher value = shorter touchpoint-to-brand distance.",
   layers: "Show or hide secondary relationship layers.",
 } as const;
 
@@ -132,9 +133,9 @@ export default function DemandNetworkPage() {
     lockedBrandIds: [],
   });
   const [hoveredLink, setHoveredLink] = useState<HoveredLink | null>(null);
-  const [contextCollapsed, setContextCollapsed] = useState(true);
   const [filtersCollapsed, setFiltersCollapsed] = useState(true);
   const [layoutMode, setLayoutMode] = useState<"auto" | "spacious">("spacious");
+  const [distanceMode, setDistanceMode] = useState<DNDistanceMode>("off");
   const [graphVisible, setGraphVisible] = useState(false);
   const [pulseNodeId, setPulseNodeId] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
@@ -148,11 +149,9 @@ export default function DemandNetworkPage() {
   const [advancedSlot, setAdvancedSlot] = useState<HTMLElement | null>(null);
   const canvasRef = useRef<NetworkCanvasHandle>(null);
   const secondaryInitRef = useRef(false);
-
-  const filteredStudies = useMemo(() => {
-    if (!scope.category) return studies;
-    return studies.filter((study) => study.category === scope.category);
-  }, [studies, scope.category]);
+  const requestSeqRef = useRef(0);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const activeQueryRef = useRef("");
 
   useEffect(() => {
     if (secondaryInitRef.current) return;
@@ -184,43 +183,6 @@ export default function DemandNetworkPage() {
     const frame = window.requestAnimationFrame(syncSlot);
     return () => window.cancelAnimationFrame(frame);
   }, [advancedOpen, isPresentation]);
-
-  const activeStudies = useMemo(() => {
-    if (scope.studyIds.length) {
-      return filteredStudies.filter((study) => scope.studyIds.includes(study.study_id));
-    }
-    return filteredStudies;
-  }, [filteredStudies, scope.studyIds]);
-
-  const contextSummary = useMemo(() => {
-    const sectorCounts = new Map<string, number>();
-    const subsectorCounts = new Map<string, number>();
-    const categoryCounts = new Map<string, number>();
-    activeStudies.forEach((study) => {
-      const sector = study.sector || "Unassigned";
-      const subsector = study.subsector || "Unassigned";
-      const categoryValue = study.category || "Unassigned";
-      sectorCounts.set(sector, (sectorCounts.get(sector) || 0) + 1);
-      subsectorCounts.set(subsector, (subsectorCounts.get(subsector) || 0) + 1);
-      categoryCounts.set(categoryValue, (categoryCounts.get(categoryValue) || 0) + 1);
-    });
-
-    const top = (map: Map<string, number>) =>
-      Array.from(map.entries())
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 3)
-        .map((item) => item[0]);
-
-    return {
-      studiesCount: activeStudies.length,
-      sectorTop: top(sectorCounts),
-      subsectorTop: top(subsectorCounts),
-      categoryTop: top(categoryCounts),
-      sectorCount: sectorCounts.size,
-      subsectorCount: subsectorCounts.size,
-      categoryCount: categoryCounts.size,
-    };
-  }, [activeStudies]);
 
   const breadcrumb = useMemo(() => {
     if (!scope.category) return "All categories";
@@ -259,12 +221,26 @@ export default function DemandNetworkPage() {
   }, [metric, scope, secondaryLinks]);
 
   useEffect(() => {
+    const seq = requestSeqRef.current + 1;
+    requestSeqRef.current = seq;
+    activeQueryRef.current = query;
+    requestAbortRef.current?.abort();
+    const abortController = new AbortController();
+    requestAbortRef.current = abortController;
+
     const handle = setTimeout(() => {
       const load = async () => {
         setState("loading");
         setError(null);
         try {
-          const response = await fetch(`${apiBase}/network?${query}`);
+          const response = await fetch(`${apiBase}/network?${query}`, { signal: abortController.signal });
+          if (
+            abortController.signal.aborted ||
+            seq !== requestSeqRef.current ||
+            activeQueryRef.current !== query
+          ) {
+            return;
+          }
           const payload = (await response.json()) as NetworkResponse;
           if (!response.ok || !payload.ok) {
             throw new Error("Unable to load network data.");
@@ -272,6 +248,13 @@ export default function DemandNetworkPage() {
           setData(payload);
           setState("idle");
         } catch (err) {
+          if (
+            abortController.signal.aborted ||
+            seq !== requestSeqRef.current ||
+            activeQueryRef.current !== query
+          ) {
+            return;
+          }
           setState("error");
           setError(err instanceof Error ? err.message : "Unable to load network.");
         }
@@ -280,7 +263,10 @@ export default function DemandNetworkPage() {
       load();
     }, 250);
 
-    return () => clearTimeout(handle);
+    return () => {
+      clearTimeout(handle);
+      abortController.abort();
+    };
   }, [apiBase, query, reloadTick]);
 
   useEffect(() => {
@@ -384,7 +370,6 @@ export default function DemandNetworkPage() {
   const activeNodeId = interaction.focusedNodeId || interaction.hoveredNodeId || null;
   const activeLinkId = interaction.focusedNodeId ? null : interaction.hoveredLinkId;
 
-  const metricCounts = data?.meta?.link_metric_counts;
   useEffect(() => {
     if (process.env.NODE_ENV === "production" || !data) return;
     const sampleConsideration = aggregateLinks(data.links)
@@ -420,9 +405,7 @@ export default function DemandNetworkPage() {
   }, [data, scope.brands]);
   const canvasHeight = isPresentation
     ? "clamp(700px, calc(100vh - 120px), 1200px)"
-    : contextCollapsed
-      ? "clamp(560px, calc(100vh - 270px), 860px)"
-      : "clamp(460px, calc(100vh - 560px), 760px)";
+    : "clamp(560px, calc(100vh - 270px), 860px)";
 
   const neighborIdsByNode = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -601,30 +584,6 @@ export default function DemandNetworkPage() {
     [metric]
   );
 
-  const weightedBrandMetricById = useMemo(() => {
-    const result = new Map<string, number | null>();
-    const weightsByBrand = new Map<string, { sum: number; w: number }>();
-    aggregatedLinks.forEach((link) => {
-      if (link.type !== "primary_tp_brand") return;
-      const metricValue =
-        metric === "purchase"
-          ? link.w_purchase_raw
-          : metric === "consideration"
-            ? link.w_consideration_raw
-            : link.w_recall_raw;
-      if (typeof metricValue !== "number") return;
-      const weight = typeof link.n_base === "number" && link.n_base > 0 ? link.n_base : 1;
-      const bucket = weightsByBrand.get(link.target) || { sum: 0, w: 0 };
-      bucket.sum += metricValue * weight;
-      bucket.w += weight;
-      weightsByBrand.set(link.target, bucket);
-    });
-    weightsByBrand.forEach((value, brandId) => {
-      result.set(brandId, value.w > 0 ? value.sum / value.w : null);
-    });
-    return result;
-  }, [aggregatedLinks, metric]);
-
   const topConnections = useMemo(() => {
     if (!panelNode) return [];
     return aggregatedLinks
@@ -670,6 +629,17 @@ export default function DemandNetworkPage() {
             { label: "Spacious", value: "spacious" as const },
           ]}
           onChange={setLayoutMode}
+        />
+        <ChipToggleGroup
+          label="Distance"
+          tooltip={TOOLTIP_COPY.distance}
+          value={distanceMode}
+          options={[
+            { label: "Off", value: "off" as const },
+            { label: "Consideration", value: "consideration" as const },
+            { label: "Purchase", value: "purchase" as const },
+          ]}
+          onChange={setDistanceMode}
         />
         <ChipToggleGroup
           label="Layers"
@@ -794,12 +764,6 @@ export default function DemandNetworkPage() {
                   </span>
                 )}
                 <span className="rounded-full border border-ink/10 px-3 py-1">Links: {linkCounts.total}</span>
-                {metricCounts && (
-                  <span className="rounded-full border border-ink/10 px-3 py-1">
-                    C:{metricCounts.consideration || 0} · P:{metricCounts.purchase || 0}
-                  </span>
-                )}
-                <span>{new Date(data.meta.generated_at).toLocaleTimeString()}</span>
               </div>
             )}
           </div>
@@ -904,6 +868,7 @@ export default function DemandNetworkPage() {
                 labelMode="auto"
                 spotlight={false}
                 layoutMode={layoutMode}
+                distanceMode={distanceMode}
                 pulseNodeId={pulseNodeId}
                 height={canvasHeight}
                 onHoverNode={handleHoverNode}
@@ -1064,91 +1029,6 @@ export default function DemandNetworkPage() {
           )}
         </div>
 
-        {!isPresentation && (
-        <aside className="main-surface overflow-hidden rounded-3xl">
-          <button
-            className="flex w-full items-center justify-between px-4 py-3 text-left sm:px-5"
-            type="button"
-            onClick={() => setContextCollapsed((prev) => !prev)}
-          >
-            <div>
-              <h3 className="text-base font-semibold">Context</h3>
-              <p className="text-xs text-slate">
-                Sectors: {contextSummary.sectorCount} · Categories: {contextSummary.categoryCount} · Studies:{" "}
-                {contextSummary.studiesCount}
-              </p>
-            </div>
-            <span className="rounded-full border border-ink/10 px-3 py-1 text-xs text-slate">
-              {contextCollapsed ? "Expand" : "Collapse"}
-            </span>
-          </button>
-
-          {!contextCollapsed && (
-            <div className="border-t border-ink/10 px-4 py-4 sm:px-5">
-              <div className="space-y-4 text-xs text-slate">
-                <div className="flex flex-wrap gap-2">
-                  <span className="rounded-full border border-ink/10 px-3 py-1">
-                    Sectors: {contextSummary.sectorCount}
-                  </span>
-                  <span className="rounded-full border border-ink/10 px-3 py-1">
-                    Subsectors: {contextSummary.subsectorCount}
-                  </span>
-                  <span className="rounded-full border border-ink/10 px-3 py-1">
-                    Categories: {contextSummary.categoryCount}
-                  </span>
-                </div>
-                <div>
-                  <p className="font-semibold text-ink">Top sectors</p>
-                  <p>{contextSummary.sectorTop.join(" · ") || "—"}</p>
-                </div>
-                <div>
-                  <p className="font-semibold text-ink">Top subsectors</p>
-                  <p>{contextSummary.subsectorTop.join(" · ") || "—"}</p>
-                </div>
-                <div>
-                  <p className="font-semibold text-ink">Top categories</p>
-                  <p>{contextSummary.categoryTop.join(" · ") || "—"}</p>
-                </div>
-                <div className="rounded-2xl border border-ink/10 bg-white px-3 py-3">
-                  <p className="text-[11px] text-slate">Brand fill = Sector · Halo = Subsector</p>
-                </div>
-              </div>
-
-              <div className="mt-5 rounded-2xl border border-ink/10 bg-white px-4 py-4 text-xs">
-                <p className="text-[11px] uppercase text-slate">Hover details</p>
-                {hoveredNode?.type === "brand" ? (
-                  <div className="mt-3 space-y-1 text-ink">
-                    <p className="text-sm font-semibold">{hoveredNode.label}</p>
-                    <p>Sector: {hoveredNode.sector || "Unassigned"}</p>
-                    <p>Subsector: {hoveredNode.subsector || "Unassigned"}</p>
-                    <p>Category: {hoveredNode.category || "Unassigned"}</p>
-                    {metric === "recall" ? (
-                      <p>
-                        Awareness:{" "}
-                        {typeof hoveredNode.colorMeta?.kpi_awareness === "number"
-                          ? `${Number(hoveredNode.colorMeta?.kpi_awareness).toFixed(1)}%`
-                          : "--"}
-                      </p>
-                    ) : (
-                      <p>
-                        {metric === "consideration" ? "Consideration (weighted)" : "Purchase (weighted)"}:{" "}
-                        {typeof weightedBrandMetricById.get(hoveredNode.id) === "number"
-                          ? `${(Number(weightedBrandMetricById.get(hoveredNode.id)) * 100).toFixed(1)}%`
-                          : "--"}
-                      </p>
-                    )}
-                    {Boolean(hoveredNode.colorMeta?.context_mixed) && (
-                      <p className="text-[11px] text-slate">Context: mixed</p>
-                    )}
-                  </div>
-                ) : (
-                  <p className="mt-3 text-slate">Hover a brand node to see context.</p>
-                )}
-              </div>
-            </div>
-          )}
-        </aside>
-        )}
       </section>
 
       {exportOpen && (

@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import ReactECharts from "echarts-for-react";
-import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { aggregateLinks, buildThicknessScale, type AggregatedLink } from "./demand-network/graphUtils";
 
 type NetworkNode = {
@@ -68,6 +68,7 @@ type NetworkCanvasProps = {
   lockedBrandIds?: string[];
   showSecondaryAlways?: boolean;
   layoutMode?: "auto" | "spacious" | "radial" | "bipartite" | "cluster";
+  distanceMode?: "off" | "consideration" | "purchase";
   pulseNodeId?: string | null;
   height?: string;
 };
@@ -146,6 +147,206 @@ const hexToRgba = (value: string, alpha: number) => {
 const sortByLabel = (a: NetworkNode, b: NetworkNode) => a.label.localeCompare(b.label);
 const getLinkId = (link: { source: string; target: string; type: string }) =>
   `${link.source}::${link.target}::${link.type}`;
+
+const metricRawForDistance = (
+  link: AggregatedLink,
+  distanceMode: "consideration" | "purchase"
+) => (distanceMode === "purchase" ? link.w_purchase_raw : link.w_consideration_raw);
+
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+const quantile = (values: number[], q: number) => {
+  if (!values.length) return 0;
+  const idx = clamp((values.length - 1) * q, 0, values.length - 1);
+  const low = Math.floor(idx);
+  const high = Math.ceil(idx);
+  if (low === high) return values[low];
+  const ratio = idx - low;
+  return values[low] * (1 - ratio) + values[high] * ratio;
+};
+
+const applyDistanceShaping = (
+  nodes: NetworkNode[],
+  links: AggregatedLink[],
+  positions: Map<string, [number, number]>,
+  distanceMode: "off" | "consideration" | "purchase",
+  lockedBrandIds: string[]
+) => {
+  if (distanceMode === "off") return positions;
+  const primaryLinks = links.filter((link) => link.type === "primary_tp_brand");
+  if (!primaryLinks.length) return positions;
+
+  const brandIds = new Set(nodes.filter((node) => node.type === "brand").map((node) => node.id));
+  const touchpointIds = new Set(nodes.filter((node) => node.type === "touchpoint").map((node) => node.id));
+  if (!brandIds.size || !touchpointIds.size) return positions;
+
+  const sortedMetricValues = primaryLinks
+    .map((link) => metricRawForDistance(link, distanceMode))
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    .sort((a, b) => a - b);
+  if (!sortedMetricValues.length) return positions;
+
+  const rankForValue = (value: number) => {
+    if (!sortedMetricValues.length) return 0.5;
+    let low = 0;
+    let high = sortedMetricValues.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (sortedMetricValues[mid] < value) low = mid + 1;
+      else high = mid;
+    }
+    return clamp(low / Math.max(1, sortedMetricValues.length - 1), 0, 1);
+  };
+
+  const touchpointCenters = new Map<
+    string,
+    { weightedRank: number; weightSum: number; dominantBrandId: string | null; dominantValue: number }
+  >();
+  primaryLinks.forEach((link) => {
+    const raw = metricRawForDistance(link, distanceMode);
+    if (typeof raw !== "number" || !Number.isFinite(raw)) return;
+    const rank = rankForValue(raw);
+    const weight = typeof link.n_base === "number" && link.n_base > 0 ? link.n_base : 1;
+    const entry =
+      touchpointCenters.get(link.source) ?? {
+        weightedRank: 0,
+        weightSum: 0,
+        dominantBrandId: null,
+        dominantValue: Number.NEGATIVE_INFINITY,
+      };
+    entry.weightedRank += rank * weight;
+    entry.weightSum += weight;
+    if (raw > entry.dominantValue) {
+      entry.dominantValue = raw;
+      entry.dominantBrandId = link.target;
+    }
+    touchpointCenters.set(link.source, entry);
+  });
+
+  let touchpointCenterX = 0;
+  let touchpointCenterY = 0;
+  let touchpointCount = 0;
+  let brandCenterX = 0;
+  let brandCenterY = 0;
+  let brandCount = 0;
+  positions.forEach(([x, y], id) => {
+    if (touchpointIds.has(id)) {
+      touchpointCenterX += x;
+      touchpointCenterY += y;
+      touchpointCount += 1;
+    } else if (brandIds.has(id)) {
+      brandCenterX += x;
+      brandCenterY += y;
+      brandCount += 1;
+    }
+  });
+  const tpCx = touchpointCount ? touchpointCenterX / touchpointCount : -240;
+  const tpCy = touchpointCount ? touchpointCenterY / touchpointCount : 0;
+  const brandCx = brandCount ? brandCenterX / brandCount : 240;
+  const brandCy = brandCount ? brandCenterY / brandCount : 0;
+  const bandGap = Math.max(140, Math.abs(brandCx - tpCx));
+
+  const LMIN = clamp(0.22 * bandGap, 80, 180);
+  const LMAX = clamp(0.95 * bandGap, 240, 520);
+  const alphaBase = distanceMode === "purchase" ? 0.55 : 0.45;
+
+  const p10 = quantile(sortedMetricValues, 0.1);
+  const p50 = quantile(sortedMetricValues, 0.5);
+  const p90 = quantile(sortedMetricValues, 0.9);
+
+  const distanceByTouchpoint = new Map<string, number>();
+  const desiredYByTouchpoint = new Map<string, number>();
+  touchpointCenters.forEach((entry, touchpointId) => {
+    const score = entry.weightSum > 0 ? entry.weightedRank / entry.weightSum : 0.5;
+    const metricDistance = lerp(LMAX, LMIN, score);
+    distanceByTouchpoint.set(touchpointId, metricDistance);
+
+    const dominantBrandPos = entry.dominantBrandId ? positions.get(entry.dominantBrandId) : null;
+    const targetY = dominantBrandPos ? lerp(tpCy, dominantBrandPos[1], 0.18) : tpCy;
+    desiredYByTouchpoint.set(touchpointId, targetY);
+  });
+
+  const distanceValues = Array.from(distanceByTouchpoint.values()).sort((a, b) => a - b);
+  const p10Distance = quantile(distanceValues, 0.1);
+  const p90Distance = quantile(distanceValues, 0.9);
+  const spread = p90Distance - p10Distance;
+  const alpha = spread < 60 ? clamp(alphaBase + 0.2, 0, 0.85) : alphaBase;
+
+  const shaped = new Map(positions);
+  const orientation = brandCx >= tpCx ? 1 : -1;
+  const lockedBrands = new Set(lockedBrandIds);
+
+  shaped.forEach(([x, y], id) => {
+    if (touchpointIds.has(id)) {
+      const d = distanceByTouchpoint.get(id);
+      if (typeof d !== "number") return;
+      const targetX = brandCx - orientation * d;
+      const targetY = desiredYByTouchpoint.get(id) ?? y;
+      shaped.set(id, [lerp(x, targetX, alpha), lerp(y, targetY, alpha * 0.58)]);
+      return;
+    }
+    if (brandIds.has(id) && !lockedBrands.has(id)) {
+      const targetX = lerp(x, brandCx, 0.04);
+      shaped.set(id, [targetX, y]);
+    }
+  });
+
+  const touchpointLane = Array.from(touchpointIds)
+    .map((id) => {
+      const p = shaped.get(id);
+      const base = positions.get(id);
+      if (!p || !base) return null;
+      const node = nodes.find((item) => item.id === id);
+      const nodeSize = node?.size ?? 12;
+      return { id, x: p[0], y: p[1], baseY: base[1], gap: clamp(nodeSize * 0.9, 14, 22) };
+    })
+    .filter((item): item is { id: string; x: number; y: number; baseY: number; gap: number } => Boolean(item))
+    .sort((a, b) => a.baseY - b.baseY);
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    for (let i = 1; i < touchpointLane.length; i += 1) {
+      const prev = touchpointLane[i - 1];
+      const curr = touchpointLane[i];
+      const minGap = Math.max(prev.gap, curr.gap);
+      if (curr.y - prev.y < minGap) {
+        curr.y = prev.y + minGap;
+      }
+    }
+    for (let i = touchpointLane.length - 2; i >= 0; i -= 1) {
+      const next = touchpointLane[i + 1];
+      const curr = touchpointLane[i];
+      const minGap = Math.max(next.gap, curr.gap);
+      if (next.y - curr.y < minGap) {
+        curr.y = next.y - minGap;
+      }
+    }
+  }
+  touchpointLane.forEach((entry) => {
+    const current = shaped.get(entry.id);
+    if (!current) return;
+    shaped.set(entry.id, [current[0], lerp(current[1], entry.y, 0.8)]);
+  });
+
+  if (process.env.NODE_ENV !== "production") {
+    console.debug("[BBS] distance-shaping", {
+      mode: distanceMode,
+      bandGap,
+      LMIN,
+      LMAX,
+      metric: { p10, p50, p90 },
+      dist: {
+        p10: p10Distance,
+        p50: quantile(distanceValues, 0.5),
+        p90: p90Distance,
+        spread,
+      },
+      alpha,
+      touchpoints: touchpointIds.size,
+      brands: brandIds.size,
+    });
+  }
+
+  return shaped;
+};
 
 const weightedMetricFromLinks = (
   links: AggregatedLink[],
@@ -235,7 +436,9 @@ const buildTargetPositions = (
     brandOrder.forEach((brand, idx) => {
       const y = brandStart + idx * brandSpacing;
       brandY.set(brand.id, y);
-      positions.set(brand.id, [-320 * spacing, y]);
+      // Keep visual direction aligned with tooltips: Touchpoint -> Brand.
+      // Brands go on the right column in bipartite mode.
+      positions.set(brand.id, [320 * spacing, y]);
     });
 
     const touchpointOrder = touchpointNodes
@@ -258,11 +461,14 @@ const buildTargetPositions = (
     const tpSpacing = Math.max(78, (520 * spacing) / Math.max(1, touchpointOrder.length));
     const tpStart = -((touchpointOrder.length - 1) * tpSpacing) / 2;
     touchpointOrder.forEach((tp, idx) => {
-      positions.set(tp.id, [320 * spacing, tpStart + idx * tpSpacing]);
+      // Touchpoints go on the left column in bipartite mode.
+      positions.set(tp.id, [-320 * spacing, tpStart + idx * tpSpacing]);
     });
   } else {
-    const brandCenterBase: [number, number] = [-170 * spacing, -36 * spacing];
-    const touchpointCenter: [number, number] = [190 * spacing, 58 * spacing];
+    // Keep visual direction aligned with link semantics: Touchpoint -> Brand.
+    // In cluster mode, place touchpoints on the left cloud and brands on the right cloud.
+    const brandCenterBase: [number, number] = [190 * spacing, -36 * spacing];
+    const touchpointCenter: [number, number] = [-170 * spacing, 58 * spacing];
     const categoryKeys = Array.from(new Set(brandNodes.map((node) => node.category || "Unknown"))).sort();
     const categoryCenter = new Map<string, [number, number]>();
     categoryKeys.forEach((key, idx) => {
@@ -323,6 +529,7 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
     lockedBrandIds = [],
     showSecondaryAlways = false,
     layoutMode = "auto",
+    distanceMode = "off",
     pulseNodeId,
     height = "78vh",
   }: NetworkCanvasProps,
@@ -333,6 +540,7 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
   const [frozenPositions, setFrozenPositions] = useState<Map<string, [number, number]> | null>(null);
   const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
   const lockedBrandAnchorsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const manualLayoutOverrideRef = useRef(false);
 
   const debugLayoutEnabled =
     process.env.NODE_ENV !== "production" &&
@@ -364,7 +572,7 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
     if (count <= 5) return "bipartite";
     return "cluster";
   }, [layoutMode, selectedBrandsCount, brandCountInView]);
-  const targetPositions = useMemo(
+  const basePositions = useMemo(
     () =>
       buildTargetPositions(
         nodes,
@@ -375,6 +583,11 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
       ),
     [aggregatedLinks, clusterMode, layoutMode, nodes, resolvedLayoutMode]
   );
+  const distancePositions = useMemo(
+    () => applyDistanceShaping(nodes, aggregatedLinks, basePositions, distanceMode, lockedBrandIds),
+    [aggregatedLinks, basePositions, distanceMode, lockedBrandIds, nodes]
+  );
+  const targetPositions = distanceMode === "off" ? basePositions : distancePositions;
 
   const datasetKey = useMemo(
     () =>
@@ -384,12 +597,13 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
         .join("|")}:${links
         .map((link) => `${link.source}->${link.target}:${link.type}`)
         .slice(0, 18)
-        .join("|")}:${resolvedLayoutMode}:${layoutMode}:${selectedBrandsCount}`,
-    [layoutMode, links, nodes, resolvedLayoutMode, selectedBrandsCount]
+        .join("|")}:${resolvedLayoutMode}:${layoutMode}:${distanceMode}:${selectedBrandsCount}`,
+    [distanceMode, layoutMode, links, nodes, resolvedLayoutMode, selectedBrandsCount]
   );
 
   useEffect(() => {
     // Keep node positions deterministic and frozen per layout/data change.
+    manualLayoutOverrideRef.current = false;
     setFrozenPositions(new Map(targetPositions));
   }, [targetPositions]);
 
@@ -433,6 +647,7 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
     ref,
     () => ({
       fitToView: () => {
+        manualLayoutOverrideRef.current = false;
         fitGraphToBounds();
       },
       exportSnapshot: () => {
@@ -451,6 +666,7 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
     const source = frozenPositions && frozenPositions.size ? frozenPositions : targetPositions;
     if (!source || !source.size) return source;
     if (viewportSize.width <= 0 || viewportSize.height <= 0) return source;
+    if (manualLayoutOverrideRef.current) return source;
 
     const padding = layoutMode === "spacious" ? 52 : 38;
     let minX = Number.POSITIVE_INFINITY;
@@ -511,6 +727,93 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
   ]);
 
   const isViewportReady = viewportSize.width > 0 && viewportSize.height > 0;
+  const effectiveActiveNodeId = selectedNodeId || (spotlight ? activeNodeId || null : null);
+  const effectiveActiveLinkId = selectedNodeId ? null : spotlight ? activeLinkId || null : null;
+
+  const capturePositionsFromChart = useCallback(() => {
+    const instance = chartRef.current?.getEchartsInstance();
+    if (!instance) return false;
+    const runtimePoints = new Map<string, [number, number]>();
+    const seriesModel = (instance as any).getModel?.()?.getSeriesByIndex?.(0);
+    const runtimeData = seriesModel?.getData?.();
+    if (runtimeData && typeof runtimeData.count === "function") {
+      const total = runtimeData.count();
+      for (let i = 0; i < total; i += 1) {
+        const rawItem = runtimeData.getRawDataItem?.(i);
+        const id = rawItem?.id ?? rawItem?.name;
+        const layout = runtimeData.getItemLayout?.(i);
+        if (typeof id !== "string" || !Array.isArray(layout) || layout.length < 2) continue;
+        const x = layout[0];
+        const y = layout[1];
+        if (typeof x !== "number" || !Number.isFinite(x) || typeof y !== "number" || !Number.isFinite(y)) continue;
+        runtimePoints.set(id, [x, y]);
+      }
+    }
+
+    if (!runtimePoints.size) {
+      const option = instance.getOption?.() as any;
+      const seriesData = option?.series?.[0]?.data;
+      if (Array.isArray(seriesData)) {
+        for (const item of seriesData) {
+          const id = item?.id;
+          const x = item?.x;
+          const y = item?.y;
+          if (typeof id !== "string") continue;
+          if (typeof x !== "number" || !Number.isFinite(x) || typeof y !== "number" || !Number.isFinite(y)) continue;
+          runtimePoints.set(id, [x, y]);
+        }
+      }
+    }
+
+    if (!runtimePoints.size) return false;
+
+    let changed = false;
+    setFrozenPositions((prev) => {
+      const next = new Map(prev && prev.size ? prev : fittedPositions && fittedPositions.size ? fittedPositions : targetPositions);
+      for (const [id, [x, y]] of runtimePoints.entries()) {
+        const before = next.get(id);
+        if (!before || Math.abs(before[0] - x) > 0.25 || Math.abs(before[1] - y) > 0.25) {
+          next.set(id, [x, y]);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+    if (changed) {
+      manualLayoutOverrideRef.current = true;
+    }
+    return changed;
+  }, [fittedPositions, targetPositions]);
+
+  const persistDraggedNode = useCallback(
+    (params: any) => {
+      if (!params || params.dataType !== "node") return;
+      const nodeId = params?.data?.id as string | undefined;
+      if (!nodeId) return;
+      const xRaw = params?.data?.x;
+      const yRaw = params?.data?.y;
+      if (typeof xRaw !== "number" || !Number.isFinite(xRaw) || typeof yRaw !== "number" || !Number.isFinite(yRaw)) {
+        capturePositionsFromChart();
+        return;
+      }
+
+      setFrozenPositions((prev) => {
+        const base = prev && prev.size ? prev : fittedPositions && fittedPositions.size ? fittedPositions : targetPositions;
+        const next = new Map(base);
+        next.set(nodeId, [xRaw, yRaw]);
+        return next;
+      });
+      manualLayoutOverrideRef.current = true;
+
+      if (lockedBrandIds.includes(nodeId) && viewportSize.width > 0 && viewportSize.height > 0) {
+        lockedBrandAnchorsRef.current.set(nodeId, {
+          x: xRaw / viewportSize.width,
+          y: yRaw / viewportSize.height,
+        });
+      }
+    },
+    [capturePositionsFromChart, fittedPositions, lockedBrandIds, targetPositions, viewportSize.height, viewportSize.width]
+  );
 
   useEffect(() => {
     const anchorMap = lockedBrandAnchorsRef.current;
@@ -537,6 +840,7 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
     const categories = Array.from(new Set(nodes.map((node) => node.group))).map((name) => ({
       name,
     }));
+    const brandNodesInView = nodes.filter((node) => node.type === "brand").length;
     const labelById = new Map(nodes.map((node) => [node.id, node.label]));
     const nodeById = new Map(nodes.map((node) => [node.id, node]));
     const shortLabel = (value: string) => value.replace(/^[^:]+:/, "");
@@ -586,19 +890,19 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
     const topBrandsSet = new Set(topBrands);
     const topTouchpointsSet = new Set(topTouchpoints);
     const lockedBrandSet = new Set(lockedBrandIds);
-    const activeFocusNodeId = selectedNodeId || activeNodeId || null;
+    const activeFocusNodeId = effectiveActiveNodeId;
     const focusNeighbors = activeFocusNodeId ? neighborMap.get(activeFocusNodeId) || new Set<string>() : null;
     const activeLinkNodeIds = new Set<string>();
-    if (activeLinkId) {
+    if (effectiveActiveLinkId) {
       for (const link of aggregatedLinks) {
-        if (getLinkId(link) === activeLinkId) {
+        if (getLinkId(link) === effectiveActiveLinkId) {
           activeLinkNodeIds.add(link.source);
           activeLinkNodeIds.add(link.target);
           break;
         }
       }
     }
-    const shouldDimWithSpotlight = Boolean(spotlight && (activeFocusNodeId || activeLinkId));
+    const shouldDimWithSpotlight = Boolean(spotlight && (activeFocusNodeId || effectiveActiveLinkId));
 
     const connectionMap = new Map<string, { incoming: AggregatedLink[]; outgoing: AggregatedLink[] }>();
     for (const link of aggregatedLinks) {
@@ -647,8 +951,8 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
         ? link.source === activeFocusNodeId ||
           link.target === activeFocusNodeId ||
           (focusNeighbors?.has(link.source) && focusNeighbors?.has(link.target))
-        : activeLinkId
-          ? linkRef === activeLinkId
+        : effectiveActiveLinkId
+          ? linkRef === effectiveActiveLinkId
           : false;
       const secondaryConnectedToFocus = activeFocusNodeId
         ? connectedSecondaryLinksByNode.get(activeFocusNodeId)?.has(linkRef)
@@ -891,7 +1195,7 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
             const isLockedBrand = isBrand && lockedBrandSet.has(node.id);
             const isFocusNode = activeFocusNodeId === node.id;
             const isFocusNeighbor = Boolean(activeFocusNodeId && focusNeighbors?.has(node.id));
-            const isActiveLinkEndpoint = Boolean(activeLinkId && activeLinkNodeIds.has(node.id));
+            const isActiveLinkEndpoint = Boolean(effectiveActiveLinkId && activeLinkNodeIds.has(node.id));
             const showSpotlightLabel = Boolean(
               labelMode === "auto" && (isFocusNode || isFocusNeighbor || isActiveLinkEndpoint)
             );
@@ -986,22 +1290,25 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
             colorMeta: link.colorMeta,
             lineStyle: {
               ...link.lineStyle,
-              curveness:
-                ((link.source.length + link.target.length + idx) % 20 - 10) / 70 +
-                ((link.w_consideration_norm ?? link.w_purchase_norm ?? link.w_recall_norm ?? 0) * 0.15),
+              curveness: (() => {
+                const baseCurveness =
+                  ((link.source.length + link.target.length + idx) % 20 - 10) / 70 +
+                  ((link.w_consideration_norm ?? link.w_purchase_norm ?? link.w_recall_norm ?? 0) * 0.15);
+                if (distanceMode !== "off" && brandNodesInView <= 3) {
+                  return clamp(baseCurveness * 0.42, -0.18, 0.24);
+                }
+                return baseCurveness;
+              })(),
             },
             emphasis: link.emphasis,
             }))
             : [],
           force: undefined,
-          emphasis: shouldDimWithSpotlight ? { focus: "adjacency", blurScope: "global" } : { focus: "none" },
-          blur: shouldDimWithSpotlight
-            ? {
-                itemStyle: { opacity: 0.15 },
-                lineStyle: { opacity: 0.04 },
-              }
-            : undefined,
-          labelLayout: { hideOverlap: true, moveOverlap: "shiftX" },
+          // We manage spotlight/dimming styles ourselves; disabling ECharts adjacency focus
+          // avoids hover-induced visual re-layout/jitter.
+          emphasis: { focus: "none" },
+          blur: undefined,
+          labelLayout: { hideOverlap: true },
         },
       ],
     };
@@ -1012,8 +1319,8 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
     clusterMode,
     labelMode,
     spotlight,
-    activeNodeId,
-    activeLinkId,
+    effectiveActiveNodeId,
+    effectiveActiveLinkId,
     selectedNodeId,
     showSecondaryAlways,
     layoutMode,
@@ -1067,6 +1374,16 @@ export const NetworkCanvas = forwardRef<NetworkCanvasHandle, NetworkCanvasProps>
             } else {
               onSelectNode(null);
             }
+          },
+          dragend: (params: any) => {
+            persistDraggedNode(params);
+            capturePositionsFromChart();
+          },
+          drag: (params: any) => {
+            persistDraggedNode(params);
+          },
+          mouseup: () => {
+            capturePositionsFromChart();
           },
         }}
       />

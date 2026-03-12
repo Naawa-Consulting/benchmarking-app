@@ -61,9 +61,10 @@ export default function SankeyView({
       series: [
         {
           type: "sankey",
-          left: 10,
+          left: 22,
           top: 12,
-          right: 12,
+          // Reserve extra space on the right so touchpoint labels don't clip.
+          right: 170,
           bottom: 20,
           nodeWidth: 12,
           nodeGap: 10,

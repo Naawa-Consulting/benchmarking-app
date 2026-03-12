@@ -5,7 +5,15 @@ import { Suspense } from "react";
 import type { MutableRefObject } from "react";
 
 import { NetworkCanvas, type HoveredLink, type NetworkCanvasHandle } from "../../NetworkCanvas";
-import type { DNLink, DNNode, DNMetric, DNSecondaryCluster, DNLayout, DNViewMode } from "./types";
+import type {
+  DNLink,
+  DNNode,
+  DNMetric,
+  DNSecondaryCluster,
+  DNLayout,
+  DNViewMode,
+  DNDistanceMode,
+} from "./types";
 
 const MatrixView = dynamic(() => import("./MatrixView"), {
   ssr: false,
@@ -32,6 +40,7 @@ type DemandNetworkViewProps = {
   labelMode: "auto" | "off";
   spotlight: boolean;
   layoutMode: DNLayout;
+  distanceMode: DNDistanceMode;
   pulseNodeId: string | null;
   height: string;
   activeNodeId: string | null;
@@ -55,6 +64,7 @@ export default function DemandNetworkView({
   labelMode,
   spotlight,
   layoutMode,
+  distanceMode,
   pulseNodeId,
   height,
   activeNodeId,
@@ -85,6 +95,7 @@ export default function DemandNetworkView({
         labelMode={labelMode}
         spotlight={spotlight}
         layoutMode={layoutMode}
+        distanceMode={distanceMode}
         pulseNodeId={pulseNodeId}
         height={height}
       />
