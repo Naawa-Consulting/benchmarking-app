@@ -92,7 +92,8 @@ export function postTouchpointsTableMultiDetailed(
   payload: unknown,
   limitMode: "top10" | "top25" | "all",
   sortBy = "recall",
-  sortDir: "asc" | "desc" = "desc"
+  sortDir: "asc" | "desc" = "desc",
+  options?: { signal?: AbortSignal }
 ) {
   const params = new URLSearchParams({
     limit_mode: limitMode,
@@ -102,6 +103,7 @@ export function postTouchpointsTableMultiDetailed(
   return requestDetailed(`/analytics/touchpoints/table_multi?${params.toString()}`, {
     method: "POST",
     body: JSON.stringify(payload),
+    signal: options?.signal,
   });
 }
 

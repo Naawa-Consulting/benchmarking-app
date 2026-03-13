@@ -30,8 +30,6 @@ type TouchpointRow = {
   recall: number | null;
 };
 
-const firstOrNull = (values: string[]) => (values.length ? values[0] : null);
-
 type LimitMode = "top10" | "top25" | "all";
 
 export default function JourneyDataValidationTables() {
@@ -54,14 +52,13 @@ export default function JourneyDataValidationTables() {
         sector: scope.sector,
         subsector: scope.subsector,
         category: scope.category,
-        gender: firstOrNull(scope.gender),
-        nse: firstOrNull(scope.nse),
-        state: firstOrNull(scope.state),
+        years: scope.years.length ? scope.years : null,
+        gender: scope.gender.length ? scope.gender : null,
+        nse: scope.nse.length ? scope.nse : null,
+        state: scope.state.length ? scope.state : null,
         age_min: scope.ageMin,
         age_max: scope.ageMax,
         date_grain: scope.timeGranularity,
-        quarter_from: scope.quarterFrom,
-        quarter_to: scope.quarterTo,
       },
       limitMode
     )
@@ -96,14 +93,13 @@ export default function JourneyDataValidationTables() {
         sector: scope.sector,
         subsector: scope.subsector,
         category: scope.category,
-        gender: firstOrNull(scope.gender),
-        nse: firstOrNull(scope.nse),
-        state: firstOrNull(scope.state),
+        years: scope.years.length ? scope.years : null,
+        gender: scope.gender.length ? scope.gender : null,
+        nse: scope.nse.length ? scope.nse : null,
+        state: scope.state.length ? scope.state : null,
         age_min: scope.ageMin,
         age_max: scope.ageMax,
         date_grain: scope.timeGranularity,
-        quarter_from: scope.quarterFrom,
-        quarter_to: scope.quarterTo,
       },
       touchpointLimit
     )

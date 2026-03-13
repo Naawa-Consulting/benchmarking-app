@@ -94,8 +94,7 @@ def _parse_filters(
     age_max: int | None,
     date_from: str | None,
     date_to: str | None,
-    quarter_from: str | None,
-    quarter_to: str | None,
+    years: str | None,
 ) -> dict:
     payload = {
         "study_ids": study_ids,
@@ -109,8 +108,7 @@ def _parse_filters(
         "age_max": age_max,
         "date_from": date_from,
         "date_to": date_to,
-        "quarter_from": quarter_from,
-        "quarter_to": quarter_to,
+        "years": years,
     }
     return analytics._parse_filters(payload)
 
@@ -176,18 +174,13 @@ def _build_primary_links(
     consideration_by_study: dict[str, dict[tuple[str, str], float]] = {}
     purchase_by_study: dict[str, dict[tuple[str, str], float]] = {}
     for study_id in study_ids:
-        consideration_by_study[study_id] = _build_conditional_metric_by_touchpoint(
+        consideration_values, purchase_values = _build_conditional_metrics_by_touchpoint(
             study_id,
             filters,
-            ("consideration", "brand_consideration"),
             selected_brands or None,
         )
-        purchase_by_study[study_id] = _build_conditional_metric_by_touchpoint(
-            study_id,
-            filters,
-            ("purchase", "brand_purchase"),
-            selected_brands or None,
-        )
+        consideration_by_study[study_id] = consideration_values
+        purchase_by_study[study_id] = purchase_values
     brand_contexts: dict[str, dict[str, dict[str, float] | list[dict]]] = {}
     for row in rows:
         recall = row.get("recall")
@@ -425,21 +418,20 @@ def _collect_positive_items(
     return items_by_resp, bool(rows)
 
 
-def _build_conditional_metric_by_touchpoint(
+def _build_conditional_metrics_by_touchpoint(
     study_id: str,
     filters: dict,
-    positive_stages: tuple[str, ...],
     selected_brands: set[str] | None = None,
-) -> dict[tuple[str, str], float]:
+) -> tuple[dict[tuple[str, str], float], dict[tuple[str, str], float]]:
     root = get_repo_root()
     curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
     columns = _parquet_columns(curated_path)
     if not curated_path.exists() or "touchpoint" not in columns or "brand" not in columns or "respondent_id" not in columns:
-        return {}
+        return {}, {}
 
     respondent_cte, respondent_params, eligible = analytics._respondent_filter_cte(study_id, filters)
     if not eligible:
-        return {}
+        return {}, {}
 
     value_expr = _value_expr(columns)
     respondent_filter = (
@@ -448,7 +440,6 @@ def _build_conditional_metric_by_touchpoint(
         else ""
     )
     cte_prefix = f"{respondent_cte}," if respondent_cte else ""
-    stages_sql = ", ".join(f"'{stage}'" for stage in positive_stages)
     selected_brands = selected_brands or set()
     brand_filter_sql = ""
     if selected_brands:
@@ -471,11 +462,23 @@ def _build_conditional_metric_by_touchpoint(
               {brand_filter_sql}
             GROUP BY respondent_id, brand, touchpoint
         ),
-        metric_brand AS (
+        consideration_brand AS (
             SELECT respondent_id, brand
             FROM read_parquet('{curated_path}')
             WHERE study_id = ?
-              AND LOWER(stage) IN ({stages_sql})
+              AND LOWER(stage) IN ('consideration', 'brand_consideration')
+              AND brand IS NOT NULL
+              AND TRIM(CAST(brand AS VARCHAR)) <> ''
+              AND {value_expr} = 1
+              {respondent_filter}
+              {brand_filter_sql}
+            GROUP BY respondent_id, brand
+        ),
+        purchase_brand AS (
+            SELECT respondent_id, brand
+            FROM read_parquet('{curated_path}')
+            WHERE study_id = ?
+              AND LOWER(stage) IN ('purchase', 'brand_purchase')
               AND brand IS NOT NULL
               AND TRIM(CAST(brand AS VARCHAR)) <> ''
               AND {value_expr} = 1
@@ -487,27 +490,36 @@ def _build_conditional_metric_by_touchpoint(
             r.brand,
             r.touchpoint,
             COUNT(*) AS denom_recall,
-            SUM(CASE WHEN m.respondent_id IS NOT NULL THEN 1 ELSE 0 END) AS numer_joint
+            SUM(CASE WHEN c.respondent_id IS NOT NULL THEN 1 ELSE 0 END) AS numer_consideration,
+            SUM(CASE WHEN p.respondent_id IS NOT NULL THEN 1 ELSE 0 END) AS numer_purchase
         FROM recall_tp r
-        LEFT JOIN metric_brand m
-          ON m.respondent_id = r.respondent_id
-         AND m.brand = r.brand
+        LEFT JOIN consideration_brand c
+          ON c.respondent_id = r.respondent_id
+         AND c.brand = r.brand
+        LEFT JOIN purchase_brand p
+          ON p.respondent_id = r.respondent_id
+         AND p.brand = r.brand
         GROUP BY r.brand, r.touchpoint
     """
 
     conn = duckdb.connect()
     try:
-        rows = conn.execute(query, [*respondent_params, study_id, study_id]).fetchall()
+        rows = conn.execute(query, [*respondent_params, study_id, study_id, study_id]).fetchall()
     finally:
         conn.close()
 
-    values: dict[tuple[str, str], float] = {}
-    for brand, touchpoint, denom, numer in rows:
+    consideration_values: dict[tuple[str, str], float] = {}
+    purchase_values: dict[tuple[str, str], float] = {}
+    for brand, touchpoint, denom, numer_consideration, numer_purchase in rows:
         if not denom:
             continue
-        value = float(numer or 0) / float(denom)
-        values[(str(brand), str(touchpoint))] = max(0.0, min(1.0, value))
-    return values
+        denominator = float(denom)
+        value_consideration = float(numer_consideration or 0) / denominator
+        value_purchase = float(numer_purchase or 0) / denominator
+        key = (str(brand), str(touchpoint))
+        consideration_values[key] = max(0.0, min(1.0, value_consideration))
+        purchase_values[key] = max(0.0, min(1.0, value_purchase))
+    return consideration_values, purchase_values
 
 
 def _aggregate_pairs(
@@ -960,8 +972,7 @@ def demand_network(
     age_max: int | None = Query(None),
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
-    quarter_from: str | None = Query(None),
-    quarter_to: str | None = Query(None),
+    years: str | None = Query(None, description="Comma-separated years"),
     top_links: int | None = Query(None, description="Deprecated legacy link cap; omit for full links"),
     secondary_links: str = Query("off", description="off|brands|touchpoints|both"),
     secondary_top_k_per_node: int = Query(3, description="3-5"),
@@ -989,8 +1000,7 @@ def demand_network(
         age_max,
         date_from,
         date_to,
-        quarter_from,
-        quarter_to,
+        years,
     )
     filters["brands"] = _parse_csv(brands)
 

@@ -93,6 +93,8 @@ type InteractionState = {
   lockedBrandIds: string[];
 };
 
+const BRANDS_MODE_STORAGE_KEY = "bbs_brands_mode";
+
 const metricLabel = (metric: MetricKey) => {
   switch (metric) {
     case "consideration":
@@ -342,7 +344,11 @@ export default function DemandNetworkPage() {
   const apiBase = getApiBaseUrl();
   const isPresentation = searchParams.get("presentation") === "1";
   const advancedOpen = searchParams.get("scope_advanced") === "1";
-  const brandsModeFromQuery: BrandsMode = searchParams.get("network_brands") === "enable" ? "enable" : "disable";
+  const brandsModeFromQuery: BrandsMode = (() => {
+    const shared = searchParams.get("brands_mode");
+    if (shared === "enable" || shared === "disable") return shared;
+    return searchParams.get("network_brands") === "enable" ? "enable" : "disable";
+  })();
   const [metric, setMetric] = useState<MetricKey>("recall");
   const [viewMode, setViewMode] = useState<DNViewMode>("network");
   const [brandsMode, setBrandsMode] = useState<BrandsMode>(brandsModeFromQuery);
@@ -379,6 +385,21 @@ export default function DemandNetworkPage() {
   useEffect(() => {
     setBrandsMode(brandsModeFromQuery);
   }, [brandsModeFromQuery]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const hasShared = searchParams.has("brands_mode");
+    const hasLegacy = searchParams.has("network_brands") || searchParams.has("journey_brands");
+    if (hasShared || hasLegacy) return;
+    const stored = window.localStorage.getItem(BRANDS_MODE_STORAGE_KEY);
+    if (stored !== "enable" && stored !== "disable") return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("brands_mode", stored);
+    params.set("network_brands", stored);
+    if (stored === "enable") params.set("journey_brands", "1");
+    else params.delete("journey_brands");
+    router.replace(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`, { scroll: false });
+  }, [pathname, router, searchParams]);
 
   useEffect(() => {
     if (secondaryInitRef.current) return;
@@ -424,8 +445,14 @@ export default function DemandNetworkPage() {
   const setBrandsModeWithUrl = useCallback(
     (nextMode: BrandsMode) => {
       setBrandsMode(nextMode);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(BRANDS_MODE_STORAGE_KEY, nextMode);
+      }
       const params = new URLSearchParams(searchParams.toString());
+      params.set("brands_mode", nextMode);
       params.set("network_brands", nextMode);
+      if (nextMode === "enable") params.set("journey_brands", "1");
+      else params.delete("journey_brands");
       router.replace(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`, { scroll: false });
     },
     [pathname, router, searchParams]
@@ -446,13 +473,12 @@ export default function DemandNetworkPage() {
     if (brandsMode === "enable" && scope.brands.length) {
       params.set("brands", scope.brands.join(","));
     }
-    if (scope.gender.length) params.set("gender", scope.gender[0]);
-    if (scope.nse.length) params.set("nse", scope.nse[0]);
-    if (scope.state.length) params.set("state", scope.state[0]);
+    if (scope.gender.length) params.set("gender", scope.gender.join(","));
+    if (scope.nse.length) params.set("nse", scope.nse.join(","));
+    if (scope.state.length) params.set("state", scope.state.join(","));
     if (scope.ageMin !== null) params.set("age_min", String(scope.ageMin));
     if (scope.ageMax !== null) params.set("age_max", String(scope.ageMax));
-    if (scope.quarterFrom) params.set("quarter_from", scope.quarterFrom);
-    if (scope.quarterTo) params.set("quarter_to", scope.quarterTo);
+    if (scope.years.length) params.set("years", scope.years.join(","));
     if (effectiveSecondaryLinks !== "off") {
       params.set("secondary_links", effectiveSecondaryLinks);
     }

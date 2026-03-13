@@ -17,17 +17,6 @@ function extractYear(value: string | null | undefined): string | null {
   return match ? match[0] : null;
 }
 
-function quarterOrder(value: string): number {
-  const normalized = value.trim();
-  const yearQuarter = normalized.match(/(\d{4})\D*Q([1-4])/i);
-  if (yearQuarter) return Number(yearQuarter[1]) * 10 + Number(yearQuarter[2]);
-  const quarterYear = normalized.match(/Q([1-4])\D*(\d{4})/i);
-  if (quarterYear) return Number(quarterYear[2]) * 10 + Number(quarterYear[1]);
-  const yearOnly = normalized.match(/(19|20)\d{2}/);
-  if (yearOnly) return Number(yearOnly[0]) * 10;
-  return Number.MAX_SAFE_INTEGER;
-}
-
 export default function ScopeBar() {
   const router = useRouter();
   const pathname = usePathname();
@@ -47,8 +36,17 @@ export default function ScopeBar() {
   const timeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const isPresentationMode = pathname === "/demand-network" && searchParams.get("presentation") === "1";
-  const isJourneyBrandsEnabled = pathname !== "/journey" || searchParams.get("journey_brands") === "1";
-  const isNetworkBrandsEnabled = pathname !== "/demand-network" || searchParams.get("network_brands") === "enable";
+  const sharedBrandsMode = searchParams.get("brands_mode");
+  const legacyJourneyBrandsEnabled = searchParams.get("journey_brands") === "1";
+  const legacyNetworkBrandsEnabled = searchParams.get("network_brands") === "enable";
+  const isJourneyBrandsEnabled =
+    pathname !== "/journey" ||
+    sharedBrandsMode === "enable" ||
+    (sharedBrandsMode !== "disable" && legacyJourneyBrandsEnabled);
+  const isNetworkBrandsEnabled =
+    pathname !== "/demand-network" ||
+    sharedBrandsMode === "enable" ||
+    (sharedBrandsMode !== "disable" && legacyNetworkBrandsEnabled);
   const isTrackingBrandsEnabled = pathname !== "/tracking" || Boolean(scope.category);
   const areBrandsEnabled = isJourneyBrandsEnabled && isNetworkBrandsEnabled && isTrackingBrandsEnabled;
 
@@ -139,21 +137,10 @@ export default function ScopeBar() {
     return Array.from(set).sort((a, b) => Number(a) - Number(b));
   }, [dateOptions.quarters]);
 
-  const yearQuarterRange = useMemo(() => {
-    const map = new Map<string, { from: string; to: string }>();
-    const sorted = [...dateOptions.quarters].sort((a, b) => quarterOrder(a) - quarterOrder(b));
-    for (const quarter of sorted) {
-      const year = extractYear(quarter);
-      if (!year) continue;
-      const existing = map.get(year);
-      if (!existing) {
-        map.set(year, { from: quarter, to: quarter });
-      } else {
-        map.set(year, { from: existing.from, to: quarter });
-      }
-    }
-    return map;
-  }, [dateOptions.quarters]);
+  const toggleYearValue = (year: string) => {
+    const next = scope.years.includes(year) ? scope.years.filter((item) => item !== year) : [...scope.years, year];
+    setScope({ years: next.sort((a, b) => Number(a) - Number(b)) });
+  };
 
   const closeBrandsPopover = () => {
     setBrandsOpen(false);
@@ -472,7 +459,7 @@ export default function ScopeBar() {
                 type="button"
                 className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm transition hover:bg-slate-50"
               >
-                Time: Year
+                Time: {scope.years.length ? `${scope.years.length} year${scope.years.length > 1 ? "s" : ""}` : "Year"}
               </button>
             </Popover.Trigger>
             <Popover.Portal>
@@ -486,39 +473,28 @@ export default function ScopeBar() {
                 className="z-[80] w-[320px] max-w-[92vw] rounded-2xl border border-ink/10 bg-white p-3 shadow-xl focus:outline-none"
               >
                 <div className="max-h-[320px] overflow-auto">
-                  <p className="mb-2 text-xs font-semibold text-ink">Year range</p>
-                  <select
-                    className="mb-2 w-full rounded-xl border border-ink/10 px-3 py-2 text-xs"
-                    value={extractYear(scope.quarterFrom) || ""}
-                    onChange={(event) => {
-                      const nextYear = event.target.value || null;
-                      const quarterRange = nextYear ? yearQuarterRange.get(nextYear) : null;
-                      setScope({ quarterFrom: quarterRange?.from || null });
-                    }}
-                  >
-                    <option value="">From year</option>
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-xs font-semibold text-ink">Select year(s)</p>
+                    <button
+                      type="button"
+                      className="text-[11px] text-slate underline"
+                      onClick={() => setScope({ years: [] })}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="space-y-1">
                     {years.map((value) => (
-                      <option key={`from-${value}`} value={value}>
-                        {value}
-                      </option>
+                      <label key={`year-${value}`} className="flex items-center gap-2 rounded-lg px-2 py-1 text-xs text-ink hover:bg-slate-50">
+                        <input
+                          type="checkbox"
+                          checked={scope.years.includes(value)}
+                          onChange={() => toggleYearValue(value)}
+                        />
+                        <span>{value}</span>
+                      </label>
                     ))}
-                  </select>
-                  <select
-                    className="w-full rounded-xl border border-ink/10 px-3 py-2 text-xs"
-                    value={extractYear(scope.quarterTo) || ""}
-                    onChange={(event) => {
-                      const nextYear = event.target.value || null;
-                      const quarterRange = nextYear ? yearQuarterRange.get(nextYear) : null;
-                      setScope({ quarterTo: quarterRange?.to || null });
-                    }}
-                  >
-                    <option value="">To year</option>
-                    {years.map((value) => (
-                      <option key={`to-${value}`} value={value}>
-                        {value}
-                      </option>
-                    ))}
-                  </select>
+                  </div>
                 </div>
               </Popover.Content>
             </Popover.Portal>

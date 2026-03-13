@@ -26,6 +26,7 @@ export default function TrackingPage() {
   const [advancedSlot, setAdvancedSlot] = useState<HTMLElement | null>(null);
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [baseModel, setBaseModel] = useState<TrackingSeriesModel | null>(null);
   const [model, setModel] = useState<TrackingSeriesModel | null>(null);
   const [debouncedPayloadKey, setDebouncedPayloadKey] = useState("");
   const requestSeqRef = useRef(0);
@@ -46,28 +47,25 @@ export default function TrackingPage() {
   const trackingPayload = useMemo(
     () => ({
       study_ids: scope.studyIds.length ? scope.studyIds : null,
-      brands: scope.category && scope.brands.length ? scope.brands : null,
+      brands: null,
       sector: scope.sector,
       subsector: scope.subsector,
       category: scope.category,
-      gender: scope.gender.length ? scope.gender[0] : null,
-      nse: scope.nse.length ? scope.nse[0] : null,
-      state: scope.state.length ? scope.state[0] : null,
+      years: scope.years.length ? scope.years : null,
+      gender: scope.gender.length ? scope.gender : null,
+      nse: scope.nse.length ? scope.nse : null,
+      state: scope.state.length ? scope.state : null,
       age_min: scope.ageMin,
       age_max: scope.ageMax,
       date_grain: scope.timeGranularity,
-      quarter_from: scope.quarterFrom,
-      quarter_to: scope.quarterTo,
     }),
     [
       scope.ageMax,
       scope.ageMin,
-      scope.brands,
       scope.category,
+      scope.years,
       scope.gender,
       scope.nse,
-      scope.quarterFrom,
-      scope.quarterTo,
       scope.sector,
       scope.state,
       scope.studyIds,
@@ -105,11 +103,22 @@ export default function TrackingPage() {
       }
 
       const nextModel = buildTrackingSeriesModel(result.data);
+      setBaseModel(nextModel);
       const scopedModel = filterTrackingSeriesByBrands(nextModel, scope.brands);
       setModel(scopedModel);
+      if (process.env.NODE_ENV !== "production") {
+        console.debug("[TrackingPerf] series", {
+          granularity: scopedModel.resolved_granularity,
+          breakdown: scopedModel.resolved_breakdown,
+          periods: scopedModel.periods.length,
+          primaryRows: scopedModel.entity_rows.length,
+          secondaryRows: scopedModel.secondary_rows.length,
+          meta: scopedModel.meta,
+        });
+      }
       setTrackingBrandOptions(
-        scopedModel.resolved_breakdown === "brand"
-          ? scopedModel.entity_rows.map((row) => row.entity)
+        nextModel.resolved_breakdown === "brand"
+          ? nextModel.entity_rows.map((row) => row.entity)
           : null
       );
       setState("idle");
@@ -126,6 +135,14 @@ export default function TrackingPage() {
   }, [debouncedPayloadKey, setTrackingBrandOptions]);
 
   useEffect(() => () => setTrackingBrandOptions(null), [setTrackingBrandOptions]);
+
+  useEffect(() => {
+    if (!baseModel) {
+      setModel(null);
+      return;
+    }
+    setModel(filterTrackingSeriesByBrands(baseModel, scope.brands));
+  }, [baseModel, scope.brands]);
 
   const advancedControlsContent =
     advancedOpen && advancedSlot ? (

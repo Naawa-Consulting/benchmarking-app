@@ -45,14 +45,13 @@ export type ScopeState = {
   sector: string | null;
   subsector: string | null;
   category: string | null;
+  years: string[];
   gender: string[];
   nse: string[];
   state: string[];
   ageMin: number | null;
   ageMax: number | null;
   timeGranularity: "Q";
-  quarterFrom: string | null;
-  quarterTo: string | null;
 };
 
 const DEFAULT_SCOPE: ScopeState = {
@@ -61,14 +60,13 @@ const DEFAULT_SCOPE: ScopeState = {
   sector: null,
   subsector: null,
   category: null,
+  years: [],
   gender: [],
   nse: [],
   state: [],
   ageMin: null,
   ageMax: null,
   timeGranularity: "Q",
-  quarterFrom: null,
-  quarterTo: null,
 };
 
 type ScopeContextValue = {
@@ -97,8 +95,7 @@ const MANAGED_KEYS = [
   "state",
   "age",
   "time",
-  "q_from",
-  "q_to",
+  "years",
 ] as const;
 
 function parseCsv(value: string | null): string[] {
@@ -122,20 +119,23 @@ function parseScopeFromQuery(searchParams: URLSearchParams): Partial<ScopeState>
     ageMax = Number.isFinite(parsedMax) ? parsedMax : null;
   }
 
+  const yearsCsv = parseCsv(searchParams.get("years"));
+  const years =
+    yearsCsv.length > 0 ? yearsCsv : [];
+
   return {
     studyIds: parseCsv(searchParams.get("studies")),
     brands: parseCsv(searchParams.get("brands")),
     sector: searchParams.get("sector"),
     subsector: searchParams.get("subsector"),
     category: searchParams.get("category"),
+    years,
     gender: parseCsv(searchParams.get("gender")),
     nse: parseCsv(searchParams.get("nse")),
     state: parseCsv(searchParams.get("state")),
     ageMin,
     ageMax,
-    timeGranularity: searchParams.get("time") === "Q" ? "Q" : "Q",
-    quarterFrom: searchParams.get("q_from"),
-    quarterTo: searchParams.get("q_to"),
+    timeGranularity: "Q",
   };
 }
 
@@ -146,15 +146,13 @@ function createManagedQuery(scope: ScopeState): URLSearchParams {
   if (scope.sector) params.set("sector", scope.sector);
   if (scope.subsector) params.set("subsector", scope.subsector);
   if (scope.category) params.set("category", scope.category);
+  if (scope.years.length) params.set("years", scope.years.join(","));
   if (scope.gender.length) params.set("gender", scope.gender.join(","));
   if (scope.nse.length) params.set("nse", scope.nse.join(","));
   if (scope.state.length) params.set("state", scope.state.join(","));
   if (scope.ageMin !== null || scope.ageMax !== null) {
     params.set("age", `${scope.ageMin ?? ""}-${scope.ageMax ?? ""}`);
   }
-  params.set("time", scope.timeGranularity);
-  if (scope.quarterFrom) params.set("q_from", scope.quarterFrom);
-  if (scope.quarterTo) params.set("q_to", scope.quarterTo);
   return params;
 }
 
@@ -177,6 +175,8 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [brands, setBrands] = useState<string[]>([]);
   const [trackingBrandOptions, setTrackingBrandOptionsState] = useState<string[] | null>(null);
+  const brandsCacheRef = useRef<Map<string, string[]>>(new Map());
+  const brandsReqSeqRef = useRef(0);
 
   const selectedStudyIdsOrNull = useMemo<string[] | null>(() => {
     return scope.studyIds.length > 0 ? scope.studyIds : null;
@@ -210,38 +210,53 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    const controller = new AbortController();
     const loadBrandOptions = async () => {
       if (pathname === "/tracking" && !scope.category) {
         setBrands([]);
         return;
       }
+      const payload = {
+        study_ids: selectedStudyIdsOrNull,
+        sector: scope.sector,
+        subsector: scope.subsector,
+        category: scope.category,
+        years: scope.years.length ? scope.years : null,
+        gender: scope.gender.length ? scope.gender : null,
+        nse: scope.nse.length ? scope.nse : null,
+        state: scope.state.length ? scope.state : null,
+        age_min: scope.ageMin,
+        age_max: scope.ageMax,
+        date_grain: scope.timeGranularity,
+      };
+      const cacheKey = JSON.stringify(payload);
+      const cached = brandsCacheRef.current.get(cacheKey);
+      if (cached) {
+        setBrands(cached);
+        return;
+      }
+      const seq = brandsReqSeqRef.current + 1;
+      brandsReqSeqRef.current = seq;
       const result = await postTouchpointsTableMultiDetailed(
-        {
-          study_ids: selectedStudyIdsOrNull,
-          sector: scope.sector,
-          subsector: scope.subsector,
-          category: scope.category,
-          gender: scope.gender.length ? scope.gender[0] : null,
-          nse: scope.nse.length ? scope.nse[0] : null,
-          state: scope.state.length ? scope.state[0] : null,
-          age_min: scope.ageMin,
-          age_max: scope.ageMax,
-          date_grain: scope.timeGranularity,
-          quarter_from: scope.quarterFrom,
-          quarter_to: scope.quarterTo,
-        },
-        "all"
+        payload,
+        "all",
+        "recall",
+        "desc",
+        { signal: controller.signal }
       );
+      if (seq !== brandsReqSeqRef.current || controller.signal.aborted) {
+        return;
+      }
 
       if (!result.ok || !result.data || typeof result.data !== "object") {
         setBrands([]);
         return;
       }
 
-      const payload = result.data as {
+      const responsePayload = result.data as {
         rows?: Array<{ brand?: string }>;
       };
-      const rows = Array.isArray(payload.rows) ? payload.rows : [];
+      const rows = Array.isArray(responsePayload.rows) ? responsePayload.rows : [];
       const nextBrands = Array.from(
         new Set(
           rows
@@ -249,23 +264,29 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
             .filter(Boolean)
         )
       ).sort((a, b) => a.localeCompare(b));
+      brandsCacheRef.current.set(cacheKey, nextBrands);
       setBrands(nextBrands);
     };
-    loadBrandOptions();
+    const timer = window.setTimeout(() => {
+      void loadBrandOptions();
+    }, 220);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [
     pathname,
     selectedStudyIdsOrNull,
     scope.sector,
     scope.subsector,
     scope.category,
+    scope.years,
     scope.gender,
     scope.nse,
     scope.state,
     scope.ageMin,
     scope.ageMax,
     scope.timeGranularity,
-    scope.quarterFrom,
-    scope.quarterTo,
   ]);
 
   useEffect(() => {
@@ -332,14 +353,13 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
         merged.sector !== prev.sector ||
         merged.subsector !== prev.subsector ||
         merged.category !== prev.category ||
+        merged.years.join("|") !== prev.years.join("|") ||
         merged.gender.join("|") !== prev.gender.join("|") ||
         merged.nse.join("|") !== prev.nse.join("|") ||
         merged.state.join("|") !== prev.state.join("|") ||
         merged.ageMin !== prev.ageMin ||
         merged.ageMax !== prev.ageMax ||
-        merged.timeGranularity !== prev.timeGranularity ||
-        merged.quarterFrom !== prev.quarterFrom ||
-        merged.quarterTo !== prev.quarterTo;
+        merged.timeGranularity !== prev.timeGranularity;
 
       return changed ? merged : prev;
     });

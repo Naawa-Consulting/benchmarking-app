@@ -50,7 +50,6 @@ type JourneyTableMultiPayload = {
   };
 };
 
-const firstOrNull = (values: string[]) => (values.length ? values[0] : null);
 const pct = (value: number | null | undefined) =>
   typeof value === "number" ? `${value >= 0 ? "+" : ""}${(value * 100).toFixed(1)} pts` : "n/a";
 
@@ -60,16 +59,8 @@ const extractYear = (value: string | null | undefined): string | null => {
   return match ? match[0] : null;
 };
 
-const quarterOrder = (value: string): number => {
-  const normalized = value.trim();
-  const yearQuarter = normalized.match(/(\d{4})\D*Q([1-4])/i);
-  if (yearQuarter) return Number(yearQuarter[1]) * 10 + Number(yearQuarter[2]);
-  const quarterYear = normalized.match(/Q([1-4])\D*(\d{4})/i);
-  if (quarterYear) return Number(quarterYear[2]) * 10 + Number(quarterYear[1]);
-  const yearOnly = normalized.match(/(19|20)\d{2}/);
-  if (yearOnly) return Number(yearOnly[0]) * 10;
-  return Number.MAX_SAFE_INTEGER;
-};
+const BRANDS_MODE_STORAGE_KEY = "bbs_brands_mode";
+
 
 const buildBenchmarkOnlyInsights = (
   selectionModel: JourneyModel,
@@ -314,22 +305,6 @@ export default function JourneyPage() {
     [dateOptions.quarters]
   );
 
-  const yearQuarterRange = useMemo(() => {
-    const map = new Map<string, { from: string; to: string }>();
-    const sorted = [...(dateOptions.quarters || [])].sort((a, b) => quarterOrder(a) - quarterOrder(b));
-    for (const quarter of sorted) {
-      const year = extractYear(quarter);
-      if (!year) continue;
-      const existing = map.get(year);
-      if (!existing) {
-        map.set(year, { from: quarter, to: quarter });
-      } else {
-        map.set(year, { from: existing.from, to: quarter });
-      }
-    }
-    return map;
-  }, [dateOptions.quarters]);
-
   const scopeKey = useMemo(
     () =>
       JSON.stringify({
@@ -337,23 +312,21 @@ export default function JourneyPage() {
         sector: scope.sector,
         subsector: scope.subsector,
         category: scope.category,
+        years: scope.years,
         gender: scope.gender,
         nse: scope.nse,
         state: scope.state,
         ageMin: scope.ageMin,
         ageMax: scope.ageMax,
         timeGranularity: scope.timeGranularity,
-        quarterFrom: scope.quarterFrom,
-        quarterTo: scope.quarterTo,
       }),
     [
       scope.ageMax,
       scope.ageMin,
       scope.category,
+      scope.years,
       scope.gender,
       scope.nse,
-      scope.quarterFrom,
-      scope.quarterTo,
       scope.sector,
       scope.state,
       scope.studyIds,
@@ -368,44 +341,74 @@ export default function JourneyPage() {
       sector: scope.sector,
       subsector: scope.subsector,
       category: scope.category,
+      years: scope.years,
       gender: scope.gender,
       nse: scope.nse,
       state: scope.state,
       ageMin: scope.ageMin,
       ageMax: scope.ageMax,
-      quarterFrom: scope.quarterFrom,
-      quarterTo: scope.quarterTo,
     }),
     [scopeKey]
   );
 
   const fetchInputs = useMemo(() => {
-    const animatedYearRange = timeMode && selectedTimeBucket ? yearQuarterRange.get(selectedTimeBucket) : null;
-    const effectiveQuarterFrom = animatedYearRange?.from ?? scope.quarterFrom;
-    const effectiveQuarterTo = animatedYearRange?.to ?? scope.quarterTo;
+    const effectiveYears = timeMode && selectedTimeBucket ? [selectedTimeBucket] : scope.years;
     const payload = {
       study_ids: scope.studyIds,
       sector: scope.sector,
       subsector: scope.subsector,
       category: scope.category,
-      gender: firstOrNull(scope.gender),
-      nse: firstOrNull(scope.nse),
-      state: firstOrNull(scope.state),
+      years: effectiveYears.length ? effectiveYears : null,
+      gender: scope.gender.length ? scope.gender : null,
+      nse: scope.nse.length ? scope.nse : null,
+      state: scope.state.length ? scope.state : null,
       age_min: scope.ageMin,
       age_max: scope.ageMax,
       date_grain: scope.timeGranularity,
-      quarter_from: effectiveQuarterFrom,
-      quarter_to: effectiveQuarterTo,
     };
     const fingerprint = JSON.stringify(payload);
     return { payload, fingerprint };
-  }, [scopeKey, selectedTimeBucket, timeMode, yearQuarterRange]);
+  }, [scopeKey, selectedTimeBucket, timeMode]);
 
   useEffect(() => {
     const includeAd = searchParams.get("include_ad_awareness");
     setIncludeAdAwareness(includeAd === "1");
-    setBrandsEnabled(searchParams.get("journey_brands") === "1");
+    const sharedBrandsMode = searchParams.get("brands_mode");
+    if (sharedBrandsMode === "enable") {
+      setBrandsEnabled(true);
+    } else if (sharedBrandsMode === "disable") {
+      setBrandsEnabled(false);
+    } else {
+      const legacyEnabled = searchParams.get("journey_brands") === "1";
+      if (legacyEnabled) {
+        setBrandsEnabled(true);
+      } else if (typeof window !== "undefined") {
+        const stored = window.localStorage.getItem(BRANDS_MODE_STORAGE_KEY);
+        setBrandsEnabled(stored === "enable");
+      } else {
+        setBrandsEnabled(false);
+      }
+    }
   }, [searchParams]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const hasShared = searchParams.has("brands_mode");
+    const hasLegacy = searchParams.has("journey_brands") || searchParams.has("network_brands");
+    if (hasShared || hasLegacy) return;
+    const stored = window.localStorage.getItem(BRANDS_MODE_STORAGE_KEY);
+    if (stored !== "enable" && stored !== "disable") return;
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("brands_mode", stored);
+    if (stored === "enable") {
+      params.set("journey_brands", "1");
+      params.set("network_brands", "enable");
+    } else {
+      params.delete("journey_brands");
+      params.set("network_brands", "disable");
+    }
+    router.replace(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`, { scroll: false });
+  }, [pathname, router, searchParams]);
 
   useEffect(() => {
     if (brandsEnabled) return;
@@ -450,12 +453,21 @@ export default function JourneyPage() {
 
   const setJourneyBrandsEnabledAndQuery = (nextEnabled: boolean) => {
     setBrandsEnabled(nextEnabled);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(BRANDS_MODE_STORAGE_KEY, nextEnabled ? "enable" : "disable");
+    }
     if (!nextEnabled && scope.brands.length) {
       setScope({ brands: [] });
     }
     const params = new URLSearchParams(searchParams.toString());
-    if (nextEnabled) params.set("journey_brands", "1");
-    else params.delete("journey_brands");
+    params.set("brands_mode", nextEnabled ? "enable" : "disable");
+    if (nextEnabled) {
+      params.set("journey_brands", "1");
+      params.set("network_brands", "enable");
+    } else {
+      params.delete("journey_brands");
+      params.set("network_brands", "disable");
+    }
     router.replace(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`, { scroll: false });
   };
 
@@ -726,6 +738,11 @@ export default function JourneyPage() {
   }, [fetchInputs]);
 
   useEffect(() => {
+    if (brandsEnabled) {
+      setSelectionLoading(false);
+      setSelectionMessage(null);
+      return;
+    }
     const seq = selectionReqSeqRef.current + 1;
     selectionReqSeqRef.current = seq;
     selectionFingerprintRef.current = fetchInputs.fingerprint;
@@ -791,7 +808,7 @@ export default function JourneyPage() {
     return () => {
       abortController.abort();
     };
-  }, [fetchInputs]);
+  }, [brandsEnabled, fetchInputs]);
 
   useEffect(() => {
     if (!brandsEnabled) {
@@ -833,6 +850,7 @@ export default function JourneyPage() {
         const payload = (result.data || {}) as JourneyTableMultiPayload;
         const rows = Array.isArray(payload.rows) ? payload.rows : [];
         setDetailRows(rows);
+        setSelectionRows(rows);
         if (process.env.NODE_ENV !== "production") {
           console.debug("[JourneyPerf] fetchDetailMs", Number((performance.now() - startedAt).toFixed(2)), {
             requestSeq: seq,

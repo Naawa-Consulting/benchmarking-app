@@ -1,4 +1,5 @@
 ﻿import json
+import re
 import time
 from pathlib import Path
 
@@ -66,18 +67,22 @@ def _sql_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
-def _quarter_key(value: str | None) -> int | None:
-    if not value or "-Q" not in value:
-        return None
-    try:
-        year_str, quarter_str = value.split("-Q", 1)
-        year = int(year_str)
-        quarter = int(quarter_str)
-    except ValueError:
-        return None
-    if quarter < 1 or quarter > 4:
-        return None
-    return year * 10 + quarter
+
+def _with_clause(*ctes: str) -> str:
+    cleaned: list[str] = []
+    for cte in ctes:
+        if not cte:
+            continue
+        candidate = cte.strip()
+        if not candidate:
+            continue
+        candidate = re.sub(r"^\s*WITH\s+", "", candidate, flags=re.IGNORECASE).strip()
+        candidate = candidate.rstrip(", \n\t")
+        if candidate:
+            cleaned.append(candidate)
+    if not cleaned:
+        return ""
+    return "WITH " + ",\n".join(cleaned)
 
 
 def _parquet_columns(path: Path) -> set[str]:
@@ -104,22 +109,43 @@ def _parse_filters(payload: dict | None) -> dict:
     brands = payload.get("brands") or []
     if isinstance(brands, str):
         brands = [item.strip() for item in brands.split(",") if item.strip()]
+    years = payload.get("years") or []
+    if isinstance(years, str):
+        years = [item.strip() for item in years.split(",") if item.strip()]
+    normalized_years = [item for item in years if isinstance(item, str) and item.isdigit() and len(item) == 4]
+    def _normalize_demo_values(raw: object) -> list[str]:
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        if isinstance(raw, list):
+            values: list[str] = []
+            for item in raw:
+                if isinstance(item, str):
+                    trimmed = item.strip()
+                    if trimmed:
+                        values.append(trimmed)
+            return values
+        return []
+
+    genders = _normalize_demo_values(payload.get("gender"))
+    nses = _normalize_demo_values(payload.get("nse"))
+    states = _normalize_demo_values(payload.get("state"))
     return {
         "study_ids": study_ids,
         "brands": brands,
+        "years": normalized_years,
         "sector": payload.get("sector"),
         "subsector": payload.get("subsector"),
         "category": payload.get("category"),
-        "gender": payload.get("gender"),
-        "nse": payload.get("nse"),
-        "state": payload.get("state"),
+        "gender": genders,
+        "nse": nses,
+        "state": states,
         "age_min": payload.get("age_min"),
         "age_max": payload.get("age_max"),
         "date_grain": payload.get("date_grain") or "Q",
         "date_from": payload.get("date_from"),
         "date_to": payload.get("date_to"),
-        "quarter_from": payload.get("quarter_from"),
-        "quarter_to": payload.get("quarter_to"),
     }
 
 
@@ -135,7 +161,11 @@ def _tracking_series_get_cached(key: str) -> dict | None:
     if time.time() - created_at > TRACKING_SERIES_CACHE_TTL_SECONDS:
         _TRACKING_SERIES_CACHE.pop(key, None)
         return None
-    return payload
+    cloned = dict(payload)
+    meta = dict(cloned.get("meta") or {})
+    meta["cache_hit"] = True
+    cloned["meta"] = meta
+    return cloned
 
 
 def _tracking_series_set_cached(key: str, payload: dict) -> None:
@@ -161,8 +191,9 @@ def _collect_available_quarters_filtered(study_id: str, filters: dict) -> list[i
     conn = get_duckdb_connection()
     try:
         if respondent_cte:
+            with_prefix = _with_clause(respondent_cte)
             query = f"""
-                WITH {respondent_cte}
+                {with_prefix}
                 SELECT DISTINCT q_key
                 FROM filtered_respondents
                 WHERE q_key IS NOT NULL
@@ -174,19 +205,13 @@ def _collect_available_quarters_filtered(study_id: str, filters: dict) -> list[i
         columns = _parquet_columns(respondents_path)
         if "date" not in columns:
             return []
-        quarter_from = _quarter_key(filters.get("quarter_from"))
-        quarter_to = _quarter_key(filters.get("quarter_to"))
         where = ["q_key IS NOT NULL"]
         params: list = []
-        if quarter_from is not None and quarter_to is not None:
-            where.append("q_key BETWEEN ? AND ?")
-            params.extend([quarter_from, quarter_to])
-        elif quarter_from is not None:
-            where.append("q_key >= ?")
-            params.append(quarter_from)
-        elif quarter_to is not None:
-            where.append("q_key <= ?")
-            params.append(quarter_to)
+        years = filters.get("years") or []
+        if years:
+            placeholders = ",".join("?" for _ in years)
+            where.append(f"CAST(q_key / 10 AS INTEGER) IN ({placeholders})")
+            params.extend([int(year) for year in years])
         rows = conn.execute(
             f"""
             SELECT DISTINCT q_key FROM (
@@ -214,8 +239,6 @@ def _build_tracking_periods(all_quarters: set[int]) -> tuple[str, list[dict]]:
                 "key": str(year),
                 "label": str(year),
                 "order": year,
-                "quarter_from": f"{year}-Q1",
-                "quarter_to": f"{year}-Q4",
             }
             for year in years
         ]
@@ -227,8 +250,6 @@ def _build_tracking_periods(all_quarters: set[int]) -> tuple[str, list[dict]]:
             "key": _quarter_label_from_key(quarter),
             "label": _quarter_label_from_key(quarter),
             "order": quarter,
-            "quarter_from": _quarter_label_from_key(quarter),
-            "quarter_to": _quarter_label_from_key(quarter),
         }
         for quarter in quarters
     ]
@@ -298,6 +319,7 @@ def _tracking_entity_name(
 
 
 def _tracking_series_filtered(filters: dict) -> dict:
+    started_at = time.perf_counter()
     cache_key = _tracking_series_cache_key(filters)
     cached = _tracking_series_get_cached(cache_key)
     if cached is not None:
@@ -309,6 +331,7 @@ def _tracking_series_filtered(filters: dict) -> dict:
     study_quarters: dict[str, list[int]] = {}
     all_quarters: set[int] = set()
 
+    collect_started = time.perf_counter()
     for study_id in study_ids:
         classification = classification_cache.get(study_id)
         if classification is None:
@@ -324,6 +347,7 @@ def _tracking_series_filtered(filters: dict) -> dict:
         all_quarters.update(quarters)
 
     resolved_granularity, periods = _build_tracking_periods(all_quarters)
+    collect_ms = round((time.perf_counter() - collect_started) * 1000, 2)
     resolved_breakdown, entity_label = _resolve_tracking_breakdown(filters)
     if not periods:
         payload = {
@@ -380,6 +404,7 @@ def _tracking_series_filtered(filters: dict) -> dict:
     entity_period_buckets: dict[str, dict[str, list[dict]]] = {}
     secondary_period_buckets: dict[str, dict[str, list[dict]]] = {}
     studies_with_data: set[str] = set()
+    rows_scanned = {"journey": 0, "touchpoint": 0}
     period_keys = [period["key"] for period in periods]
     valid_period_keys = set(period_keys)
 
@@ -388,6 +413,7 @@ def _tracking_series_filtered(filters: dict) -> dict:
             return str(int(q_key) // 10)
         return _quarter_label_from_key(int(q_key))
 
+    aggregate_started = time.perf_counter()
     for study_id in matched_studies:
         classification = classification_cache.get(study_id)
         if classification is None:
@@ -396,6 +422,8 @@ def _tracking_series_filtered(filters: dict) -> dict:
 
         journey_rows_by_quarter = _compute_table_rows_by_quarter_filtered(study_id, filters)
         touchpoint_rows_by_quarter = _compute_touchpoint_rows_by_quarter_filtered(study_id, filters)
+        rows_scanned["journey"] += sum(len(items) for items in journey_rows_by_quarter.values())
+        rows_scanned["touchpoint"] += sum(len(items) for items in touchpoint_rows_by_quarter.values())
 
         if journey_rows_by_quarter:
             studies_with_data.add(study_id)
@@ -487,6 +515,11 @@ def _tracking_series_filtered(filters: dict) -> dict:
             "studies_with_data": sorted(studies_with_data),
             "response_mode": "series",
             "cache_hit": False,
+            "collect_ms": collect_ms,
+            "aggregate_ms": round((time.perf_counter() - aggregate_started) * 1000, 2),
+            "total_ms": round((time.perf_counter() - started_at) * 1000, 2),
+            "studies_processed": len(matched_studies),
+            "rows_scanned": rows_scanned,
         },
     }
     _tracking_series_set_cached(cache_key, payload)
@@ -681,13 +714,12 @@ def _study_matches_taxonomy(filters: dict, classification: dict[str, str | None]
 def _needs_respondent_filter(filters: dict) -> bool:
     return any(
         [
+            filters.get("years"),
             filters.get("gender"),
             filters.get("nse"),
             filters.get("state"),
             filters.get("age_min") is not None,
             filters.get("age_max") is not None,
-            filters.get("quarter_from"),
-            filters.get("quarter_to"),
             filters.get("date_from"),
             filters.get("date_to"),
         ]
@@ -730,12 +762,9 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
         not age_var or "age" not in respondent_columns
     ):
         return None, [], False
-    if (
-        filters.get("quarter_from")
-        or filters.get("quarter_to")
-        or filters.get("date_from")
-        or filters.get("date_to")
-    ) and (date_mode == "none" or "date" not in respondent_columns):
+    if (filters.get("years") or filters.get("date_from") or filters.get("date_to")) and (
+        date_mode == "none" or "date" not in respondent_columns
+    ):
         return None, [], False
 
     labels_path = (
@@ -758,15 +787,21 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
 
     conditions = []
     params: list = []
-    if filters.get("gender"):
-        conditions.append("gender_label = ?")
-        params.append(filters["gender"])
-    if filters.get("nse"):
-        conditions.append("nse_label = ?")
-        params.append(filters["nse"])
-    if filters.get("state"):
-        conditions.append("state_label = ?")
-        params.append(filters["state"])
+    genders = filters.get("gender") or []
+    if genders:
+        placeholders = ",".join("?" for _ in genders)
+        conditions.append(f"gender_label IN ({placeholders})")
+        params.extend(genders)
+    nses = filters.get("nse") or []
+    if nses:
+        placeholders = ",".join("?" for _ in nses)
+        conditions.append(f"nse_label IN ({placeholders})")
+        params.extend(nses)
+    states = filters.get("state") or []
+    if states:
+        placeholders = ",".join("?" for _ in states)
+        conditions.append(f"state_label IN ({placeholders})")
+        params.extend(states)
     if filters.get("age_min") is not None:
         conditions.append("age >= ?")
         params.append(filters["age_min"])
@@ -774,17 +809,11 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
         conditions.append("age <= ?")
         params.append(filters["age_max"])
 
-    quarter_from = _quarter_key(filters.get("quarter_from"))
-    quarter_to = _quarter_key(filters.get("quarter_to"))
-    if quarter_from is not None and quarter_to is not None:
-        conditions.append("q_key BETWEEN ? AND ?")
-        params.extend([quarter_from, quarter_to])
-    elif quarter_from is not None:
-        conditions.append("q_key >= ?")
-        params.append(quarter_from)
-    elif quarter_to is not None:
-        conditions.append("q_key <= ?")
-        params.append(quarter_to)
+    years = filters.get("years") or []
+    if years:
+        placeholders = ",".join("?" for _ in years)
+        conditions.append(f"CAST(EXTRACT(year FROM date_dt) AS INTEGER) IN ({placeholders})")
+        params.extend([int(year) for year in years])
 
     if filters.get("date_from"):
         conditions.append("date_dt >= TRY_CAST(? AS DATE)")
@@ -1170,8 +1199,9 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
             if has_value_raw
             else "TRY_CAST(value AS INTEGER)"
         )
-        query = f"""
-            WITH {respondent_cte},
+        with_prefix = _with_clause(
+            respondent_cte,
+            f"""
             base AS (
                 SELECT
                     fr.q_key AS q_key,
@@ -1295,6 +1325,10 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                 UNION
                 SELECT q_key, brand FROM experience
             )
+            """,
+        )
+        query = f"""
+            {with_prefix}
             SELECT
                 b.q_key,
                 b.brand,
@@ -1658,8 +1692,9 @@ def _compute_touchpoint_rows_by_quarter_filtered(study_id: str, filters: dict) -
             else "TRY_CAST(value AS INTEGER)"
         )
 
-        query = f"""
-        WITH {respondent_cte},
+        with_prefix = _with_clause(
+            respondent_cte,
+            f"""
         base AS (
             SELECT
                 fr.q_key AS q_key,
@@ -1690,6 +1725,10 @@ def _compute_touchpoint_rows_by_quarter_filtered(study_id: str, filters: dict) -
             FROM base
             GROUP BY q_key, stage, brand, touchpoint
         )
+        """,
+        )
+        query = f"""
+        {with_prefix}
         SELECT
             d.q_key,
             d.stage,
@@ -2065,8 +2104,7 @@ def tracking_series_get(
     state: str | None = Query(None),
     age_min: int | None = Query(None),
     age_max: int | None = Query(None),
-    quarter_from: str | None = Query(None),
-    quarter_to: str | None = Query(None),
+    years: str | None = Query(None, description="Comma-separated years"),
     brands: str | None = Query(None, description="Comma-separated brand names"),
 ) -> dict:
     filters = _parse_filters(
@@ -2080,8 +2118,7 @@ def tracking_series_get(
             "state": state,
             "age_min": age_min,
             "age_max": age_max,
-            "quarter_from": quarter_from,
-            "quarter_to": quarter_to,
+            "years": years,
             "brands": brands,
         }
     )
@@ -2093,4 +2130,3 @@ async def tracking_series_post(request: Request) -> dict:
     payload = await request.json()
     filters = _parse_filters(payload)
     return _tracking_series_filtered(filters)
-

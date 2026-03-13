@@ -74,5 +74,10 @@ export type TrackingSeriesModel = {
     studies_with_data?: string[];
     response_mode?: string;
     cache_hit?: boolean;
+    collect_ms?: number;
+    aggregate_ms?: number;
+    total_ms?: number;
+    studies_processed?: number;
+    rows_scanned?: { journey?: number; touchpoint?: number };
   };
 };
