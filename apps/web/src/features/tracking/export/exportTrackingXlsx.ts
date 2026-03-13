@@ -1,6 +1,6 @@
-import type { TrackingComparisonModel, TrackingMetricKey } from "../types";
+import type { TrackingBrandMetricKey, TrackingSeriesModel, TrackingTouchpointMetricKey } from "../types";
 
-const METRIC_KEYS: TrackingMetricKey[] = [
+const BRAND_METRICS: TrackingBrandMetricKey[] = [
   "brand_awareness",
   "ad_awareness",
   "brand_consideration",
@@ -10,47 +10,60 @@ const METRIC_KEYS: TrackingMetricKey[] = [
   "csat",
   "nps",
 ];
+const TOUCHPOINT_METRICS: TrackingTouchpointMetricKey[] = ["recall", "consideration", "purchase"];
 
 function toCell(value: number | null) {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   return Number(value.toFixed(2));
 }
 
-export async function exportTrackingXlsx(model: TrackingComparisonModel) {
+export async function exportTrackingXlsx(model: TrackingSeriesModel) {
   const xlsx = await import("xlsx");
   const workbook = xlsx.utils.book_new();
 
-  const dataRows = model.brands.map((brand) => {
-    const row: Record<string, string | number | null> = { Brand: brand.brandName };
-    for (const key of METRIC_KEYS) {
-      if (!model.metricMeta[key].available) continue;
-      row[`${model.metricMeta[key].label} Pre`] = toCell(brand.metrics[key].valueEarlier);
-      row[`${model.metricMeta[key].label} Post`] = toCell(brand.metrics[key].valueLater);
-      row[`${model.metricMeta[key].label} Delta pts`] = toCell(brand.metrics[key].deltaAbs);
-      row[`${model.metricMeta[key].label} Delta %`] = toCell(brand.metrics[key].deltaRelPct);
+  const entityRows = model.entity_rows.map((row) => {
+    const output: Record<string, string | number | null> = { [model.entity_label]: row.entity };
+    for (const metricKey of BRAND_METRICS) {
+      const meta = model.metric_meta_brand[metricKey];
+      if (!meta) continue;
+      for (const period of model.periods) {
+        output[`${meta.label} ${period.label}`] = toCell(row.metrics[metricKey]?.values?.[period.key] ?? null);
+      }
+      for (const delta of model.delta_columns) {
+        output[`${meta.label} ${delta.label}`] = toCell(row.metrics[metricKey]?.deltas?.[delta.key] ?? null);
+      }
     }
-    return row;
+    return output;
+  });
+
+  const secondaryRows = model.secondary_rows.map((row) => {
+    const output: Record<string, string | number | null> = { Touchpoint: row.entity };
+    for (const metricKey of TOUCHPOINT_METRICS) {
+      const meta = model.metric_meta_touchpoint[metricKey];
+      if (!meta) continue;
+      for (const period of model.periods) {
+        output[`${meta.label} ${period.label}`] = toCell(row.metrics[metricKey]?.values?.[period.key] ?? null);
+      }
+      for (const delta of model.delta_columns) {
+        output[`${meta.label} ${delta.label}`] = toCell(row.metrics[metricKey]?.deltas?.[delta.key] ?? null);
+      }
+    }
+    return output;
   });
 
   const metadataRows = [
-    { Field: "Pre Study ID", Value: model.preStudyId },
-    { Field: "Pre Study Label", Value: model.preLabel },
-    { Field: "Post Study ID", Value: model.postStudyId },
-    { Field: "Post Study Label", Value: model.postLabel },
-    { Field: "Sector", Value: model.activeFiltersSummary.sector || "" },
-    { Field: "Subsector", Value: model.activeFiltersSummary.subsector || "" },
-    { Field: "Category", Value: model.activeFiltersSummary.category || "" },
-    { Field: "Gender", Value: model.activeFiltersSummary.gender.join(", ") || "All" },
-    { Field: "NSE", Value: model.activeFiltersSummary.nse.join(", ") || "All" },
-    { Field: "State", Value: model.activeFiltersSummary.state.join(", ") || "All" },
-    { Field: "Age Range", Value: `${model.activeFiltersSummary.ageMin ?? ""}-${model.activeFiltersSummary.ageMax ?? ""}` },
-    { Field: "Year Range", Value: `${model.activeFiltersSummary.quarterFrom ?? ""} -> ${model.activeFiltersSummary.quarterTo ?? ""}` },
-    { Field: "KPI basis", Value: "Promedio de marcas visibles" },
+    { Field: "Resolved granularity", Value: model.resolved_granularity },
+    { Field: "Resolved breakdown", Value: model.resolved_breakdown },
+    { Field: "Entity label", Value: model.entity_label },
+    { Field: "Periods", Value: model.periods.map((item) => item.label).join(", ") },
+    { Field: "Studies considered", Value: (model.meta.studies_considered || []).join(", ") },
+    { Field: "Studies used", Value: (model.meta.studies_used || []).join(", ") },
+    { Field: "Warnings", Value: (model.meta.warnings || []).join(" | ") },
     { Field: "Exported At", Value: new Date().toISOString() },
-    { Field: "Warnings", Value: model.warnings.join(" | ") || "" },
   ];
 
-  xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(dataRows), "Tracking_Comparison");
+  xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(entityRows), "Comparison");
+  xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(secondaryRows), "Secondary");
   xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(metadataRows), "Metadata");
-  xlsx.writeFile(workbook, `tracking-comparison-${Date.now()}.xlsx`);
+  xlsx.writeFile(workbook, `tracking-series-${Date.now()}.xlsx`);
 }

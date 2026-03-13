@@ -1,47 +1,32 @@
-import { Fragment, useMemo, useState } from "react";
+"use client";
 
-import type { TrackingBrandRow, TrackingComparisonModel, TrackingMetricKey } from "../types";
+import { useMemo, useState } from "react";
 
-type SortField = "valueEarlier" | "valueLater" | "deltaAbs" | "deltaRelPct";
-type SortState = {
-  metric: TrackingMetricKey;
-  field: SortField;
-  dir: "asc" | "desc";
-};
+import type {
+  TrackingBrandMetricKey,
+  TrackingMetricMeta,
+  TrackingSeriesMetric,
+  TrackingSeriesModel,
+  TrackingTouchpointMetricKey,
+} from "../types";
 
 type TrackingComparisonTableProps = {
-  model: TrackingComparisonModel;
+  model: TrackingSeriesModel;
+  entity: "primary" | "secondary";
+  rowLabel: string;
 };
 
-const SORT_ICON = "\u2195";
-
-const METRIC_GROUPS: Array<{ key: TrackingMetricKey; full: string }> = [
-  { key: "brand_awareness", full: "Brand Awareness" },
-  { key: "ad_awareness", full: "Ad Awareness" },
-  { key: "brand_consideration", full: "Brand Consideration" },
-  { key: "brand_purchase", full: "Brand Purchase" },
-  { key: "brand_satisfaction", full: "Brand Satisfaction" },
-  { key: "brand_recommendation", full: "Brand Recommendation" },
-  { key: "csat", full: "CSAT" },
-  { key: "nps", full: "NPS" },
+const BRAND_METRICS: TrackingBrandMetricKey[] = [
+  "brand_awareness",
+  "ad_awareness",
+  "brand_consideration",
+  "brand_purchase",
+  "brand_satisfaction",
+  "brand_recommendation",
+  "csat",
+  "nps",
 ];
-
-function formatMetric(value: number | null, unit: "%" | "pts") {
-  if (value == null) return "-";
-  return `${value.toFixed(1)}${unit}`;
-}
-
-function formatDeltaPts(value: number | null) {
-  if (value == null) return "-";
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${value.toFixed(1)}`;
-}
-
-function formatDeltaPct(value: number | null) {
-  if (value == null) return "-";
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${value.toFixed(1)}%`;
-}
+const TOUCHPOINT_METRICS: TrackingTouchpointMetricKey[] = ["recall", "consideration", "purchase"];
 
 function percentile(values: number[], p: number) {
   if (!values.length) return 0;
@@ -71,148 +56,118 @@ function heatmapClass(value: number | null, p10: number, p90: number) {
   return "bg-rose-50/60";
 }
 
-function sortRows(rows: TrackingBrandRow[], sort: SortState) {
-  return rows.slice().sort((a, b) => {
-    const left = a.metrics[sort.metric][sort.field];
-    const right = b.metrics[sort.metric][sort.field];
-    const leftVal = typeof left === "number" ? left : Number.NEGATIVE_INFINITY;
-    const rightVal = typeof right === "number" ? right : Number.NEGATIVE_INFINITY;
-    if (leftVal === rightVal) return a.brandName.localeCompare(b.brandName);
-    return sort.dir === "asc" ? leftVal - rightVal : rightVal - leftVal;
-  });
+function fmt(value: number | null, unit: string) {
+  if (value == null) return "-";
+  return `${value.toFixed(1)}${unit}`;
 }
 
-export default function TrackingComparisonTable({ model }: TrackingComparisonTableProps) {
-  const firstAvailableMetric = METRIC_GROUPS.find((group) => model.metricMeta[group.key].available)?.key ?? "brand_awareness";
-  const [sortState, setSortState] = useState<SortState>({
-    metric: firstAvailableMetric,
-    field: "deltaAbs",
-    dir: "desc",
-  });
+function fmtDelta(value: number | null) {
+  if (value == null) return "-";
+  return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+}
 
-  const visibleMetrics = useMemo(
-    () => METRIC_GROUPS.filter((group) => model.metricMeta[group.key].available),
-    [model.metricMeta]
+export default function TrackingComparisonTable({ model, entity, rowLabel }: TrackingComparisonTableProps) {
+  const rows: Array<{ name: string; metrics: Record<string, TrackingSeriesMetric> }> =
+    entity === "primary"
+      ? model.entity_rows.map((row) => ({
+          name: row.entity,
+          metrics: row.metrics as unknown as Record<string, TrackingSeriesMetric>,
+        }))
+      : model.secondary_rows.map((row) => ({
+          name: row.entity,
+          metrics: row.metrics as unknown as Record<string, TrackingSeriesMetric>,
+        }));
+
+  const metricOptions = entity === "primary" ? BRAND_METRICS : TOUCHPOINT_METRICS;
+  const meta: Record<string, TrackingMetricMeta> =
+    entity === "primary"
+      ? (model.metric_meta_brand as unknown as Record<string, TrackingMetricMeta>)
+      : (model.metric_meta_touchpoint as unknown as Record<string, TrackingMetricMeta>);
+  const [metric, setMetric] = useState<string>(metricOptions[0]);
+  const effectiveMetric = metric;
+
+  const deltaValues = useMemo(
+    () =>
+      rows.flatMap((row) =>
+        model.delta_columns
+          .map((delta) => row.metrics[effectiveMetric]?.deltas?.[delta.key])
+          .filter((value): value is number => typeof value === "number")
+      ),
+    [effectiveMetric, model.delta_columns, rows]
   );
-
-  const rows = useMemo(() => sortRows(model.brands, sortState), [model.brands, sortState]);
-  const heatmapRanges = useMemo(() => {
-    const ranges = new Map<TrackingMetricKey, { absP10: number; absP90: number; relP10: number; relP90: number }>();
-    for (const metric of visibleMetrics.map((item) => item.key)) {
-      const absValues = model.brands
-        .map((brand) => brand.metrics[metric].deltaAbs)
-        .filter((value): value is number => typeof value === "number");
-      const relValues = model.brands
-        .map((brand) => brand.metrics[metric].deltaRelPct)
-        .filter((value): value is number => typeof value === "number");
-      ranges.set(metric, {
-        absP10: percentile(absValues, 0.1),
-        absP90: percentile(absValues, 0.9),
-        relP10: percentile(relValues, 0.1),
-        relP90: percentile(relValues, 0.9),
-      });
-    }
-    return ranges;
-  }, [model.brands, visibleMetrics]);
-
-  const toggleSort = (metric: TrackingMetricKey, field: SortField) => {
-    setSortState((prev) => {
-      if (prev.metric === metric && prev.field === field) {
-        return { ...prev, dir: prev.dir === "asc" ? "desc" : "asc" };
-      }
-      return { metric, field, dir: "desc" };
-    });
-  };
+  const p10 = percentile(deltaValues, 0.1);
+  const p90 = percentile(deltaValues, 0.9);
+  const title = `${rowLabel} comparison`;
 
   return (
     <section className="main-surface rounded-3xl p-5">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-base font-semibold text-ink">{title}</h3>
+        <label className="inline-flex items-center gap-2 text-xs text-slate">
+          Metric
+          <select
+            className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink"
+            value={metric}
+            onChange={(event) => setMetric(event.target.value)}
+          >
+            {metricOptions.map((key) => (
+              <option key={key} value={key}>
+                {meta[key as string]?.label || key}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
       <div className="overflow-auto rounded-2xl border border-ink/10">
-        <table className="min-w-[1280px] border-collapse text-xs">
+        <table className="min-w-[980px] border-collapse text-xs">
           <thead className="sticky top-0 z-20 bg-[#f7f8fa]">
             <tr>
-              <th
-                rowSpan={2}
-                className="sticky left-0 z-30 border-b border-r border-ink/10 bg-[#f7f8fa] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate"
-              >
-                Brand
+              <th className="sticky left-0 z-30 border-b border-r border-ink/10 bg-[#f7f8fa] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate">
+                {rowLabel}
               </th>
-              {visibleMetrics.map((group) => (
-                <th
-                  key={group.key}
-                  colSpan={4}
-                  className="border-b border-r border-ink/10 px-2 py-2 text-center text-[11px] font-semibold uppercase tracking-[0.08em] text-slate"
-                >
-                  {group.full}
+              {model.periods.map((period) => (
+                <th key={period.key} className="border-b border-r border-ink/10 px-2 py-2 text-center text-[11px] font-semibold uppercase tracking-[0.08em] text-slate">
+                  {period.label}
                 </th>
               ))}
-            </tr>
-            <tr>
-              {visibleMetrics.map((group) => (
-                <Fragment key={`${group.key}-subheaders`}>
-                  <th key={`${group.key}-earlier`} className="border-b border-r border-ink/10 px-2 py-1.5 text-slate">
-                    Pre
-                  </th>
-                  <th key={`${group.key}-later`} className="border-b border-r border-ink/10 px-2 py-1.5 text-slate">
-                    Post
-                  </th>
-                  <th key={`${group.key}-delta-abs`} className="border-b border-r border-ink/10 px-2 py-1.5 text-slate">
-                    <button type="button" className="inline-flex items-center gap-1" onClick={() => toggleSort(group.key, "deltaAbs")}>
-                      Delta pts <span aria-hidden>{SORT_ICON}</span>
-                    </button>
-                  </th>
-                  <th key={`${group.key}-delta-rel`} className="border-b border-r border-ink/10 px-2 py-1.5 text-slate">
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1"
-                      onClick={() => toggleSort(group.key, "deltaRelPct")}
-                    >
-                      Delta % <span aria-hidden>{SORT_ICON}</span>
-                    </button>
-                  </th>
-                </Fragment>
+              {model.delta_columns.map((delta) => (
+                <th key={delta.key} className="border-b border-r border-ink/10 px-2 py-2 text-center text-[11px] font-semibold uppercase tracking-[0.08em] text-slate">
+                  {delta.label}
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr key={row.brandName} className="border-b border-ink/5">
-                <td className="sticky left-0 z-10 border-r border-ink/10 bg-white px-3 py-2 font-medium text-ink">{row.brandName}</td>
-                {visibleMetrics.map((group) => {
-                  const metric = row.metrics[group.key];
-                  const unit = model.metricMeta[group.key].unit;
-                  const range = heatmapRanges.get(group.key) || {
-                    absP10: -5,
-                    absP90: 5,
-                    relP10: -10,
-                    relP90: 10,
-                  };
-                  return (
-                    <Fragment key={`${row.brandName}-${group.key}`}>
-                      <td key={`${row.brandName}-${group.key}-earlier`} className="border-r border-ink/10 px-2 py-2 text-right text-slate">
-                        {formatMetric(metric.valueEarlier, unit)}
-                      </td>
-                      <td key={`${row.brandName}-${group.key}-later`} className="border-r border-ink/10 px-2 py-2 text-right text-slate">
-                        {formatMetric(metric.valueLater, unit)}
-                      </td>
+            {rows.map((row) => {
+              const metricData = row.metrics[effectiveMetric];
+              return (
+                <tr key={row.name} className="border-b border-ink/5">
+                  <td className="sticky left-0 z-10 border-r border-ink/10 bg-white px-3 py-2 font-medium text-ink">
+                    {row.name}
+                  </td>
+                  {model.periods.map((period) => (
+                    <td key={`${row.name}-${period.key}`} className="border-r border-ink/10 px-2 py-2 text-right text-slate">
+                      {fmt(
+                        (metricData?.values?.[period.key] as number | null | undefined) ?? null,
+                        meta[effectiveMetric]?.unit || "%"
+                      )}
+                    </td>
+                  ))}
+                  {model.delta_columns.map((delta) => {
+                    const value = (metricData?.deltas?.[delta.key] as number | null | undefined) ?? null;
+                    return (
                       <td
-                        key={`${row.brandName}-${group.key}-delta-abs`}
-                        className={`border-r border-ink/10 px-2 py-2 text-right ${heatmapClass(metric.deltaAbs, range.absP10, range.absP90)}`}
-                        title={metric.deltaAbs == null ? "No data" : `Delta pts: ${metric.deltaAbs.toFixed(1)}`}
+                        key={`${row.name}-${delta.key}`}
+                        className={`border-r border-ink/10 px-2 py-2 text-right ${heatmapClass(value, p10, p90)}`}
+                        title={value == null ? "No data" : `Delta: ${value.toFixed(1)}`}
                       >
-                        {formatDeltaPts(metric.deltaAbs)}
+                        {fmtDelta(value)}
                       </td>
-                      <td
-                        key={`${row.brandName}-${group.key}-delta-rel`}
-                        className={`border-r border-ink/10 px-2 py-2 text-right ${heatmapClass(metric.deltaRelPct, range.relP10, range.relP90)}`}
-                        title={metric.deltaRelPct == null ? "No data" : `Delta %: ${metric.deltaRelPct.toFixed(1)}%`}
-                      >
-                        {formatDeltaPct(metric.deltaRelPct)}
-                      </td>
-                    </Fragment>
-                  );
-                })}
-              </tr>
-            ))}
+                    );
+                  })}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

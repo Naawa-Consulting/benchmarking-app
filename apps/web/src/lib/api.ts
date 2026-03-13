@@ -105,6 +105,14 @@ export function postTouchpointsTableMultiDetailed(
   });
 }
 
+export function postTrackingSeriesDetailed(payload: unknown, options?: { signal?: AbortSignal }) {
+  return requestDetailed(`/analytics/tracking/series`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+    signal: options?.signal,
+  });
+}
+
 async function requestDetailed(path: string, options?: RequestInit): Promise<ApiResult> {
   const url = `${API_BASE_URL}${path}`;
   try {

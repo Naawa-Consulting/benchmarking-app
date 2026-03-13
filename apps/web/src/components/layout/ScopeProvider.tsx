@@ -211,6 +211,10 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const loadBrandOptions = async () => {
+      if (pathname === "/tracking" && !scope.category) {
+        setBrands([]);
+        return;
+      }
       const result = await postTouchpointsTableMultiDetailed(
         {
           study_ids: selectedStudyIdsOrNull,
@@ -249,6 +253,7 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
     };
     loadBrandOptions();
   }, [
+    pathname,
     selectedStudyIdsOrNull,
     scope.sector,
     scope.subsector,

@@ -1,4 +1,4 @@
-import json
+﻿import json
 import time
 from pathlib import Path
 
@@ -40,6 +40,9 @@ TOUCHPOINT_STAGE_METRICS = {
     "purchase": "purchase",
     "brand_purchase": "purchase",
 }
+
+TRACKING_SERIES_CACHE_TTL_SECONDS = 30
+_TRACKING_SERIES_CACHE: dict[str, tuple[float, dict]] = {}
 
 CORE_AWARENESS_BOUNDED_METRICS = (
     "brand_consideration",
@@ -98,8 +101,12 @@ def _parse_filters(payload: dict | None) -> dict:
     study_ids = payload.get("study_ids") or payload.get("study_id") or []
     if isinstance(study_ids, str):
         study_ids = [item.strip() for item in study_ids.split(",") if item.strip()]
+    brands = payload.get("brands") or []
+    if isinstance(brands, str):
+        brands = [item.strip() for item in brands.split(",") if item.strip()]
     return {
         "study_ids": study_ids,
+        "brands": brands,
         "sector": payload.get("sector"),
         "subsector": payload.get("subsector"),
         "category": payload.get("category"),
@@ -114,6 +121,376 @@ def _parse_filters(payload: dict | None) -> dict:
         "quarter_from": payload.get("quarter_from"),
         "quarter_to": payload.get("quarter_to"),
     }
+
+
+def _tracking_series_cache_key(filters: dict) -> str:
+    return json.dumps({"filters": filters}, sort_keys=True, separators=(",", ":"))
+
+
+def _tracking_series_get_cached(key: str) -> dict | None:
+    entry = _TRACKING_SERIES_CACHE.get(key)
+    if not entry:
+        return None
+    created_at, payload = entry
+    if time.time() - created_at > TRACKING_SERIES_CACHE_TTL_SECONDS:
+        _TRACKING_SERIES_CACHE.pop(key, None)
+        return None
+    return payload
+
+
+def _tracking_series_set_cached(key: str, payload: dict) -> None:
+    _TRACKING_SERIES_CACHE[key] = (time.time(), payload)
+
+
+def _quarter_label_from_key(q_key: int) -> str:
+    return f"{q_key // 10}-Q{q_key % 10}"
+
+
+def _collect_available_quarters_filtered(study_id: str, filters: dict) -> list[int]:
+    root = get_repo_root()
+    respondents_path = (
+        root / "data" / "warehouse" / "raw" / f"study_id={study_id}" / "respondents.parquet"
+    )
+    if not respondents_path.exists():
+        return []
+
+    respondent_cte, respondent_params, eligible = _respondent_filter_cte(study_id, filters)
+    if not eligible:
+        return []
+
+    conn = get_duckdb_connection()
+    try:
+        if respondent_cte:
+            query = f"""
+                WITH {respondent_cte}
+                SELECT DISTINCT q_key
+                FROM filtered_respondents
+                WHERE q_key IS NOT NULL
+                ORDER BY q_key
+            """
+            rows = conn.execute(query, respondent_params).fetchall()
+            return [int(row[0]) for row in rows if row and row[0] is not None]
+
+        columns = _parquet_columns(respondents_path)
+        if "date" not in columns:
+            return []
+        quarter_from = _quarter_key(filters.get("quarter_from"))
+        quarter_to = _quarter_key(filters.get("quarter_to"))
+        where = ["q_key IS NOT NULL"]
+        params: list = []
+        if quarter_from is not None and quarter_to is not None:
+            where.append("q_key BETWEEN ? AND ?")
+            params.extend([quarter_from, quarter_to])
+        elif quarter_from is not None:
+            where.append("q_key >= ?")
+            params.append(quarter_from)
+        elif quarter_to is not None:
+            where.append("q_key <= ?")
+            params.append(quarter_to)
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT q_key FROM (
+                SELECT EXTRACT(year FROM TRY_CAST(date AS DATE)) * 10
+                    + EXTRACT(quarter FROM TRY_CAST(date AS DATE)) AS q_key
+                FROM read_parquet('{respondents_path}')
+            ) q
+            WHERE {' AND '.join(where)}
+            ORDER BY q_key
+            """,
+            params,
+        ).fetchall()
+        return [int(row[0]) for row in rows if row and row[0] is not None]
+    finally:
+        conn.close()
+
+
+def _build_tracking_periods(all_quarters: set[int]) -> tuple[str, list[dict]]:
+    if not all_quarters:
+        return "year", []
+    years = sorted({quarter // 10 for quarter in all_quarters})
+    if len(years) > 1:
+        periods = [
+            {
+                "key": str(year),
+                "label": str(year),
+                "order": year,
+                "quarter_from": f"{year}-Q1",
+                "quarter_to": f"{year}-Q4",
+            }
+            for year in years
+        ]
+        return "year", periods
+
+    quarters = sorted(all_quarters)
+    periods = [
+        {
+            "key": _quarter_label_from_key(quarter),
+            "label": _quarter_label_from_key(quarter),
+            "order": quarter,
+            "quarter_from": _quarter_label_from_key(quarter),
+            "quarter_to": _quarter_label_from_key(quarter),
+        }
+        for quarter in quarters
+    ]
+    return "quarter", periods
+
+
+def _tracking_metric_average(
+    rows: list[dict], metric: str, weight_key: str | None = "base_n_population"
+) -> float | None:
+    points: list[tuple[float, float]] = []
+    for row in rows:
+        value = row.get(metric)
+        if not isinstance(value, (int, float)):
+            continue
+        weight = row.get(weight_key) if weight_key else None
+        if not isinstance(weight, (int, float)) or weight <= 0:
+            weight = row.get("aggregation_weight_n")
+        if not isinstance(weight, (int, float)) or weight <= 0:
+            weight = 1.0
+        points.append((float(value), float(weight)))
+    if not points:
+        return None
+    total_weight = sum(weight for _, weight in points)
+    if total_weight <= 0:
+        return None
+    return round(sum(value * weight for value, weight in points) / total_weight, 1)
+
+
+def _build_series_metric_payload(period_keys: list[str], value_by_period: dict[str, float | None]) -> dict:
+    values = {period_key: value_by_period.get(period_key) for period_key in period_keys}
+    deltas: dict[str, float | None] = {}
+    for index in range(1, len(period_keys)):
+        previous_key = period_keys[index - 1]
+        current_key = period_keys[index]
+        previous = values.get(previous_key)
+        current = values.get(current_key)
+        delta_key = f"{previous_key}->{current_key}"
+        if isinstance(previous, (int, float)) and isinstance(current, (int, float)):
+            deltas[delta_key] = round(float(current) - float(previous), 1)
+        else:
+            deltas[delta_key] = None
+    return {"values": values, "deltas": deltas}
+
+
+def _resolve_tracking_breakdown(filters: dict) -> tuple[str, str]:
+    if not filters.get("sector"):
+        return "sector", "Sector"
+    if not filters.get("subsector"):
+        return "subsector", "Subsector"
+    if not filters.get("category"):
+        return "category", "Category"
+    return "brand", "Brand"
+
+
+def _tracking_entity_name(
+    breakdown: str,
+    classification: dict[str, str | None],
+    brand_name: str | None = None,
+) -> str:
+    if breakdown == "brand":
+        return (brand_name or "").strip() or "Unassigned"
+    if breakdown == "sector":
+        return (classification.get("sector") or "").strip() or "Unassigned"
+    if breakdown == "subsector":
+        return (classification.get("subsector") or "").strip() or "Unassigned"
+    return (classification.get("category") or "").strip() or "Unassigned"
+
+
+def _tracking_series_filtered(filters: dict) -> dict:
+    cache_key = _tracking_series_cache_key(filters)
+    cached = _tracking_series_get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    root, study_ids = _resolve_study_ids(filters)
+    classification_cache: dict[str, dict[str, str | None]] = {}
+    matched_studies: list[str] = []
+    study_quarters: dict[str, list[int]] = {}
+    all_quarters: set[int] = set()
+
+    for study_id in study_ids:
+        classification = classification_cache.get(study_id)
+        if classification is None:
+            classification = _classification_for_study(root, study_id)
+            classification_cache[study_id] = classification
+        if not _study_matches_taxonomy(filters, classification):
+            continue
+        quarters = _collect_available_quarters_filtered(study_id, filters)
+        if not quarters:
+            continue
+        matched_studies.append(study_id)
+        study_quarters[study_id] = quarters
+        all_quarters.update(quarters)
+
+    resolved_granularity, periods = _build_tracking_periods(all_quarters)
+    resolved_breakdown, entity_label = _resolve_tracking_breakdown(filters)
+    if not periods:
+        payload = {
+            "ok": True,
+            "resolved_granularity": "year",
+            "resolved_breakdown": resolved_breakdown,
+            "entity_label": entity_label,
+            "periods": [],
+            "delta_columns": [],
+            "entity_rows": [],
+            "secondary_rows": [],
+            "brand_rows": [],
+            "touchpoint_rows": [],
+            "metric_meta_brand": {},
+            "metric_meta_touchpoint": {},
+            "meta": {
+                "warnings": ["No temporal data available for the selected scope."],
+                "studies_considered": study_ids,
+                "studies_used": matched_studies,
+                "response_mode": "series",
+                "cache_hit": False,
+            },
+        }
+        _tracking_series_set_cached(cache_key, payload)
+        return payload
+
+    brand_metrics = [
+        "brand_awareness",
+        "ad_awareness",
+        "brand_consideration",
+        "brand_purchase",
+        "brand_satisfaction",
+        "brand_recommendation",
+        "csat",
+        "nps",
+    ]
+    touchpoint_metrics = ["recall", "consideration", "purchase"]
+    metric_meta_brand = {
+        "brand_awareness": {"label": "Brand Awareness", "unit": "%"},
+        "ad_awareness": {"label": "Ad Awareness", "unit": "%"},
+        "brand_consideration": {"label": "Brand Consideration", "unit": "%"},
+        "brand_purchase": {"label": "Brand Purchase", "unit": "%"},
+        "brand_satisfaction": {"label": "Brand Satisfaction", "unit": "%"},
+        "brand_recommendation": {"label": "Brand Recommendation", "unit": "%"},
+        "csat": {"label": "CSAT", "unit": "%"},
+        "nps": {"label": "NPS", "unit": "%"},
+    }
+    metric_meta_touchpoint = {
+        "recall": {"label": "Recall", "unit": "%"},
+        "consideration": {"label": "Consideration", "unit": "%"},
+        "purchase": {"label": "Purchase", "unit": "%"},
+    }
+
+    entity_period_buckets: dict[str, dict[str, list[dict]]] = {}
+    secondary_period_buckets: dict[str, dict[str, list[dict]]] = {}
+    studies_with_data: set[str] = set()
+    period_keys = [period["key"] for period in periods]
+    valid_period_keys = set(period_keys)
+
+    def period_key_from_quarter(q_key: int) -> str:
+        if resolved_granularity == "year":
+            return str(int(q_key) // 10)
+        return _quarter_label_from_key(int(q_key))
+
+    for study_id in matched_studies:
+        classification = classification_cache.get(study_id)
+        if classification is None:
+            classification = _classification_for_study(root, study_id)
+            classification_cache[study_id] = classification
+
+        journey_rows_by_quarter = _compute_table_rows_by_quarter_filtered(study_id, filters)
+        touchpoint_rows_by_quarter = _compute_touchpoint_rows_by_quarter_filtered(study_id, filters)
+
+        if journey_rows_by_quarter:
+            studies_with_data.add(study_id)
+
+        for q_key, journey_rows in journey_rows_by_quarter.items():
+            period_key = period_key_from_quarter(int(q_key))
+            if period_key not in valid_period_keys:
+                continue
+            for row in journey_rows:
+                brand_name = row.get("brand")
+                if not isinstance(brand_name, str) or not brand_name.strip():
+                    continue
+                if resolved_breakdown == "brand" and filters.get("brands") and brand_name not in filters.get("brands"):
+                    continue
+                entity_name = _tracking_entity_name(resolved_breakdown, classification, brand_name)
+                entity_period_buckets.setdefault(entity_name, {}).setdefault(period_key, []).append(row)
+
+        for q_key, touchpoint_rows in touchpoint_rows_by_quarter.items():
+            period_key = period_key_from_quarter(int(q_key))
+            if period_key not in valid_period_keys:
+                continue
+            for row in touchpoint_rows:
+                touchpoint = row.get("touchpoint")
+                if not isinstance(touchpoint, str) or not touchpoint.strip():
+                    continue
+                row_brand = row.get("brand")
+                if resolved_breakdown == "brand" and filters.get("brands") and row_brand not in filters.get("brands"):
+                    continue
+                secondary_period_buckets.setdefault(touchpoint, {}).setdefault(period_key, []).append(row)
+
+    entity_rows: list[dict] = []
+    for entity_name in sorted(entity_period_buckets.keys(), key=lambda item: item.lower()):
+        metrics_payload: dict[str, dict] = {}
+        for metric in brand_metrics:
+            values_by_period = {
+                period_key: _tracking_metric_average(entity_period_buckets[entity_name].get(period_key, []), metric)
+                for period_key in period_keys
+            }
+            metrics_payload[metric] = _build_series_metric_payload(period_keys, values_by_period)
+        entity_rows.append({"entity": entity_name, "metrics": metrics_payload})
+
+    secondary_rows: list[dict] = []
+    for entity_name in sorted(secondary_period_buckets.keys(), key=lambda item: item.lower()):
+        metrics_payload: dict[str, dict] = {}
+        for metric in touchpoint_metrics:
+            values_by_period = {
+                period_key: _tracking_metric_average(
+                    secondary_period_buckets[entity_name].get(period_key, []), metric, None
+                )
+                for period_key in period_keys
+            }
+            metrics_payload[metric] = _build_series_metric_payload(period_keys, values_by_period)
+        secondary_rows.append({"entity": entity_name, "metrics": metrics_payload})
+
+    delta_columns = []
+    for index in range(1, len(period_keys)):
+        previous_key = period_keys[index - 1]
+        current_key = period_keys[index]
+        delta_columns.append(
+            {
+                "key": f"{previous_key}->{current_key}",
+                "from": previous_key,
+                "to": current_key,
+                "label": f"Delta {current_key} vs {previous_key}",
+            }
+        )
+
+    payload = {
+        "ok": True,
+        "resolved_granularity": resolved_granularity,
+        "resolved_breakdown": resolved_breakdown,
+        "entity_label": entity_label,
+        "periods": [{"key": p["key"], "label": p["label"], "order": p["order"]} for p in periods],
+        "delta_columns": delta_columns,
+        "entity_rows": entity_rows,
+        "secondary_rows": secondary_rows,
+        "brand_rows": [
+            {"brand": row["entity"], "metrics": row["metrics"]} for row in entity_rows
+        ]
+        if resolved_breakdown == "brand"
+        else [],
+        "touchpoint_rows": [{"touchpoint": row["entity"], "metrics": row["metrics"]} for row in secondary_rows],
+        "metric_meta_brand": metric_meta_brand,
+        "metric_meta_touchpoint": metric_meta_touchpoint,
+        "meta": {
+            "warnings": [],
+            "studies_considered": study_ids,
+            "studies_used": matched_studies,
+            "studies_with_data": sorted(studies_with_data),
+            "response_mode": "series",
+            "cache_hit": False,
+        },
+    }
+    _tracking_series_set_cached(cache_key, payload)
+    return payload
 
 
 def _journey_table_multi_cache_key(
@@ -455,7 +832,7 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
                AND s.value_code = CAST(r.state_code AS VARCHAR)
         ),
         filtered_respondents AS (
-            SELECT respondent_id
+            SELECT respondent_id, q_key
             FROM respondents_labeled
             WHERE {where_clause}
         )
@@ -745,6 +1122,269 @@ def _compute_table_rows_filtered(study_id: str, filters: dict) -> list[dict]:
     return _compute_table_rows_internal(study_id, respondent_cte, respondent_params, False)
 
 
+def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dict[int, list[dict]]:
+    respondent_cte, respondent_params, eligible = _respondent_filter_cte(study_id, filters)
+    if not eligible:
+        return {}
+
+    root = get_repo_root()
+    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
+    if not curated_path.exists():
+        return {}
+    respondents_path = (
+        root / "data" / "warehouse" / "raw" / f"study_id={study_id}" / "respondents.parquet"
+    )
+
+    conn = get_duckdb_connection()
+    try:
+        load_parquet_as_view(conn, "journey_table", str(curated_path))
+        if respondent_cte is None:
+            if not respondents_path.exists():
+                return {}
+            respondent_columns = _parquet_columns(respondents_path)
+            if "respondent_id" not in respondent_columns or "date" not in respondent_columns:
+                return {}
+            respondent_cte = f"""
+                filtered_respondents AS (
+                    SELECT
+                        respondent_id,
+                        EXTRACT(year FROM TRY_CAST(date AS DATE)) * 10
+                            + EXTRACT(quarter FROM TRY_CAST(date AS DATE)) AS q_key
+                    FROM read_parquet('{respondents_path}')
+                    WHERE respondent_id IS NOT NULL
+                      AND TRY_CAST(date AS DATE) IS NOT NULL
+                )
+            """
+            respondent_params = []
+        has_value_raw = (
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_name = 'journey_table' AND column_name = 'value_raw'
+                """
+            ).fetchone()[0]
+            > 0
+        )
+        value_expr = (
+            "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
+            if has_value_raw
+            else "TRY_CAST(value AS INTEGER)"
+        )
+        query = f"""
+            WITH {respondent_cte},
+            base AS (
+                SELECT
+                    fr.q_key AS q_key,
+                    LOWER(j.stage) AS stage,
+                    j.brand,
+                    j.respondent_id,
+                    {value_expr} AS v_int
+                FROM journey_table j
+                JOIN filtered_respondents fr ON fr.respondent_id = j.respondent_id
+                WHERE j.study_id = ?
+                  AND j.brand IS NOT NULL
+                  AND TRIM(CAST(j.brand AS VARCHAR)) <> ''
+            ),
+            population AS (
+                SELECT q_key, COUNT(DISTINCT respondent_id) AS population_n
+                FROM filtered_respondents
+                WHERE q_key IS NOT NULL
+                GROUP BY q_key
+            ),
+            stage_stats AS (
+                SELECT q_key, stage, MAX(v_int) AS max_v
+                FROM base
+                WHERE v_int IS NOT NULL
+                GROUP BY q_key, stage
+            ),
+            stage_nums AS (
+                SELECT
+                    b.q_key,
+                    b.brand,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'awareness' AND b.v_int = 1 THEN b.respondent_id END) AS awareness_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'ad_awareness' AND b.v_int = 1 THEN b.respondent_id END) AS ad_awareness_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'consideration' AND b.v_int = 1 THEN b.respondent_id END) AS consideration_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'purchase' AND b.v_int = 1 THEN b.respondent_id END) AS purchase_num,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN b.stage = 'satisfaction'
+                                 AND (
+                                    (ss.max_v IS NOT NULL AND ss.max_v >= 5 AND b.v_int IN (4, 5))
+                                    OR (ss.max_v IS NOT NULL AND ss.max_v < 5 AND b.v_int = 1)
+                                 )
+                            THEN b.respondent_id
+                        END
+                    ) AS satisfaction_num,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN b.stage = 'recommendation'
+                                 AND (
+                                    (rs.max_v IS NOT NULL AND rs.max_v >= 9 AND b.v_int IN (9, 10))
+                                    OR (rs.max_v IS NOT NULL AND rs.max_v < 9 AND b.v_int = 1)
+                                 )
+                            THEN b.respondent_id
+                        END
+                    ) AS recommendation_num
+                FROM base b
+                LEFT JOIN stage_stats ss ON ss.q_key = b.q_key AND ss.stage = 'satisfaction'
+                LEFT JOIN stage_stats rs ON rs.q_key = b.q_key AND rs.stage = 'recommendation'
+                WHERE b.v_int IS NOT NULL
+                GROUP BY b.q_key, b.brand
+            ),
+            purchasers AS (
+                SELECT q_key, brand, respondent_id
+                FROM base
+                WHERE stage = 'purchase' AND v_int = 1 AND respondent_id IS NOT NULL
+                GROUP BY q_key, brand, respondent_id
+            ),
+            satisfaction_by_resp AS (
+                SELECT q_key, brand, respondent_id, MAX(v_int) AS sat_v
+                FROM base
+                WHERE stage = 'satisfaction' AND v_int IS NOT NULL AND respondent_id IS NOT NULL
+                GROUP BY q_key, brand, respondent_id
+            ),
+            recommendation_by_resp AS (
+                SELECT q_key, brand, respondent_id, MAX(v_int) AS rec_v
+                FROM base
+                WHERE stage = 'recommendation' AND v_int IS NOT NULL AND respondent_id IS NOT NULL
+                GROUP BY q_key, brand, respondent_id
+            ),
+            experience AS (
+                SELECT
+                    p.q_key,
+                    p.brand,
+                    COUNT(DISTINCT p.respondent_id) AS purchase_n,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN ss.max_v IS NOT NULL AND ss.max_v >= 5 AND s.sat_v IN (4, 5) THEN p.respondent_id
+                            WHEN ss.max_v IS NOT NULL AND ss.max_v < 5 AND s.sat_v = 1 THEN p.respondent_id
+                            ELSE NULL
+                        END
+                    ) AS top2_n,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN ss.max_v IS NOT NULL AND ss.max_v >= 5 AND s.sat_v IN (1, 2) THEN p.respondent_id
+                            ELSE NULL
+                        END
+                    ) AS bottom2_n,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN rs.max_v IS NOT NULL AND rs.max_v >= 9 AND r.rec_v IN (9, 10) THEN p.respondent_id
+                            WHEN rs.max_v IS NOT NULL AND rs.max_v < 9 AND r.rec_v = 1 THEN p.respondent_id
+                            ELSE NULL
+                        END
+                    ) AS promoters_n,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN rs.max_v IS NOT NULL AND rs.max_v >= 9 AND r.rec_v BETWEEN 0 AND 6 THEN p.respondent_id
+                            WHEN rs.max_v IS NOT NULL AND rs.max_v < 9 AND r.rec_v = 0 THEN p.respondent_id
+                            ELSE NULL
+                        END
+                    ) AS detractors_n
+                FROM purchasers p
+                LEFT JOIN satisfaction_by_resp s
+                  ON s.q_key = p.q_key AND s.brand = p.brand AND s.respondent_id = p.respondent_id
+                LEFT JOIN recommendation_by_resp r
+                  ON r.q_key = p.q_key AND r.brand = p.brand AND r.respondent_id = p.respondent_id
+                LEFT JOIN stage_stats ss ON ss.q_key = p.q_key AND ss.stage = 'satisfaction'
+                LEFT JOIN stage_stats rs ON rs.q_key = p.q_key AND rs.stage = 'recommendation'
+                GROUP BY p.q_key, p.brand, ss.max_v, rs.max_v
+            ),
+            brands AS (
+                SELECT q_key, brand FROM stage_nums
+                UNION
+                SELECT q_key, brand FROM experience
+            )
+            SELECT
+                b.q_key,
+                b.brand,
+                p.population_n,
+                s.awareness_num,
+                s.ad_awareness_num,
+                s.consideration_num,
+                s.purchase_num,
+                s.satisfaction_num,
+                s.recommendation_num,
+                e.purchase_n,
+                e.top2_n,
+                e.bottom2_n,
+                e.promoters_n,
+                e.detractors_n
+            FROM brands b
+            LEFT JOIN population p ON p.q_key = b.q_key
+            LEFT JOIN stage_nums s ON s.q_key = b.q_key AND s.brand = b.brand
+            LEFT JOIN experience e ON e.q_key = b.q_key AND e.brand = b.brand
+        """
+        params = [*respondent_params, study_id]
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    buckets: dict[int, list[dict]] = {}
+    for (
+        q_key,
+        brand,
+        population_n,
+        awareness_num,
+        ad_awareness_num,
+        consideration_num,
+        purchase_num,
+        satisfaction_num,
+        recommendation_num,
+        purchaser_n,
+        top2_n,
+        bottom2_n,
+        promoters_n,
+        detractors_n,
+    ) in rows:
+        if q_key is None or not brand:
+            continue
+        q_key_int = int(q_key)
+        values: dict[str, float | None] = {value: None for value in TABLE_STAGE_MAP.values()}
+        values["base_n_population"] = population_n if population_n and population_n > 0 else None
+        values["aggregation_weight_n"] = population_n if population_n and population_n > 0 else None
+
+        if population_n and population_n > 0:
+            numerator_map = {
+                "brand_awareness": awareness_num,
+                "ad_awareness": ad_awareness_num,
+                "brand_consideration": consideration_num,
+                "brand_purchase": purchase_num,
+                "brand_satisfaction": satisfaction_num,
+                "brand_recommendation": recommendation_num,
+            }
+            for metric, numerator in numerator_map.items():
+                if numerator is None:
+                    continue
+                values[metric] = round((float(numerator) / float(population_n)) * 100, 1)
+
+        if purchaser_n and purchaser_n > 0:
+            values["csat"] = round(((float(top2_n or 0) - float(bottom2_n or 0)) / float(purchaser_n)) * 100, 1)
+            values["nps"] = round(((float(promoters_n or 0) - float(detractors_n or 0)) / float(purchaser_n)) * 100, 1)
+        else:
+            values["csat"] = None
+            values["nps"] = None
+
+        awareness_ceiling_applied = _apply_awareness_ceiling(values)
+        buckets.setdefault(q_key_int, []).append(
+            {
+                "brand": brand,
+                "brand_awareness": values.get("brand_awareness"),
+                "ad_awareness": values.get("ad_awareness"),
+                "brand_consideration": values.get("brand_consideration"),
+                "brand_purchase": values.get("brand_purchase"),
+                "brand_satisfaction": values.get("brand_satisfaction"),
+                "brand_recommendation": values.get("brand_recommendation"),
+                "csat": values.get("csat"),
+                "nps": values.get("nps"),
+                "base_n_population": values.get("base_n_population"),
+                "aggregation_weight_n": values.get("aggregation_weight_n"),
+                "awareness_ceiling_applied": awareness_ceiling_applied,
+            }
+        )
+    return buckets
+
+
 def _compute_touchpoint_rows(study_id: str) -> list[dict]:
     root = get_repo_root()
     curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
@@ -955,6 +1595,144 @@ def _compute_touchpoint_rows_filtered(study_id: str, filters: dict) -> list[dict
         return result_rows
     finally:
         conn.close()
+
+
+def _compute_touchpoint_rows_by_quarter_filtered(study_id: str, filters: dict) -> dict[int, list[dict]]:
+    root = get_repo_root()
+    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
+    if not curated_path.exists():
+        return {}
+
+    respondent_cte, respondent_params, eligible = _respondent_filter_cte(study_id, filters)
+    if not eligible:
+        return {}
+    respondents_path = (
+        root / "data" / "warehouse" / "raw" / f"study_id={study_id}" / "respondents.parquet"
+    )
+
+    conn = get_duckdb_connection()
+    try:
+        load_parquet_as_view(conn, "touchpoints_table", str(curated_path))
+        if respondent_cte is None:
+            if not respondents_path.exists():
+                return {}
+            respondent_columns = _parquet_columns(respondents_path)
+            if "respondent_id" not in respondent_columns or "date" not in respondent_columns:
+                return {}
+            respondent_cte = f"""
+                filtered_respondents AS (
+                    SELECT
+                        respondent_id,
+                        EXTRACT(year FROM TRY_CAST(date AS DATE)) * 10
+                            + EXTRACT(quarter FROM TRY_CAST(date AS DATE)) AS q_key
+                    FROM read_parquet('{respondents_path}')
+                    WHERE respondent_id IS NOT NULL
+                      AND TRY_CAST(date AS DATE) IS NOT NULL
+                )
+            """
+            respondent_params = []
+        has_touchpoint = (
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_name = 'touchpoints_table' AND column_name = 'touchpoint'
+                """
+            ).fetchone()[0]
+            > 0
+        )
+        if not has_touchpoint:
+            return {}
+
+        has_value_raw = (
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_name = 'touchpoints_table' AND column_name = 'value_raw'
+                """
+            ).fetchone()[0]
+            > 0
+        )
+        value_expr = (
+            "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
+            if has_value_raw
+            else "TRY_CAST(value AS INTEGER)"
+        )
+
+        query = f"""
+        WITH {respondent_cte},
+        base AS (
+            SELECT
+                fr.q_key AS q_key,
+                LOWER(t.stage) AS stage,
+                t.brand,
+                t.touchpoint,
+                t.respondent_id,
+                {value_expr} AS v_int
+            FROM touchpoints_table t
+            JOIN filtered_respondents fr ON fr.respondent_id = t.respondent_id
+            WHERE t.study_id = ?
+              AND LOWER(t.stage) IN ('touchpoints', 'awareness', 'consideration', 'brand_consideration', 'purchase', 'brand_purchase')
+              AND t.touchpoint IS NOT NULL
+              AND TRIM(CAST(t.touchpoint AS VARCHAR)) <> ''
+              AND t.brand IS NOT NULL
+              AND TRIM(CAST(t.brand AS VARCHAR)) <> ''
+              AND {value_expr} IS NOT NULL
+              AND fr.q_key IS NOT NULL
+        ),
+        nums AS (
+            SELECT q_key, stage, brand, touchpoint, COUNT(DISTINCT respondent_id) AS num
+            FROM base
+            WHERE v_int = 1
+            GROUP BY q_key, stage, brand, touchpoint
+        ),
+        denoms AS (
+            SELECT q_key, stage, brand, touchpoint, COUNT(DISTINCT respondent_id) AS denom
+            FROM base
+            GROUP BY q_key, stage, brand, touchpoint
+        )
+        SELECT
+            d.q_key,
+            d.stage,
+            d.brand,
+            d.touchpoint,
+            n.num,
+            d.denom
+        FROM denoms d
+        LEFT JOIN nums n
+            ON n.q_key = d.q_key AND n.stage = d.stage AND n.brand = d.brand AND n.touchpoint = d.touchpoint
+        """
+        params = [*respondent_params, study_id]
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    values_by_quarter_pair: dict[tuple[int, str, str], dict[str, float | None]] = {}
+    for q_key, stage, brand, touchpoint, num, denom in rows:
+        if q_key is None:
+            continue
+        metric = TOUCHPOINT_STAGE_METRICS.get(str(stage).lower())
+        if not metric:
+            continue
+        key = (int(q_key), str(brand), str(touchpoint))
+        if key not in values_by_quarter_pair:
+            values_by_quarter_pair[key] = {"recall": None, "consideration": None, "purchase": None}
+        value = None
+        if denom and denom > 0:
+            value = round((float(num or 0) / denom) * 100, 1)
+        values_by_quarter_pair[key][metric] = value
+
+    buckets: dict[int, list[dict]] = {}
+    for (q_key, brand, touchpoint), values in values_by_quarter_pair.items():
+        buckets.setdefault(q_key, []).append(
+            {
+                "brand": brand,
+                "touchpoint": touchpoint,
+                "recall": values.get("recall"),
+                "consideration": values.get("consideration"),
+                "purchase": values.get("purchase"),
+            }
+        )
+    return buckets
 
 
 @router.get("/journey", response_model=JourneyResponse)
@@ -1274,3 +2052,45 @@ async def touchpoints_table_multi_post(
     payload = await request.json()
     filters = _parse_filters(payload)
     return _touchpoints_table_multi_filtered(filters, limit_mode, sort_by, sort_dir)
+
+
+@router.get("/tracking/series")
+def tracking_series_get(
+    studies: str | None = Query(None, description="Comma-separated study ids"),
+    sector: str | None = Query(None),
+    subsector: str | None = Query(None),
+    category: str | None = Query(None),
+    gender: str | None = Query(None),
+    nse: str | None = Query(None),
+    state: str | None = Query(None),
+    age_min: int | None = Query(None),
+    age_max: int | None = Query(None),
+    quarter_from: str | None = Query(None),
+    quarter_to: str | None = Query(None),
+    brands: str | None = Query(None, description="Comma-separated brand names"),
+) -> dict:
+    filters = _parse_filters(
+        {
+            "study_ids": studies,
+            "sector": sector,
+            "subsector": subsector,
+            "category": category,
+            "gender": gender,
+            "nse": nse,
+            "state": state,
+            "age_min": age_min,
+            "age_max": age_max,
+            "quarter_from": quarter_from,
+            "quarter_to": quarter_to,
+            "brands": brands,
+        }
+    )
+    return _tracking_series_filtered(filters)
+
+
+@router.post("/tracking/series")
+async def tracking_series_post(request: Request) -> dict:
+    payload = await request.json()
+    filters = _parse_filters(payload)
+    return _tracking_series_filtered(filters)
+

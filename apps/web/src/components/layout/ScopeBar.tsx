@@ -48,6 +48,9 @@ export default function ScopeBar() {
 
   const isPresentationMode = pathname === "/demand-network" && searchParams.get("presentation") === "1";
   const isJourneyBrandsEnabled = pathname !== "/journey" || searchParams.get("journey_brands") === "1";
+  const isNetworkBrandsEnabled = pathname !== "/demand-network" || searchParams.get("network_brands") === "enable";
+  const isTrackingBrandsEnabled = pathname !== "/tracking" || Boolean(scope.category);
+  const areBrandsEnabled = isJourneyBrandsEnabled && isNetworkBrandsEnabled && isTrackingBrandsEnabled;
 
   const setAdvancedOpen = (nextOpen: boolean) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -193,6 +196,12 @@ export default function ScopeBar() {
   }, [brands, scope.brands, setScope]);
 
   useEffect(() => {
+    if (pathname !== "/tracking") return;
+    if (scope.category || !scope.brands.length) return;
+    setScope({ brands: [] });
+  }, [pathname, scope.brands, scope.category, setScope]);
+
+  useEffect(() => {
     if (scope.sector && !enabledSectors.has(scope.sector)) {
       setScope({ sector: null, subsector: null, category: null, brands: [] });
       return;
@@ -268,7 +277,7 @@ export default function ScopeBar() {
             ))}
           </select>
 
-          {isJourneyBrandsEnabled && (
+          {areBrandsEnabled && (
             <Popover.Root
               open={brandsOpen}
               onOpenChange={(nextOpen) => {
