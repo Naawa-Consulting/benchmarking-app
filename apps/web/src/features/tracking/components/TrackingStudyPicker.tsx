@@ -29,7 +29,7 @@ export default function TrackingStudyPicker({
     <section className="main-surface rounded-3xl p-5">
       <div className="flex flex-col gap-4">
         <div>
-          <h1 className="text-xl font-semibold text-ink">Tracking</h1>
+          <h1 className="text-xl font-semibold text-ink">Trends</h1>
           <p className="text-sm text-slate">Compare exactly two studies and quantify brand lift across Journey metrics.</p>
         </div>
         <div className="grid gap-3 md:grid-cols-2">

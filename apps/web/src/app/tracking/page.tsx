@@ -97,7 +97,7 @@ export default function TrackingPage() {
       if (controller.signal.aborted || seq !== requestSeqRef.current) return;
       if (!result.ok || !result.data) {
         setState("error");
-        setError(result.error || "Unable to load tracking series.");
+        setError(result.error || "Unable to load trends series.");
         setTrackingBrandOptions(null);
         return;
       }
@@ -107,7 +107,7 @@ export default function TrackingPage() {
       const scopedModel = filterTrackingSeriesByBrands(nextModel, scope.brands);
       setModel(scopedModel);
       if (process.env.NODE_ENV !== "production") {
-        console.debug("[TrackingPerf] series", {
+        console.debug("[TrendsPerf] series", {
           granularity: scopedModel.resolved_granularity,
           breakdown: scopedModel.resolved_breakdown,
           periods: scopedModel.periods.length,
@@ -127,7 +127,7 @@ export default function TrackingPage() {
     load().catch((err) => {
       if (controller.signal.aborted || seq !== requestSeqRef.current) return;
       setState("error");
-      setError(err instanceof Error ? err.message : "Unable to load tracking series.");
+      setError(err instanceof Error ? err.message : "Unable to load trends series.");
       setTrackingBrandOptions(null);
     });
 
@@ -147,7 +147,7 @@ export default function TrackingPage() {
   const advancedControlsContent =
     advancedOpen && advancedSlot ? (
       <section className="main-surface rounded-3xl p-4">
-        <h3 className="text-sm font-semibold text-ink">Tracking controls</h3>
+        <h3 className="text-sm font-semibold text-ink">Trends controls</h3>
         <p className="mt-1 text-xs text-slate">
           Comparacion automatica por{" "}
           <span className="font-medium text-ink">
@@ -175,13 +175,13 @@ export default function TrackingPage() {
 
       {state === "loading" && (
         <section className="main-surface rounded-3xl p-5">
-          <p className="text-sm text-slate">Construyendo tracking por periodos...</p>
+          <p className="text-sm text-slate">Construyendo trends por periodos...</p>
         </section>
       )}
 
       {state === "error" && (
         <section className="main-surface rounded-3xl p-5">
-          <p className="text-sm text-rose-600">{error || "Unable to load tracking."}</p>
+          <p className="text-sm text-rose-600">{error || "Unable to load trends."}</p>
         </section>
       )}
 
@@ -190,7 +190,7 @@ export default function TrackingPage() {
           <section className="main-surface rounded-3xl p-5">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h1 className="text-xl font-semibold text-ink">Tracking</h1>
+                <h1 className="text-xl font-semibold text-ink">Trends</h1>
                 <p className="text-sm text-slate">
                   {model.resolved_granularity === "year"
                     ? "Comparativa ano contra ano"

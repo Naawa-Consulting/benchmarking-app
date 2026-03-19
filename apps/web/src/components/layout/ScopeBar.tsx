@@ -534,7 +534,7 @@ export default function ScopeBar() {
                   {pathname === "/journey"
                     ? "Journey controls"
                     : pathname === "/tracking"
-                      ? "Tracking controls"
+                      ? "Trends controls"
                       : "Network controls"}
                 </p>
               </div>

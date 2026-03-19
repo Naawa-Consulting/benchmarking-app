@@ -65,5 +65,5 @@ export async function exportTrackingXlsx(model: TrackingSeriesModel) {
   xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(entityRows), "Comparison");
   xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(secondaryRows), "Secondary");
   xlsx.utils.book_append_sheet(workbook, xlsx.utils.json_to_sheet(metadataRows), "Metadata");
-  xlsx.writeFile(workbook, `tracking-series-${Date.now()}.xlsx`);
+  xlsx.writeFile(workbook, `trends-series-${Date.now()}.xlsx`);
 }
