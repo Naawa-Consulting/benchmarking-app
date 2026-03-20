@@ -17,6 +17,11 @@ __pycache__/
 # Env
 .env
 .env.*
+apps/web/.env.local
+apps/web/.env.*
+
+# Supabase local contract draft (do not commit)
+supabase/sql/001_bbs_rpc_contract.sql
 
 # OS
 .DS_Store

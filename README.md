@@ -185,3 +185,46 @@ Example:
 - Ingestion pipeline reads from `data/landing`.
 - Curated marts are under `data/warehouse/curated/study_id=...`.
 
+
+## Vercel + Supabase Deployment Mode (Read-only Beta)
+- Added internal API gateway routes in Next under `apps/web/src/app/api/*`.
+- Added path rewrites so frontend can keep calling existing paths:
+  - `/analytics/*` -> `/api/analytics/*`
+  - `/filters/*` -> `/api/filters/*`
+  - `/network` -> `/api/network`
+
+### Data source selector
+Use `BBS_DATA_SOURCE` to switch runtime:
+- `legacy` (default): forwards requests to FastAPI (`LEGACY_API_BASE_URL` / `NEXT_PUBLIC_API_BASE_URL`).
+- `supabase`: calls Supabase RPC contract functions.
+
+Required Supabase RPC function names:
+- `bbs_journey_table_multi`
+- `bbs_touchpoints_table_multi`
+- `bbs_tracking_series`
+- `bbs_network`
+- `bbs_filters_options_studies`
+- `bbs_filters_options_taxonomy`
+- `bbs_filters_options_demographics`
+- `bbs_filters_options_date`
+
+SQL contract scaffold is included at:
+- `supabase/sql/001_bbs_rpc_contract.sql`
+
+### Seeding helper
+A bootstrap script is included to seed initial read-only tables from local API outputs:
+- `scripts/export_supabase_seed.py`
+
+### Supabase Auth activation
+To require login in Vercel/local:
+- `BBS_AUTH_MODE=supabase`
+- `NEXT_PUBLIC_BBS_AUTH_MODE=supabase`
+- `NEXT_PUBLIC_SUPABASE_URL=...`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY=...`
+
+Auth flow routes:
+- `/auth` (magic link form)
+- `/auth/callback` (session exchange)
+
+When auth mode is enabled, middleware protects:
+- `/journey`, `/demand-network`, `/tracking`, `/admin`, `/api/*`

@@ -408,3 +408,5 @@ export function getFilterDateOptionsDetailed(studyIds: string[] | null) {
   const suffix = params.toString();
   return requestDetailed(`/filters/options/date${suffix ? `?${suffix}` : ""}`);
 }
+
+
