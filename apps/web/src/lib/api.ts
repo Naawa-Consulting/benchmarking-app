@@ -1,4 +1,4 @@
-﻿const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+﻿const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 
 export type ApiResult<T = unknown> = {
   ok: boolean;
@@ -408,5 +408,6 @@ export function getFilterDateOptionsDetailed(studyIds: string[] | null) {
   const suffix = params.toString();
   return requestDetailed(`/filters/options/date${suffix ? `?${suffix}` : ""}`);
 }
+
 
 
