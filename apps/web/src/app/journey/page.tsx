@@ -265,6 +265,7 @@ export default function JourneyPage() {
   const [detailMessage, setDetailMessage] = useState<string | null>(null);
   const [benchmarkMode, setBenchmarkMode] = useState<"selection" | "global">("selection");
   const [brandsEnabled, setBrandsEnabled] = useState(false);
+  const [canToggleBrands, setCanToggleBrands] = useState(true);
   const coreReqSeqRef = useRef(0);
   const selectionReqSeqRef = useRef(0);
   const detailReqSeqRef = useRef(0);
@@ -369,6 +370,29 @@ export default function JourneyPage() {
     const fingerprint = JSON.stringify(payload);
     return { payload, fingerprint };
   }, [scopeKey, selectedTimeBucket, timeMode]);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((data: { can_toggle_brands?: boolean }) => {
+        if (!active) return;
+        setCanToggleBrands(data?.can_toggle_brands !== false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setCanToggleBrands(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!canToggleBrands && brandsEnabled) {
+      setJourneyBrandsEnabledAndQuery(false);
+    }
+  }, [canToggleBrands, brandsEnabled]);
 
   useEffect(() => {
     const includeAd = searchParams.get("include_ad_awareness");
@@ -925,15 +949,19 @@ export default function JourneyPage() {
                 key={mode ? "enabled" : "disabled"}
                 type="button"
                 onClick={() => setJourneyBrandsEnabledAndQuery(mode)}
+                disabled={mode && !canToggleBrands}
                 className={`rounded-full border px-3 py-1 text-xs ${
                   brandsEnabled === mode
                     ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700"
                     : "border-ink/10 text-slate"
-                }`}
+                } disabled:cursor-not-allowed disabled:opacity-60`}
               >
                 {mode ? "Enable" : "Disable"}
               </button>
             ))}
+            {!canToggleBrands && (
+              <span className="text-[11px] text-slate">Sin permiso para habilitar Brands.</span>
+            )}
           </div>
         </section>
 
@@ -1014,7 +1042,7 @@ export default function JourneyPage() {
       {statusMessage && (
         <section className="main-surface p-6">
           <p className="text-sm text-red-600">
-            {statusMessage} Open Admin {">"} Data Validation {">"} Journey Data for raw validation tables.
+            {statusMessage} Open Data {">"} Data Validation {">"} Journey Data for raw validation tables.
           </p>
         </section>
       )}

@@ -4,7 +4,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
-  const next = request.nextUrl.searchParams.get("next") || "/journey";
+  const type = request.nextUrl.searchParams.get("type");
+  const next = request.nextUrl.searchParams.get("next") || (type === "recovery" ? "/auth/reset" : "/journey");
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || "";
   const supabaseAnonKey =

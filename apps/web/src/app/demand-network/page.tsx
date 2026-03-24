@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { createPortal } from "react-dom";
 
-import { getApiBaseUrl } from "../../lib/api";
 import { type HoveredLink, type NetworkCanvasHandle } from "../../components/NetworkCanvas";
 import DemandNetworkView from "../../components/demand-network/views/DemandNetworkView";
 import type { DNDistanceMode, DNViewMode } from "../../components/demand-network/views/types";
@@ -341,7 +340,6 @@ export default function DemandNetworkPage() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const { scope, studies } = useScope();
-  const apiBase = getApiBaseUrl();
   const isPresentation = searchParams.get("presentation") === "1";
   const advancedOpen = searchParams.get("scope_advanced") === "1";
   const brandsModeFromQuery: BrandsMode = (() => {
@@ -352,6 +350,7 @@ export default function DemandNetworkPage() {
   const [metric, setMetric] = useState<MetricKey>("recall");
   const [viewMode, setViewMode] = useState<DNViewMode>("network");
   const [brandsMode, setBrandsMode] = useState<BrandsMode>(brandsModeFromQuery);
+  const [canToggleBrands, setCanToggleBrands] = useState(true);
   const [secondaryLinks, setSecondaryLinks] = useState<SecondaryMode>("off");
   const [showSecondaryAlways, setShowSecondaryAlways] = useState(false);
   const [secondaryWarning, setSecondaryWarning] = useState<string | null>(null);
@@ -383,8 +382,31 @@ export default function DemandNetworkPage() {
   const activeQueryRef = useRef("");
 
   useEffect(() => {
+    let active = true;
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((data: { can_toggle_brands?: boolean }) => {
+        if (!active) return;
+        setCanToggleBrands(data?.can_toggle_brands !== false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setCanToggleBrands(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     setBrandsMode(brandsModeFromQuery);
   }, [brandsModeFromQuery]);
+
+  useEffect(() => {
+    if (!canToggleBrands && brandsMode === "enable") {
+      setBrandsMode("disable");
+    }
+  }, [canToggleBrands, brandsMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -444,6 +466,7 @@ export default function DemandNetworkPage() {
 
   const setBrandsModeWithUrl = useCallback(
     (nextMode: BrandsMode) => {
+      if (nextMode === "enable" && !canToggleBrands) return;
       setBrandsMode(nextMode);
       if (typeof window !== "undefined") {
         window.localStorage.setItem(BRANDS_MODE_STORAGE_KEY, nextMode);
@@ -455,7 +478,7 @@ export default function DemandNetworkPage() {
       else params.delete("journey_brands");
       router.replace(`${pathname}${params.toString() ? `?${params.toString()}` : ""}`, { scroll: false });
     },
-    [pathname, router, searchParams]
+    [canToggleBrands, pathname, router, searchParams]
   );
 
   const effectiveSecondaryLinks: SecondaryMode = brandsMode === "disable" ? "off" : secondaryLinks;
@@ -498,7 +521,7 @@ export default function DemandNetworkPage() {
         setState("loading");
         setError(null);
         try {
-          const response = await fetch(`${apiBase}/network?${query}`, { signal: abortController.signal });
+          const response = await fetch(`/network?${query}`, { signal: abortController.signal });
           if (
             abortController.signal.aborted ||
             seq !== requestSeqRef.current ||
@@ -532,7 +555,7 @@ export default function DemandNetworkPage() {
       clearTimeout(handle);
       abortController.abort();
     };
-  }, [apiBase, query, reloadTick]);
+  }, [query, reloadTick]);
 
   const benchmarkGroupLevel: BenchmarkGroupLevel = useMemo(() => {
     if (!scope.sector) return "sector";
@@ -927,7 +950,12 @@ export default function DemandNetworkPage() {
           tooltip="Enable shows brand nodes. Disable switches to benchmark hierarchy mode."
           value={brandsMode}
           options={[
-            { label: "Enable", value: "enable" as const },
+            {
+              label: "Enable",
+              value: "enable" as const,
+              disabled: !canToggleBrands,
+              tooltip: !canToggleBrands ? "Sin permiso para habilitar Brands." : undefined,
+            },
             { label: "Disable", value: "disable" as const },
           ]}
           onChange={setBrandsModeWithUrl}

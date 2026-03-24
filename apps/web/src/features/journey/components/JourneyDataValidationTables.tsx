@@ -159,8 +159,8 @@ export default function JourneyDataValidationTables() {
         {tableState === "error" && (
           <p className="mt-4 text-sm text-red-600">
             {tableMessage || "Results not published for this study yet. Go to Publish Journey Results."}{" "}
-            <Link className="underline" href="/admin">
-              Open Admin
+            <Link className="underline" href="/data">
+              Open Data
             </Link>
           </p>
         )}

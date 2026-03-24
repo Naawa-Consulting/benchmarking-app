@@ -215,6 +215,16 @@ SQL contract scaffold is included at:
 A bootstrap script is included to seed initial read-only tables from local API outputs:
 - `scripts/export_supabase_seed.py`
 
+Run this first in Supabase SQL Editor (table prerequisites):
+- `supabase/sql/002_bbs_seed_tables.sql`
+
+Then run the seed from this repository root:
+```powershell
+$env:SUPABASE_URL="https://<project>.supabase.co"
+$env:SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
+& "services\api\.venv\Scripts\python.exe" scripts/export_supabase_seed.py
+```
+
 ### Supabase Auth activation
 To require login in Vercel/local:
 - `BBS_AUTH_MODE=supabase`

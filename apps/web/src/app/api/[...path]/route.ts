@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getRequestAuthz, isMutatingDataPath } from "../_lib/authz";
 import { forwardLegacy, getDataSource } from "../_lib/backend";
 
 function resolvePath(request: NextRequest, path: string[]) {
@@ -33,6 +34,10 @@ export async function POST(
 ) {
   const pathWithQuery = resolvePath(request, context.params.path || []);
   if (getDataSource() === "legacy") {
+    const authz = await getRequestAuthz(request);
+    if (authz.is_viewer && isMutatingDataPath(pathWithQuery)) {
+      return NextResponse.json({ detail: "Forbidden: insufficient permissions" }, { status: 403 });
+    }
     return forwardLegacy(request, pathWithQuery, { method: "POST" });
   }
   return unsupported(pathWithQuery);

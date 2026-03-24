@@ -1,30 +1,75 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { handleWithDataSource } from "../../../_lib/backend";
+import { getScopeContext, parseStudyIdsInput, scopeStudyIds, scopeStudyIdsCsv } from "../../../_lib/access-scope";
+
+export const dynamic = "force-dynamic";
+
+function withStudyScope(
+  query: Record<string, string>,
+  payload: Record<string, unknown>,
+  allowedStudyIds: string[] | null
+) {
+  if (allowedStudyIds === null) return { query, payload };
+  const scopedFromQuery = scopeStudyIdsCsv(query.studies || query.study_ids, allowedStudyIds);
+  const scopedFromPayload = scopeStudyIds(parseStudyIdsInput(payload.study_ids), allowedStudyIds);
+  const merged = scopedFromPayload ?? (scopedFromQuery ? scopedFromQuery.split(",") : []);
+  return {
+    query: {
+      ...query,
+      studies: merged.join(","),
+      study_ids: merged.join(","),
+    },
+    payload: {
+      ...payload,
+      study_ids: merged,
+    },
+  };
+}
 
 export async function GET(request: NextRequest) {
-  const query = request.nextUrl.search || "";
+  const scopeContext = await getScopeContext(request);
+  if (scopeContext.allowedStudyIds && scopeContext.allowedStudyIds.length === 0) {
+    return NextResponse.json({ rows: [] });
+  }
+  const scoped = withStudyScope(
+    Object.fromEntries(request.nextUrl.searchParams.entries()),
+    {},
+    scopeContext.allowedStudyIds
+  );
+  const queryString = new URLSearchParams(scoped.query).toString();
+  const query = queryString ? `?${queryString}` : "";
   return handleWithDataSource(
     request,
     `/analytics/touchpoints/table_multi${query}`,
     "bbs_touchpoints_table_multi",
     {
-      query: Object.fromEntries(request.nextUrl.searchParams.entries()),
-      payload: {},
+      query: scoped.query,
+      payload: scoped.payload,
     },
     { method: "GET" }
   );
 }
 
 export async function POST(request: NextRequest) {
-  const query = request.nextUrl.search || "";
-  const payload = await request.json().catch(() => ({}));
+  const scopeContext = await getScopeContext(request);
+  if (scopeContext.allowedStudyIds && scopeContext.allowedStudyIds.length === 0) {
+    return NextResponse.json({ rows: [] });
+  }
+  const payload = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const scoped = withStudyScope(
+    Object.fromEntries(request.nextUrl.searchParams.entries()),
+    payload,
+    scopeContext.allowedStudyIds
+  );
+  const queryString = new URLSearchParams(scoped.query).toString();
+  const query = queryString ? `?${queryString}` : "";
   return handleWithDataSource(
     request,
     `/analytics/touchpoints/table_multi${query}`,
     "bbs_touchpoints_table_multi",
     {
-      query: Object.fromEntries(request.nextUrl.searchParams.entries()),
-      payload,
+      query: scoped.query,
+      payload: scoped.payload,
     },
     { method: "POST" }
   );

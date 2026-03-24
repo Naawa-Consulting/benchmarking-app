@@ -1,4 +1,28 @@
-﻿const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "";
+﻿const LEGACY_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "";
+const NEXT_API_BASE_URL = process.env.NEXT_PUBLIC_NEXT_API_BASE_URL || "";
+
+function normalizeBase(base: string) {
+  return base.replace(/\/+$/, "");
+}
+
+function isAbsoluteUrl(path: string) {
+  return /^https?:\/\//i.test(path);
+}
+
+function useNextApiProxy(path: string) {
+  return (
+    path.startsWith("/analytics/") ||
+    path.startsWith("/filters/") ||
+    path === "/network" ||
+    path.startsWith("/network?")
+  );
+}
+
+function buildUrl(path: string) {
+  if (isAbsoluteUrl(path)) return path;
+  const base = useNextApiProxy(path) ? normalizeBase(NEXT_API_BASE_URL) : normalizeBase(LEGACY_API_BASE_URL);
+  return `${base}${path}`;
+}
 
 export type ApiResult<T = unknown> = {
   ok: boolean;
@@ -9,11 +33,11 @@ export type ApiResult<T = unknown> = {
 };
 
 export function getApiBaseUrl() {
-  return API_BASE_URL;
+  return LEGACY_API_BASE_URL;
 }
 
 async function request(path: string, options?: RequestInit) {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(buildUrl(path), {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
@@ -116,7 +140,7 @@ export function postTrackingSeriesDetailed(payload: unknown, options?: { signal?
 }
 
 async function requestDetailed(path: string, options?: RequestInit): Promise<ApiResult> {
-  const url = `${API_BASE_URL}${path}`;
+  const url = buildUrl(path);
   try {
     const response = await fetch(url, {
       headers: { "Content-Type": "application/json" },
@@ -168,6 +192,47 @@ export function getStudiesDetailed(sync = false) {
   return requestDetailed(`/studies${suffix}`);
 }
 
+
+async function requestDetailedLocal(path: string, options?: RequestInit): Promise<ApiResult> {
+  const url = path;
+  try {
+    const response = await fetch(url, {
+      headers: { "Content-Type": "application/json" },
+      ...options,
+    });
+
+    const text = await response.text();
+    let data: unknown = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = text;
+      }
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      data,
+      error: response.ok ? null : response.statusText || "Request failed",
+      url,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      data: null,
+      error: error instanceof Error ? error.message : String(error),
+      url,
+    };
+  }
+}
+
+export function getDataStudiesDetailed() {
+  return requestDetailedLocal("/api/data/studies");
+}
+
 export function fetchStudyPreviewDetailed(studyId: string) {
   return requestDetailed(`/studies/${encodeURIComponent(studyId)}/preview`);
 }
@@ -194,7 +259,7 @@ export function buildJourneyMartDetailed(studyId: string) {
 }
 
 export function getMappingTemplateUrl(studyId: string) {
-  return `${API_BASE_URL}/mapping/template?study_id=${encodeURIComponent(studyId)}`;
+  return `${normalizeBase(LEGACY_API_BASE_URL)}/mapping/template?study_id=${encodeURIComponent(studyId)}`;
 }
 
 export function getRulesDetailed() {
@@ -409,5 +474,42 @@ export function getFilterDateOptionsDetailed(studyIds: string[] | null) {
   return requestDetailed(`/filters/options/date${suffix ? `?${suffix}` : ""}`);
 }
 
+export function getAdminUsersDetailed() {
+  return requestDetailedLocal("/api/admin/users");
+}
+
+export function createAdminUserDetailed(payload: { email: string; role: "owner" | "admin" | "analyst" | "viewer" }) {
+  return requestDetailedLocal("/api/admin/users", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function patchAdminUserRoleDetailed(
+  userId: string,
+  payload: { role: "owner" | "admin" | "analyst" | "viewer" }
+) {
+  return requestDetailedLocal(`/api/admin/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getAdminUserAccessDetailed(userId: string) {
+  return requestDetailedLocal(`/api/admin/users/${encodeURIComponent(userId)}/access`);
+}
+
+export function patchAdminUserAccessDetailed(
+  userId: string,
+  payload: {
+    can_toggle_brands: boolean;
+    scopes: { sector: string[]; subsector: string[]; category: string[] };
+  }
+) {
+  return requestDetailedLocal(`/api/admin/users/${encodeURIComponent(userId)}/access`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
 
 

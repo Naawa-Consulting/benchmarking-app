@@ -1,9 +1,12 @@
-﻿export interface Study {
+export interface Study {
   id: string;
   name: string;
   source: string;
   raw_ready?: boolean;
+  local_ready?: boolean;
+  mapped?: boolean;
   curated_ready?: boolean;
+  published_to_supabase?: boolean;
   landing_file?: string;
   status?: string;
   error?: string;
@@ -143,3 +146,36 @@ export interface DemographicsValueLabel {
   value_code: string;
   value_label: string;
 }
+
+export type BbsRole = "owner" | "admin" | "analyst" | "viewer";
+
+export interface AdminUserItem {
+  id: string;
+  email: string | null;
+  role: BbsRole;
+  created_at: string | null;
+  last_sign_in_at: string | null;
+  email_confirmed_at: string | null;
+  can_toggle_brands: boolean;
+  scope_counts: {
+    sector: number;
+    subsector: number;
+    category: number;
+  };
+}
+
+export interface UserAccessPayload {
+  user_id: string;
+  can_toggle_brands: boolean;
+  scopes: {
+    sector: string[];
+    subsector: string[];
+    category: string[];
+  };
+  available: {
+    sector: string[];
+    subsector: string[];
+    category: string[];
+  };
+}
+
