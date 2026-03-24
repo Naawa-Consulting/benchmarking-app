@@ -98,6 +98,16 @@ function mapEntityToMarket(
   return { marketEntity: market.market_sector, label: "Macrosector" };
 }
 
+function isAlreadyMarketSeries(series: TrackingPayload): boolean {
+  const label = typeof series.entity_label === "string" ? series.entity_label.trim().toLowerCase() : "";
+  return (
+    label === "macrosector" ||
+    label === "segmento" ||
+    label === "categoría comercial" ||
+    label === "categoria comercial"
+  );
+}
+
 function aggregateTrackingRowsToMarket(payload: TrackingPayload): TrackingPayload {
   const rows = Array.isArray(payload.entity_rows) ? payload.entity_rows : [];
   if (!rows.length) return payload;
@@ -177,24 +187,32 @@ function normalizeTrackingPayloadTaxonomy(
       if (!item || typeof item !== "object") return item;
       const record = item as Record<string, unknown>;
       if (record.bbs_tracking_series && typeof record.bbs_tracking_series === "object") {
+        const series = record.bbs_tracking_series as TrackingPayload;
+        if (isAlreadyMarketSeries(series)) return item;
         return {
           ...record,
-          bbs_tracking_series: aggregateTrackingRowsToMarket(record.bbs_tracking_series as TrackingPayload),
+          bbs_tracking_series: aggregateTrackingRowsToMarket(series),
         };
       }
-      return aggregateTrackingRowsToMarket(record as TrackingPayload);
+      const series = record as TrackingPayload;
+      if (isAlreadyMarketSeries(series)) return item;
+      return aggregateTrackingRowsToMarket(series);
     });
   }
 
   if (typeof payload !== "object") return payload;
   const root = payload as Record<string, unknown>;
   if (root.bbs_tracking_series && typeof root.bbs_tracking_series === "object") {
+    const series = root.bbs_tracking_series as TrackingPayload;
+    if (isAlreadyMarketSeries(series)) return payload;
     return {
       ...root,
-      bbs_tracking_series: aggregateTrackingRowsToMarket(root.bbs_tracking_series as TrackingPayload),
+      bbs_tracking_series: aggregateTrackingRowsToMarket(series),
     };
   }
-  return aggregateTrackingRowsToMarket(root as TrackingPayload);
+  const series = root as TrackingPayload;
+  if (isAlreadyMarketSeries(series)) return payload;
+  return aggregateTrackingRowsToMarket(series);
 }
 
 function filterTrackingBySelection(
@@ -608,8 +626,7 @@ export async function GET(request: NextRequest) {
   }
   if (taxonomyView !== "market") return response;
   const payload = await response.json().catch(() => null);
-  const rebuilt = await rebuildSupabaseMarketSeries(request, supabaseFallback.payload, selection);
-  const normalized = normalizeTrackingPayloadTaxonomy(rebuilt || payload, taxonomyView);
+  const normalized = normalizeTrackingPayloadTaxonomy(payload, taxonomyView);
   const filtered = filterTrackingBySelection(normalized, taxonomyView, selection);
   return NextResponse.json(filtered, { status: response.status });
 }
@@ -692,8 +709,7 @@ export async function POST(request: NextRequest) {
   }
   if (taxonomyView !== "market") return response;
   const raw = await response.json().catch(() => null);
-  const rebuilt = await rebuildSupabaseMarketSeries(request, supabaseFallback.payload, selection);
-  const normalized = normalizeTrackingPayloadTaxonomy(rebuilt || raw, taxonomyView);
+  const normalized = normalizeTrackingPayloadTaxonomy(raw, taxonomyView);
   const filtered = filterTrackingBySelection(normalized, taxonomyView, selection);
   return NextResponse.json(filtered, { status: response.status });
 }
