@@ -583,14 +583,6 @@ export async function GET(request: NextRequest) {
           scopeContext.allowedStudyIds
         )
       : { query: scoped.query, payload: scoped.payload };
-  if (taxonomyView === "market" && getDataSource() === "supabase") {
-    const legacyPayload = await tryLegacyTrackingSeries("GET", supabaseFallback.query, supabaseFallback.payload);
-    if (legacyPayload) {
-      const normalizedLegacy = normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView);
-      const filteredLegacy = filterTrackingBySelection(normalizedLegacy, taxonomyView, selection);
-      return NextResponse.json(filteredLegacy);
-    }
-  }
   const queryString = new URLSearchParams(supabaseFallback.query).toString();
   const query = queryString ? `?${queryString}` : "";
   const response = await handleWithDataSource(
@@ -603,7 +595,18 @@ export async function GET(request: NextRequest) {
     },
     { method: "GET" }
   );
-  if (!response.ok || taxonomyView !== "market") return response;
+  if (!response.ok) {
+    if (taxonomyView === "market" && getDataSource() === "supabase") {
+      const legacyPayload = await tryLegacyTrackingSeries("GET", supabaseFallback.query, supabaseFallback.payload);
+      if (legacyPayload) {
+        const normalizedLegacy = normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView);
+        const filteredLegacy = filterTrackingBySelection(normalizedLegacy, taxonomyView, selection);
+        return NextResponse.json(filteredLegacy);
+      }
+    }
+    return response;
+  }
+  if (taxonomyView !== "market") return response;
   const payload = await response.json().catch(() => null);
   const rebuilt = await rebuildSupabaseMarketSeries(request, supabaseFallback.payload, selection);
   const normalized = normalizeTrackingPayloadTaxonomy(rebuilt || payload, taxonomyView);
@@ -664,14 +667,6 @@ export async function POST(request: NextRequest) {
           scopeContext.allowedStudyIds
         )
       : { query: scoped.query, payload: scoped.payload };
-  if (taxonomyView === "market" && getDataSource() === "supabase") {
-    const legacyPayload = await tryLegacyTrackingSeries("POST", supabaseFallback.query, supabaseFallback.payload);
-    if (legacyPayload) {
-      const normalizedLegacy = normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView);
-      const filteredLegacy = filterTrackingBySelection(normalizedLegacy, taxonomyView, selection);
-      return NextResponse.json(filteredLegacy);
-    }
-  }
   const queryString = new URLSearchParams(supabaseFallback.query).toString();
   const query = queryString ? `?${queryString}` : "";
   const response = await handleWithDataSource(
@@ -684,7 +679,18 @@ export async function POST(request: NextRequest) {
     },
     { method: "POST" }
   );
-  if (!response.ok || taxonomyView !== "market") return response;
+  if (!response.ok) {
+    if (taxonomyView === "market" && getDataSource() === "supabase") {
+      const legacyPayload = await tryLegacyTrackingSeries("POST", supabaseFallback.query, supabaseFallback.payload);
+      if (legacyPayload) {
+        const normalizedLegacy = normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView);
+        const filteredLegacy = filterTrackingBySelection(normalizedLegacy, taxonomyView, selection);
+        return NextResponse.json(filteredLegacy);
+      }
+    }
+    return response;
+  }
+  if (taxonomyView !== "market") return response;
   const raw = await response.json().catch(() => null);
   const rebuilt = await rebuildSupabaseMarketSeries(request, supabaseFallback.payload, selection);
   const normalized = normalizeTrackingPayloadTaxonomy(rebuilt || raw, taxonomyView);
