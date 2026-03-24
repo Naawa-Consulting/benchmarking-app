@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getRequestAuthz } from "../../_lib/authz";
 import { supabaseAdminPostgrest } from "../../_lib/supabase-admin";
+import fs from "node:fs";
+import path from "node:path";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +12,7 @@ type PushSummary = {
   touchpoint_rows: number;
   study_catalog_rows: number;
   taxonomy_rows: number;
+  taxonomy_market_rows: number;
   demographic_rows: number;
 };
 
@@ -18,6 +21,24 @@ type JourneyRow = {
   sector?: string | null;
   subsector?: string | null;
   category?: string | null;
+  market_sector?: string | null;
+  market_subsector?: string | null;
+  market_category?: string | null;
+};
+
+type MarketLensRule = {
+  sector?: string;
+  subsector?: string;
+  category?: string;
+  market_sector?: string;
+  market_subsector?: string;
+  market_category?: string;
+};
+
+type MarketLensRules = {
+  category_rules: MarketLensRule[];
+  subsector_rules: MarketLensRule[];
+  sector_rules: MarketLensRule[];
 };
 
 function getLegacyApiBaseUrl() {
@@ -126,6 +147,100 @@ function normalizeTaxonomyValue(value: unknown) {
   return trimmed || "Unassigned";
 }
 
+function normalizeForMatch(value: unknown) {
+  if (typeof value !== "string") return "";
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+let cachedMarketRules: MarketLensRules | null = null;
+function loadMarketLensRules(): MarketLensRules {
+  if (cachedMarketRules) return cachedMarketRules;
+  const candidates = [
+    path.resolve(process.cwd(), "../../data/warehouse/taxonomy/market_lens_rules_v1.json"),
+    path.resolve(process.cwd(), "data/warehouse/taxonomy/market_lens_rules_v1.json"),
+  ];
+  for (const filePath of candidates) {
+    try {
+      if (!fs.existsSync(filePath)) continue;
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<MarketLensRules>;
+      cachedMarketRules = {
+        category_rules: Array.isArray(parsed.category_rules) ? parsed.category_rules : [],
+        subsector_rules: Array.isArray(parsed.subsector_rules) ? parsed.subsector_rules : [],
+        sector_rules: Array.isArray(parsed.sector_rules) ? parsed.sector_rules : [],
+      };
+      return cachedMarketRules;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  cachedMarketRules = { category_rules: [], subsector_rules: [], sector_rules: [] };
+  return cachedMarketRules;
+}
+
+function deriveMarketLensFromStandard(
+  sector: string | null | undefined,
+  subsector: string | null | undefined,
+  category: string | null | undefined
+) {
+  const s = normalizeTaxonomyValue(sector);
+  const ss = normalizeTaxonomyValue(subsector);
+  const c = normalizeTaxonomyValue(category);
+  const rules = loadMarketLensRules();
+  const cNorm = normalizeForMatch(c);
+  const ssNorm = normalizeForMatch(ss);
+  const sNorm = normalizeForMatch(s);
+
+  const categoryRule = rules.category_rules.find(
+    (rule) => normalizeForMatch(rule.category) === cNorm
+  );
+  if (categoryRule) {
+    return {
+      market_sector: normalizeTaxonomyValue(categoryRule.market_sector),
+      market_subsector: normalizeTaxonomyValue(categoryRule.market_subsector),
+      market_category: normalizeTaxonomyValue(categoryRule.market_category),
+      market_source: "rule" as const,
+    };
+  }
+
+  const subsectorRule = rules.subsector_rules.find((rule) => {
+    if (normalizeForMatch(rule.subsector) !== ssNorm) return false;
+    if (rule.sector && normalizeForMatch(rule.sector) !== sNorm) return false;
+    return true;
+  });
+  if (subsectorRule) {
+    return {
+      market_sector: normalizeTaxonomyValue(subsectorRule.market_sector),
+      market_subsector: normalizeTaxonomyValue(subsectorRule.market_subsector),
+      market_category: normalizeTaxonomyValue(subsectorRule.market_category),
+      market_source: "rule" as const,
+    };
+  }
+
+  const sectorRule = rules.sector_rules.find(
+    (rule) => normalizeForMatch(rule.sector) === sNorm
+  );
+  if (sectorRule) {
+    return {
+      market_sector: normalizeTaxonomyValue(sectorRule.market_sector),
+      market_subsector: normalizeTaxonomyValue(sectorRule.market_subsector),
+      market_category: normalizeTaxonomyValue(sectorRule.market_category),
+      market_source: "rule" as const,
+    };
+  }
+
+  return {
+    market_sector: s,
+    market_subsector: ss,
+    market_category: c,
+    market_source: "rule" as const,
+  };
+}
+
 function buildStudyTaxonomyFromJourney(studyIds: string[], rows: JourneyRow[]) {
   const counters = new Map<string, Map<string, number>>();
 
@@ -165,9 +280,20 @@ function buildStudyTaxonomyFromJourney(studyIds: string[], rows: JourneyRow[]) {
   return resolved;
 }
 
+type StudyTaxonomyResolved = {
+  sector: string;
+  subsector: string;
+  category: string;
+  market_sector: string;
+  market_subsector: string;
+  market_category: string;
+  market_source: "rule" | "manual";
+};
+
 export async function POST(request: NextRequest) {
   const authz = await getRequestAuthz(request);
-  if (!authz.user_id) {
+  const authRequired = (process.env.BBS_AUTH_MODE || "off").toLowerCase() === "supabase";
+  if (authRequired && !authz.user_id) {
     return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
   }
   if (!canPush(authz.role)) {
@@ -228,16 +354,83 @@ export async function POST(request: NextRequest) {
       .map((row) => {
         const studyId = String(row.id);
         const taxonomy = taxonomyByStudy.get(studyId);
+        const standardSector = normalizeTaxonomyValue(taxonomy?.sector ?? row.sector);
+        const standardSubsector = normalizeTaxonomyValue(taxonomy?.subsector ?? row.subsector);
+        const standardCategory = normalizeTaxonomyValue(taxonomy?.category ?? row.category);
+
+        const derivedMarket = deriveMarketLensFromStandard(
+          standardSector,
+          standardSubsector,
+          standardCategory
+        );
+        const hasManualMarket =
+          typeof row.market_sector === "string" &&
+          row.market_sector.trim() &&
+          typeof row.market_subsector === "string" &&
+          row.market_subsector.trim() &&
+          typeof row.market_category === "string" &&
+          row.market_category.trim();
+        const marketSector = hasManualMarket
+          ? normalizeTaxonomyValue(row.market_sector)
+          : derivedMarket.market_sector;
+        const marketSubsector = hasManualMarket
+          ? normalizeTaxonomyValue(row.market_subsector)
+          : derivedMarket.market_subsector;
+        const marketCategory = hasManualMarket
+          ? normalizeTaxonomyValue(row.market_category)
+          : derivedMarket.market_category;
+        const marketSource = hasManualMarket && row.market_source === "manual" ? "manual" : "rule";
         return {
           study_id: studyId,
           study_name: row.name || studyId,
-          sector: taxonomy?.sector ?? row.sector ?? null,
-          subsector: taxonomy?.subsector ?? row.subsector ?? null,
-          category: taxonomy?.category ?? row.category ?? null,
+          sector: standardSector,
+          subsector: standardSubsector,
+          category: standardCategory,
+          market_sector: marketSector,
+          market_subsector: marketSubsector,
+          market_category: marketCategory,
+          market_source: marketSource,
           has_demographics: true,
           has_date: true,
         };
       });
+
+    const taxonomyByStudyId = new Map<string, StudyTaxonomyResolved>(
+      studyRows.map((row) => [
+        String(row.study_id),
+        {
+          sector: String(row.sector || "Unassigned"),
+          subsector: String(row.subsector || "Unassigned"),
+          category: String(row.category || "Unassigned"),
+          market_sector: String(row.market_sector || "Unassigned"),
+          market_subsector: String(row.market_subsector || "Unassigned"),
+          market_category: String(row.market_category || "Unassigned"),
+          market_source: row.market_source === "manual" ? "manual" : "rule",
+        },
+      ])
+    );
+
+    const journeyRowsWithMarket = journeyRows.map((row) => {
+      const studyId = typeof row.study_id === "string" ? row.study_id : "";
+      const resolved = taxonomyByStudyId.get(studyId);
+      return {
+        ...row,
+        market_sector: row.market_sector || resolved?.market_sector || null,
+        market_subsector: row.market_subsector || resolved?.market_subsector || null,
+        market_category: row.market_category || resolved?.market_category || null,
+      };
+    });
+
+    const touchpointRowsWithMarket = touchpointRows.map((row) => {
+      const studyId = typeof row.study_id === "string" ? String(row.study_id) : "";
+      const resolved = taxonomyByStudyId.get(studyId);
+      return {
+        ...row,
+        market_sector: row.market_sector || resolved?.market_sector || null,
+        market_subsector: row.market_subsector || resolved?.market_subsector || null,
+        market_category: row.market_category || resolved?.market_category || null,
+      };
+    });
 
     const taxonomyRows = Array.isArray((taxonomyResult as { items?: unknown[] }).items)
       ? (((taxonomyResult as { items: Record<string, unknown>[] }).items || []).map((item) => ({
@@ -246,6 +439,28 @@ export async function POST(request: NextRequest) {
           category: item.category,
         })) as Record<string, unknown>[])
       : [];
+    const taxonomyMarketRows = Array.from(
+      new Map(
+        studyRows.map((row) => [
+          `${String(row.market_sector || "")}|||${String(row.market_subsector || "")}|||${String(
+            row.market_category || ""
+          )}`,
+          {
+            market_sector: row.market_sector,
+            market_subsector: row.market_subsector,
+            market_category: row.market_category,
+          },
+        ])
+      ).values()
+    ).filter(
+      (row) =>
+        typeof row.market_sector === "string" &&
+        row.market_sector.trim() &&
+        typeof row.market_subsector === "string" &&
+        row.market_subsector.trim() &&
+        typeof row.market_category === "string" &&
+        row.market_category.trim()
+    );
 
     const demographicRows = deriveDemographicRows(demographicsResult as Record<string, unknown>);
 
@@ -257,19 +472,21 @@ export async function POST(request: NextRequest) {
     ]);
 
     await Promise.all([
-      upsertRows("journey_metrics", journeyRows, "study_id,sector,subsector,category,brand"),
-      upsertRows("touchpoint_metrics", touchpointRows, "study_id,sector,subsector,category,brand,touchpoint"),
+      upsertRows("journey_metrics", journeyRowsWithMarket, "study_id,sector,subsector,category,brand"),
+      upsertRows("touchpoint_metrics", touchpointRowsWithMarket, "study_id,sector,subsector,category,brand,touchpoint"),
       upsertRows("study_catalog", studyRows, "study_id"),
       upsertRows("taxonomy", taxonomyRows, "sector,subsector,category"),
+      upsertRows("taxonomy_market_lens", taxonomyMarketRows, "market_sector,market_subsector,market_category"),
       upsertRows("demographic_options", demographicRows, "gender,nse,state,age_min,age_max"),
     ]);
 
     const summary: PushSummary = {
       study_ids: studyIds,
-      journey_rows: journeyRows.length,
-      touchpoint_rows: touchpointRows.length,
+      journey_rows: journeyRowsWithMarket.length,
+      touchpoint_rows: touchpointRowsWithMarket.length,
       study_catalog_rows: studyRows.length,
       taxonomy_rows: taxonomyRows.length,
+      taxonomy_market_rows: taxonomyMarketRows.length,
       demographic_rows: demographicRows.length,
     };
 

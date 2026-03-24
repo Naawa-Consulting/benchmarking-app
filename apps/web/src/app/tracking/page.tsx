@@ -48,6 +48,7 @@ export default function TrackingPage() {
     () => ({
       study_ids: scope.studyIds.length ? scope.studyIds : null,
       brands: null,
+      taxonomy_view: scope.taxonomyView,
       sector: scope.sector,
       subsector: scope.subsector,
       category: scope.category,
@@ -70,6 +71,7 @@ export default function TrackingPage() {
       scope.state,
       scope.studyIds,
       scope.subsector,
+      scope.taxonomyView,
       scope.timeGranularity,
     ]
   );

@@ -16,6 +16,12 @@ type AuthzMe = {
 };
 
 const ROLE_OPTIONS: BbsRole[] = ["owner", "admin", "analyst", "viewer"];
+const MARKET_SCOPE_TYPES = ["market_sector", "market_subsector", "market_category"] as const;
+const MARKET_SCOPE_LABELS: Record<(typeof MARKET_SCOPE_TYPES)[number], string> = {
+  market_sector: "Macrosector",
+  market_subsector: "Segmento",
+  market_category: "Categoría Comercial",
+};
 
 function roleLabel(role: BbsRole) {
   if (role === "admin") return "administrator";
@@ -174,8 +180,8 @@ export default function AdminUsersPage() {
               >
                 <p className="font-medium text-ink">{user.email || user.id}</p>
               <p className="text-xs text-slate">
-                  Role: {roleLabel(user.role)} · Scopes: S:{user.scope_counts.sector} SS:{user.scope_counts.subsector} C:
-                  {user.scope_counts.category}
+                  Role: {roleLabel(user.role)} · Scopes: MS:{user.scope_counts.market_sector} SEG:
+                  {user.scope_counts.market_subsector} CAT:{user.scope_counts.market_category}
                 </p>
               </button>
             ))}
@@ -290,9 +296,11 @@ export default function AdminUsersPage() {
                     </label>
 
                     <div className="grid gap-4 md:grid-cols-3">
-                      {(["sector", "subsector", "category"] as const).map((scopeType) => (
+                      {MARKET_SCOPE_TYPES.map((scopeType) => (
                         <div key={scopeType} className="space-y-2">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-slate">{scopeType}</p>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate">
+                            {MARKET_SCOPE_LABELS[scopeType]}
+                          </p>
                           <div className="max-h-48 overflow-auto space-y-1 rounded-xl border border-ink/10 p-2">
                             {access.available[scopeType].map((value) => (
                               <label key={`${scopeType}-${value}`} className="flex items-center gap-2 text-xs">

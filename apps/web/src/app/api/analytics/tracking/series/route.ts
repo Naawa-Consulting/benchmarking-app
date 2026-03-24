@@ -1,8 +1,247 @@
 import { NextRequest, NextResponse } from "next/server";
-import { handleWithDataSource } from "../../../_lib/backend";
+import { getDataSource, handleWithDataSource } from "../../../_lib/backend";
 import { getScopeContext, parseStudyIdsInput, scopeStudyIds, scopeStudyIdsCsv } from "../../../_lib/access-scope";
+import { resolveMarketLens } from "../../../_lib/market-lens";
+import { applyMarketFilterToStudyIds, resolveStandardFallbackForMarketSelection } from "../../../_lib/market-filter-scope";
 
 export const dynamic = "force-dynamic";
+
+function getLegacyBaseUrlForTracking() {
+  const base = (
+    process.env.LEGACY_API_BASE_URL ||
+    process.env.NEXT_PUBLIC_API_BASE_URL ||
+    "http://127.0.0.1:8000"
+  ).trim();
+  return base ? base.replace(/\/+$/, "") : null;
+}
+
+async function tryLegacyTrackingSeries(
+  method: "GET" | "POST",
+  query: Record<string, string>,
+  payload: Record<string, unknown>
+) {
+  const base = getLegacyBaseUrlForTracking();
+  if (!base) return null;
+  try {
+    if (method === "GET") {
+      const qs = new URLSearchParams(query).toString();
+      const resp = await fetch(`${base}/analytics/tracking/series${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      if (!resp.ok) return null;
+      return await resp.json().catch(() => null);
+    }
+    const resp = await fetch(`${base}/analytics/tracking/series`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    });
+    if (!resp.ok) return null;
+    return await resp.json().catch(() => null);
+  } catch {
+    return null;
+  }
+}
+
+type MetricSeries = {
+  deltas?: Record<string, number | null>;
+  values?: Record<string, number | null>;
+};
+
+type TrackingRow = {
+  entity: string;
+  metrics?: Record<string, MetricSeries>;
+};
+
+type TrackingPayload = {
+  ok?: boolean;
+  meta?: Record<string, unknown>;
+  entity_rows?: TrackingRow[];
+  secondary_rows?: unknown[];
+  delta_columns?: unknown[];
+  brand_rows?: unknown[];
+  touchpoint_rows?: unknown[];
+  metric_meta_brand?: Record<string, unknown>;
+  metric_meta_touchpoint?: Record<string, unknown>;
+  resolved_breakdown?: string;
+  entity_label?: string;
+  periods?: Array<{ key?: string }>;
+  resolved_granularity?: string;
+};
+
+function toPeriodKeys(payload: TrackingPayload): string[] {
+  const keys = Array.isArray(payload.periods)
+    ? payload.periods
+        .map((period) => (typeof period?.key === "string" ? period.key : null))
+        .filter((key): key is string => Boolean(key))
+    : [];
+  return keys;
+}
+
+function mapEntityToMarket(
+  entity: string,
+  breakdown: string | undefined
+): { marketEntity: string; label: string } {
+  const safeEntity = (entity || "").trim();
+  if (!safeEntity) return { marketEntity: safeEntity, label: "Sector" };
+  if (breakdown === "subsector") {
+    const market = resolveMarketLens({ subsector: safeEntity });
+    return { marketEntity: market.market_subsector, label: "Segmento" };
+  }
+  if (breakdown === "category") {
+    const market = resolveMarketLens({ category: safeEntity });
+    return { marketEntity: market.market_category, label: "Categoría comercial" };
+  }
+  const market = resolveMarketLens({ sector: safeEntity });
+  return { marketEntity: market.market_sector, label: "Macrosector" };
+}
+
+function aggregateTrackingRowsToMarket(payload: TrackingPayload): TrackingPayload {
+  const rows = Array.isArray(payload.entity_rows) ? payload.entity_rows : [];
+  if (!rows.length) return payload;
+  const breakdown = typeof payload.resolved_breakdown === "string" ? payload.resolved_breakdown : "sector";
+  if (!["sector", "subsector", "category"].includes(breakdown)) return payload;
+
+  const byEntity = new Map<
+    string,
+    {
+      entity: string;
+      metrics: Record<string, { valueSums: Record<string, number>; valueCounts: Record<string, number> }>;
+    }
+  >();
+
+  for (const row of rows) {
+    const mapped = mapEntityToMarket(typeof row.entity === "string" ? row.entity : "", breakdown);
+    if (!mapped.marketEntity) continue;
+    if (!byEntity.has(mapped.marketEntity)) {
+      byEntity.set(mapped.marketEntity, { entity: mapped.marketEntity, metrics: {} });
+    }
+    const acc = byEntity.get(mapped.marketEntity)!;
+    const metrics = row.metrics || {};
+    for (const [metricKey, metricSeries] of Object.entries(metrics)) {
+      if (!acc.metrics[metricKey]) {
+        acc.metrics[metricKey] = { valueSums: {}, valueCounts: {} };
+      }
+      const values = metricSeries?.values || {};
+      for (const [periodKey, raw] of Object.entries(values)) {
+        if (typeof raw !== "number" || !Number.isFinite(raw)) continue;
+        acc.metrics[metricKey].valueSums[periodKey] = (acc.metrics[metricKey].valueSums[periodKey] || 0) + raw;
+        acc.metrics[metricKey].valueCounts[periodKey] = (acc.metrics[metricKey].valueCounts[periodKey] || 0) + 1;
+      }
+    }
+  }
+
+  const periodKeys = toPeriodKeys(payload);
+  const aggregatedRows: TrackingRow[] = Array.from(byEntity.values())
+    .map((entry) => {
+      const metrics: Record<string, MetricSeries> = {};
+      for (const [metricKey, stat] of Object.entries(entry.metrics)) {
+        const values: Record<string, number | null> = {};
+        for (const [periodKey, sum] of Object.entries(stat.valueSums)) {
+          const count = stat.valueCounts[periodKey] || 0;
+          values[periodKey] = count > 0 ? sum / count : null;
+        }
+        const deltas: Record<string, number | null> = {};
+        for (let i = 1; i < periodKeys.length; i += 1) {
+          const from = periodKeys[i - 1];
+          const to = periodKeys[i];
+          const fromValue = values[from];
+          const toValue = values[to];
+          deltas[`d_${from}_${to}`] =
+            typeof fromValue === "number" && typeof toValue === "number" ? toValue - fromValue : null;
+        }
+        metrics[metricKey] = { values, deltas };
+      }
+      return { entity: entry.entity, metrics };
+    })
+    .sort((a, b) => a.entity.localeCompare(b.entity));
+
+  const mappedLabel = mapEntityToMarket("x", breakdown).label;
+  return {
+    ...payload,
+    entity_rows: aggregatedRows,
+    entity_label: mappedLabel,
+  };
+}
+
+function normalizeTrackingPayloadTaxonomy(
+  payload: unknown,
+  taxonomyView: "market" | "standard"
+): unknown {
+  if (taxonomyView !== "market" || !payload) return payload;
+
+  if (Array.isArray(payload)) {
+    return payload.map((item) => {
+      if (!item || typeof item !== "object") return item;
+      const record = item as Record<string, unknown>;
+      if (record.bbs_tracking_series && typeof record.bbs_tracking_series === "object") {
+        return {
+          ...record,
+          bbs_tracking_series: aggregateTrackingRowsToMarket(record.bbs_tracking_series as TrackingPayload),
+        };
+      }
+      return aggregateTrackingRowsToMarket(record as TrackingPayload);
+    });
+  }
+
+  if (typeof payload !== "object") return payload;
+  const root = payload as Record<string, unknown>;
+  if (root.bbs_tracking_series && typeof root.bbs_tracking_series === "object") {
+    return {
+      ...root,
+      bbs_tracking_series: aggregateTrackingRowsToMarket(root.bbs_tracking_series as TrackingPayload),
+    };
+  }
+  return aggregateTrackingRowsToMarket(root as TrackingPayload);
+}
+
+function filterTrackingBySelection(
+  payload: unknown,
+  taxonomyView: "market" | "standard",
+  selection: { sector: string | null; subsector: string | null; category: string | null }
+): unknown {
+  if (taxonomyView !== "market" || !payload || typeof payload !== "object") return payload;
+  if (!selection.sector && !selection.subsector && !selection.category) return payload;
+
+  const applyOnSeries = (series: TrackingPayload): TrackingPayload => {
+    const rows = Array.isArray(series.entity_rows) ? series.entity_rows : [];
+    const breakdown = typeof series.resolved_breakdown === "string" ? series.resolved_breakdown : "sector";
+    let filtered = rows;
+    if (breakdown === "sector" && selection.sector) {
+      filtered = rows.filter((row) => row.entity === selection.sector);
+    } else if (breakdown === "subsector" && selection.subsector) {
+      filtered = rows.filter((row) => row.entity === selection.subsector);
+    } else if (breakdown === "category" && selection.category) {
+      filtered = rows.filter((row) => row.entity === selection.category);
+    }
+    return { ...series, entity_rows: filtered };
+  };
+
+  if (Array.isArray(payload)) {
+    return payload.map((item) => {
+      if (!item || typeof item !== "object") return item;
+      const record = item as Record<string, unknown>;
+      if (record.bbs_tracking_series && typeof record.bbs_tracking_series === "object") {
+        return {
+          ...record,
+          bbs_tracking_series: applyOnSeries(record.bbs_tracking_series as TrackingPayload),
+        };
+      }
+      return applyOnSeries(record as TrackingPayload);
+    });
+  }
+
+  const root = payload as Record<string, unknown>;
+  if (root.bbs_tracking_series && typeof root.bbs_tracking_series === "object") {
+    return {
+      ...root,
+      bbs_tracking_series: applyOnSeries(root.bbs_tracking_series as TrackingPayload),
+    };
+  }
+  return applyOnSeries(root as TrackingPayload);
+}
 
 function emptyTrackingSeries() {
   return {
@@ -14,6 +253,235 @@ function emptyTrackingSeries() {
     brand_rows: [],
     touchpoint_rows: [],
     meta: { source: "supabase", warning: "No studies allowed for current user scope." },
+  };
+}
+
+function toSeriesObject(payload: unknown): TrackingPayload | null {
+  if (!payload || typeof payload !== "object") return null;
+  if (Array.isArray(payload)) {
+    const first = payload[0];
+    if (first && typeof first === "object" && "bbs_tracking_series" in (first as Record<string, unknown>)) {
+      const series = (first as Record<string, unknown>).bbs_tracking_series;
+      return series && typeof series === "object" ? (series as TrackingPayload) : null;
+    }
+    return (first as TrackingPayload) || null;
+  }
+  const root = payload as Record<string, unknown>;
+  if (root.bbs_tracking_series && typeof root.bbs_tracking_series === "object") {
+    return root.bbs_tracking_series as TrackingPayload;
+  }
+  return payload as TrackingPayload;
+}
+
+type StudyCatalogItem = {
+  study_id: string;
+  sector: string | null;
+  market_sector: string | null;
+  market_subsector: string | null;
+};
+
+async function fetchStudiesForTracking(request: NextRequest): Promise<StudyCatalogItem[]> {
+  const response = await handleWithDataSource(
+    request,
+    "/filters/options/studies",
+    "bbs_filters_options_studies",
+    { query: {}, payload: {} },
+    { method: "GET" }
+  );
+  if (!response.ok) return [];
+  const json = (await response.json().catch(() => null)) as { items?: Array<Record<string, unknown>> } | null;
+  const items = Array.isArray(json?.items) ? json.items : [];
+  return items
+    .map((row) => ({
+      study_id: String(row.study_id || "").trim(),
+      sector: typeof row.sector === "string" && row.sector.trim() ? row.sector.trim() : null,
+      market_sector:
+        typeof row.market_sector === "string" && row.market_sector.trim() ? row.market_sector.trim() : null,
+      market_subsector:
+        typeof row.market_subsector === "string" && row.market_subsector.trim()
+          ? row.market_subsector.trim()
+          : null,
+    }))
+    .filter((row) => row.study_id);
+}
+
+function topString(values: Array<string | null | undefined>): string | null {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    if (typeof value !== "string" || !value.trim()) continue;
+    const key = value.trim();
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  let winner: string | null = null;
+  let max = -1;
+  for (const [key, count] of counts.entries()) {
+    if (count > max) {
+      winner = key;
+      max = count;
+    }
+  }
+  return winner;
+}
+
+function mergeTrackingRows(
+  rows: TrackingRow[],
+  periods: string[],
+  mapEntity: (row: TrackingRow) => string | null
+): TrackingRow[] {
+  const byEntity = new Map<
+    string,
+    {
+      entity: string;
+      metrics: Record<string, { valueSums: Record<string, number>; valueCounts: Record<string, number> }>;
+    }
+  >();
+
+  for (const row of rows) {
+    const target = mapEntity(row);
+    if (!target) continue;
+    if (!byEntity.has(target)) {
+      byEntity.set(target, { entity: target, metrics: {} });
+    }
+    const acc = byEntity.get(target)!;
+    for (const [metricKey, metricSeries] of Object.entries(row.metrics || {})) {
+      if (!acc.metrics[metricKey]) {
+        acc.metrics[metricKey] = { valueSums: {}, valueCounts: {} };
+      }
+      for (const [periodKey, raw] of Object.entries(metricSeries?.values || {})) {
+        if (typeof raw !== "number" || !Number.isFinite(raw)) continue;
+        acc.metrics[metricKey].valueSums[periodKey] = (acc.metrics[metricKey].valueSums[periodKey] || 0) + raw;
+        acc.metrics[metricKey].valueCounts[periodKey] = (acc.metrics[metricKey].valueCounts[periodKey] || 0) + 1;
+      }
+    }
+  }
+
+  return Array.from(byEntity.values())
+    .map((entry) => {
+      const metrics: Record<string, MetricSeries> = {};
+      for (const [metricKey, stat] of Object.entries(entry.metrics)) {
+        const values: Record<string, number | null> = {};
+        for (const [periodKey, sum] of Object.entries(stat.valueSums)) {
+          const count = stat.valueCounts[periodKey] || 0;
+          values[periodKey] = count > 0 ? sum / count : null;
+        }
+        const deltas: Record<string, number | null> = {};
+        for (let i = 1; i < periods.length; i += 1) {
+          const from = periods[i - 1];
+          const to = periods[i];
+          const fromValue = values[from];
+          const toValue = values[to];
+          deltas[`d_${from}_${to}`] =
+            typeof fromValue === "number" && typeof toValue === "number" ? toValue - fromValue : null;
+        }
+        metrics[metricKey] = { values, deltas };
+      }
+      return { entity: entry.entity, metrics };
+    })
+    .sort((a, b) => a.entity.localeCompare(b.entity));
+}
+
+async function rebuildSupabaseMarketSeries(
+  request: NextRequest,
+  payload: Record<string, unknown>,
+  selection: { sector: string | null; subsector: string | null; category: string | null }
+): Promise<TrackingPayload | null> {
+  if (getDataSource() !== "supabase") return null;
+  if (selection.subsector || selection.category) return null;
+
+  const requestedStudyIds = parseStudyIdsInput(payload.study_ids) ?? [];
+  const studies = await fetchStudiesForTracking(request);
+  const filteredStudies = studies.filter((row) =>
+    requestedStudyIds.length ? requestedStudyIds.includes(row.study_id) : true
+  );
+  if (!filteredStudies.length) return null;
+
+  type Group = { standardSector: string; marketSector: string; studyIds: string[]; marketSubsector: string | null };
+  const byGroup = new Map<string, Group>();
+  for (const row of filteredStudies) {
+    const standardSector = row.sector || "Unassigned";
+    const marketSector = row.market_sector || "Unassigned";
+    const key = `${standardSector}||${marketSector}`;
+    if (!byGroup.has(key)) {
+      byGroup.set(key, {
+        standardSector,
+        marketSector,
+        studyIds: [],
+        marketSubsector: null,
+      });
+    }
+    byGroup.get(key)!.studyIds.push(row.study_id);
+  }
+  for (const group of byGroup.values()) {
+    const subset = filteredStudies.filter(
+      (row) => row.study_id && group.studyIds.includes(row.study_id)
+    );
+    group.marketSubsector = topString(subset.map((row) => row.market_subsector));
+  }
+
+  type TaggedTrackingRow = TrackingRow & { __market_sector?: string; __market_subsector?: string | null };
+  let template: TrackingPayload | null = null;
+  const rows: TaggedTrackingRow[] = [];
+
+  for (const group of byGroup.values()) {
+    const standardPayload: Record<string, unknown> = {
+      ...payload,
+      taxonomy_view: "standard",
+      sector: group.standardSector,
+      subsector: null,
+      category: null,
+      study_ids: group.studyIds,
+    };
+    const resp = await handleWithDataSource(
+      request,
+      "/analytics/tracking/series",
+      "bbs_tracking_series",
+      { query: {}, payload: standardPayload },
+      { method: "POST" }
+    );
+    if (!resp.ok) continue;
+    const json = await resp.json().catch(() => null);
+    const series = toSeriesObject(json);
+    if (!series || !Array.isArray(series.entity_rows)) continue;
+    if (!template) template = series;
+    if (series.resolved_breakdown === "subsector") {
+      for (const row of series.entity_rows) {
+        const tagged: TaggedTrackingRow = {
+          entity: row.entity,
+          metrics: row.metrics,
+          __market_sector: group.marketSector,
+          __market_subsector: group.marketSubsector || null,
+        };
+        rows.push(tagged);
+      }
+    }
+  }
+
+  if (!template || !rows.length) return null;
+  const periods = toPeriodKeys(template);
+
+  if (!selection.sector) {
+    const macroRows = mergeTrackingRows(rows, periods, (row) => {
+      const tagged = row as TaggedTrackingRow;
+      return tagged.__market_sector || null;
+    });
+    return {
+      ...template,
+      resolved_breakdown: "sector",
+      entity_label: "Macrosector",
+      entity_rows: macroRows,
+    };
+  }
+
+  const entityRows = mergeTrackingRows(rows, periods, (row) => {
+    const tagged = row as TaggedTrackingRow;
+    if (tagged.__market_sector !== selection.sector) return null;
+    return tagged.__market_subsector || resolveMarketLens({ subsector: tagged.entity }).market_subsector || null;
+  });
+  return {
+    ...template,
+    resolved_breakdown: "subsector",
+    entity_label: "Segmento",
+    entity_rows: entityRows,
   };
 }
 
@@ -39,28 +507,108 @@ function withStudyScope(
   };
 }
 
+async function applySupabaseMarketFallback(
+  query: Record<string, string>,
+  payload: Record<string, unknown>,
+  selection: { sector: string | null; subsector: string | null; category: string | null },
+  allowedStudyIds: string[] | null
+) {
+  if (getDataSource() !== "supabase") return { query, payload };
+  if (!selection.sector && !selection.subsector && !selection.category) return { query, payload };
+
+  const requestedStudyIds = parseStudyIdsInput(payload.study_ids);
+  const fallback = await resolveStandardFallbackForMarketSelection({
+    selection,
+    allowedStudyIds,
+    requestedStudyIds,
+  });
+  if (!fallback.sector) {
+    return { query, payload };
+  }
+
+  const nextQuery: Record<string, string> = { ...query, taxonomy_view: "standard", sector: fallback.sector };
+  const nextPayload: Record<string, unknown> = {
+    ...payload,
+    taxonomy_view: "standard",
+    sector: fallback.sector,
+  };
+
+  if (selection.subsector && fallback.subsector) {
+    nextQuery.subsector = fallback.subsector;
+    nextPayload.subsector = fallback.subsector;
+  } else {
+    delete nextQuery.subsector;
+    nextPayload.subsector = null;
+  }
+
+  if (selection.category && fallback.category) {
+    nextQuery.category = fallback.category;
+    nextPayload.category = fallback.category;
+  } else {
+    delete nextQuery.category;
+    nextPayload.category = null;
+  }
+
+  return { query: nextQuery, payload: nextPayload };
+}
+
 export async function GET(request: NextRequest) {
   const scopeContext = await getScopeContext(request);
+  const taxonomyView = request.nextUrl.searchParams.get("taxonomy_view") === "standard" ? "standard" : "market";
+  const selection = {
+    sector: request.nextUrl.searchParams.get("sector"),
+    subsector: request.nextUrl.searchParams.get("subsector"),
+    category: request.nextUrl.searchParams.get("category"),
+  };
   if (scopeContext.allowedStudyIds && scopeContext.allowedStudyIds.length === 0) {
     return NextResponse.json(emptyTrackingSeries());
   }
+  const marketScoped = await applyMarketFilterToStudyIds({
+    query: Object.fromEntries(request.nextUrl.searchParams.entries()),
+    payload: {},
+    allowedStudyIds: scopeContext.allowedStudyIds,
+    preserveTaxonomyFilters: true,
+  });
   const scoped = withStudyScope(
-    Object.fromEntries(request.nextUrl.searchParams.entries()),
-    {},
+    marketScoped.query,
+    marketScoped.payload,
     scopeContext.allowedStudyIds
   );
-  const queryString = new URLSearchParams(scoped.query).toString();
+  const supabaseFallback =
+    taxonomyView === "market"
+      ? await applySupabaseMarketFallback(
+          scoped.query,
+          scoped.payload,
+          selection,
+          scopeContext.allowedStudyIds
+        )
+      : { query: scoped.query, payload: scoped.payload };
+  if (taxonomyView === "market" && getDataSource() === "supabase") {
+    const legacyPayload = await tryLegacyTrackingSeries("GET", supabaseFallback.query, supabaseFallback.payload);
+    if (legacyPayload) {
+      const normalizedLegacy = normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView);
+      const filteredLegacy = filterTrackingBySelection(normalizedLegacy, taxonomyView, selection);
+      return NextResponse.json(filteredLegacy);
+    }
+  }
+  const queryString = new URLSearchParams(supabaseFallback.query).toString();
   const query = queryString ? `?${queryString}` : "";
-  return handleWithDataSource(
+  const response = await handleWithDataSource(
     request,
     `/analytics/tracking/series${query}`,
     "bbs_tracking_series",
     {
-      query: scoped.query,
-      payload: scoped.payload,
+      query: supabaseFallback.query,
+      payload: supabaseFallback.payload,
     },
     { method: "GET" }
   );
+  if (!response.ok || taxonomyView !== "market") return response;
+  const payload = await response.json().catch(() => null);
+  const rebuilt = await rebuildSupabaseMarketSeries(request, supabaseFallback.payload, selection);
+  const normalized = normalizeTrackingPayloadTaxonomy(rebuilt || payload, taxonomyView);
+  const filtered = filterTrackingBySelection(normalized, taxonomyView, selection);
+  return NextResponse.json(filtered, { status: response.status });
 }
 
 export async function POST(request: NextRequest) {
@@ -69,21 +617,80 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(emptyTrackingSeries());
   }
   const payload = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-  const scoped = withStudyScope(
-    Object.fromEntries(request.nextUrl.searchParams.entries()),
+  const taxonomyView =
+    typeof payload.taxonomy_view === "string" && payload.taxonomy_view.toLowerCase() === "standard"
+      ? "standard"
+      : request.nextUrl.searchParams.get("taxonomy_view") === "standard"
+        ? "standard"
+        : "market";
+  const selection = {
+    sector: (typeof payload.sector === "string" ? payload.sector : null) ?? request.nextUrl.searchParams.get("sector"),
+    subsector:
+      (typeof payload.subsector === "string" ? payload.subsector : null) ??
+      request.nextUrl.searchParams.get("subsector"),
+    category:
+      (typeof payload.category === "string" ? payload.category : null) ?? request.nextUrl.searchParams.get("category"),
+  };
+  const marketScoped = await applyMarketFilterToStudyIds({
+    query: Object.fromEntries(request.nextUrl.searchParams.entries()),
     payload,
+    allowedStudyIds: scopeContext.allowedStudyIds,
+    preserveTaxonomyFilters: true,
+  });
+  const queryWithPayload = { ...marketScoped.query };
+  if (!queryWithPayload.taxonomy_view && typeof marketScoped.payload.taxonomy_view === "string") {
+    queryWithPayload.taxonomy_view = marketScoped.payload.taxonomy_view;
+  }
+  if (!queryWithPayload.sector && typeof marketScoped.payload.sector === "string") {
+    queryWithPayload.sector = marketScoped.payload.sector;
+  }
+  if (!queryWithPayload.subsector && typeof marketScoped.payload.subsector === "string") {
+    queryWithPayload.subsector = marketScoped.payload.subsector;
+  }
+  if (!queryWithPayload.category && typeof marketScoped.payload.category === "string") {
+    queryWithPayload.category = marketScoped.payload.category;
+  }
+  const scoped = withStudyScope(
+    queryWithPayload,
+    marketScoped.payload,
     scopeContext.allowedStudyIds
   );
-  const queryString = new URLSearchParams(scoped.query).toString();
+  const supabaseFallback =
+    taxonomyView === "market"
+      ? await applySupabaseMarketFallback(
+          scoped.query,
+          scoped.payload,
+          selection,
+          scopeContext.allowedStudyIds
+        )
+      : { query: scoped.query, payload: scoped.payload };
+  if (taxonomyView === "market" && getDataSource() === "supabase") {
+    const legacyPayload = await tryLegacyTrackingSeries("POST", supabaseFallback.query, supabaseFallback.payload);
+    if (legacyPayload) {
+      const normalizedLegacy = normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView);
+      const filteredLegacy = filterTrackingBySelection(normalizedLegacy, taxonomyView, selection);
+      return NextResponse.json(filteredLegacy);
+    }
+  }
+  const queryString = new URLSearchParams(supabaseFallback.query).toString();
   const query = queryString ? `?${queryString}` : "";
-  return handleWithDataSource(
+  const response = await handleWithDataSource(
     request,
     `/analytics/tracking/series${query}`,
     "bbs_tracking_series",
     {
-      query: scoped.query,
-      payload: scoped.payload,
+      query: supabaseFallback.query,
+      payload: supabaseFallback.payload,
     },
     { method: "POST" }
   );
+  if (!response.ok || taxonomyView !== "market") return response;
+  const raw = await response.json().catch(() => null);
+  const rebuilt = await rebuildSupabaseMarketSeries(request, supabaseFallback.payload, selection);
+  const normalized = normalizeTrackingPayloadTaxonomy(rebuilt || raw, taxonomyView);
+  const filtered = filterTrackingBySelection(normalized, taxonomyView, selection);
+  return NextResponse.json(filtered, { status: response.status });
 }
+
+
+

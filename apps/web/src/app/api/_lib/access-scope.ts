@@ -4,9 +4,9 @@ import { supabaseAdminPostgrest } from "./supabase-admin";
 
 type StudyCatalogRow = {
   study_id: string;
-  sector?: string | null;
-  subsector?: string | null;
-  category?: string | null;
+  market_sector?: string | null;
+  market_subsector?: string | null;
+  market_category?: string | null;
 };
 
 type ScopeContext = {
@@ -42,9 +42,9 @@ export async function getScopeContext(request: NextRequest): Promise<ScopeContex
   }
 
   const hasScopes =
-    authz.effective_scopes.sector.length > 0 ||
-    authz.effective_scopes.subsector.length > 0 ||
-    authz.effective_scopes.category.length > 0;
+    authz.effective_scopes.market_sector.length > 0 ||
+    authz.effective_scopes.market_subsector.length > 0 ||
+    authz.effective_scopes.market_category.length > 0;
   if (!hasScopes) {
     return { authz, allowedStudyIds: [] };
   }
@@ -52,16 +52,35 @@ export async function getScopeContext(request: NextRequest): Promise<ScopeContex
   const baseRows: StudyCatalogRow[] = [];
 
   const studyCatalogResult = await supabaseAdminPostgrest(
-    "study_catalog?select=study_id,sector,subsector,category"
+    "study_catalog?select=study_id,market_sector,market_subsector,market_category"
   );
   if (studyCatalogResult.response.ok && Array.isArray(studyCatalogResult.data)) {
     baseRows.push(...(studyCatalogResult.data as StudyCatalogRow[]));
+  } else if (!studyCatalogResult.response.ok) {
+    const fallbackStudyCatalog = await supabaseAdminPostgrest(
+      "study_catalog?select=study_id,sector,subsector,category"
+    );
+    if (fallbackStudyCatalog.response.ok && Array.isArray(fallbackStudyCatalog.data)) {
+      baseRows.push(
+        ...(fallbackStudyCatalog.data as Array<{
+          study_id: string;
+          sector?: string | null;
+          subsector?: string | null;
+          category?: string | null;
+        }>).map((row) => ({
+          study_id: row.study_id,
+          market_sector: row.sector,
+          market_subsector: row.subsector,
+          market_category: row.category,
+        }))
+      );
+    }
   }
 
   if (baseRows.length === 0) {
     const [journeyResult, touchpointResult] = await Promise.all([
-      supabaseAdminPostgrest("journey_metrics?select=study_id,sector,subsector,category"),
-      supabaseAdminPostgrest("touchpoint_metrics?select=study_id,sector,subsector,category"),
+      supabaseAdminPostgrest("journey_metrics?select=study_id,market_sector,market_subsector,market_category"),
+      supabaseAdminPostgrest("touchpoint_metrics?select=study_id,market_sector,market_subsector,market_category"),
     ]);
     if (journeyResult.response.ok && Array.isArray(journeyResult.data)) {
       baseRows.push(...(journeyResult.data as StudyCatalogRow[]));
@@ -71,15 +90,15 @@ export async function getScopeContext(request: NextRequest): Promise<ScopeContex
     }
   }
 
-  const sectorSet = new Set(authz.effective_scopes.sector.map(normalize));
-  const subsectorSet = new Set(authz.effective_scopes.subsector.map(normalize));
-  const categorySet = new Set(authz.effective_scopes.category.map(normalize));
+  const sectorSet = new Set(authz.effective_scopes.market_sector.map(normalize));
+  const subsectorSet = new Set(authz.effective_scopes.market_subsector.map(normalize));
+  const categorySet = new Set(authz.effective_scopes.market_category.map(normalize));
 
   const allowedStudyIds = baseRows
     .filter((row) => {
-      const sector = normalize(row.sector);
-      const subsector = normalize(row.subsector);
-      const category = normalize(row.category);
+      const sector = normalize(row.market_sector);
+      const subsector = normalize(row.market_subsector);
+      const category = normalize(row.market_category);
       return categorySet.has(category) || subsectorSet.has(subsector) || sectorSet.has(sector);
     })
     .map((row) => row.study_id)
@@ -88,8 +107,8 @@ export async function getScopeContext(request: NextRequest): Promise<ScopeContex
   if (allowedStudyIds.length === 0) {
     const fallbackRows: StudyCatalogRow[] = [];
     const [journeyResult, touchpointResult] = await Promise.all([
-      supabaseAdminPostgrest("journey_metrics?select=study_id,sector,subsector,category"),
-      supabaseAdminPostgrest("touchpoint_metrics?select=study_id,sector,subsector,category"),
+      supabaseAdminPostgrest("journey_metrics?select=study_id,market_sector,market_subsector,market_category"),
+      supabaseAdminPostgrest("touchpoint_metrics?select=study_id,market_sector,market_subsector,market_category"),
     ]);
     if (journeyResult.response.ok && Array.isArray(journeyResult.data)) {
       fallbackRows.push(...(journeyResult.data as StudyCatalogRow[]));
@@ -100,9 +119,9 @@ export async function getScopeContext(request: NextRequest): Promise<ScopeContex
 
     const fallbackAllowed = fallbackRows
       .filter((row) => {
-        const sector = normalize(row.sector);
-        const subsector = normalize(row.subsector);
-        const category = normalize(row.category);
+        const sector = normalize(row.market_sector);
+        const subsector = normalize(row.market_subsector);
+        const category = normalize(row.market_category);
         return categorySet.has(category) || subsectorSet.has(subsector) || sectorSet.has(sector);
       })
       .map((row) => row.study_id)

@@ -36,7 +36,8 @@ function asBool(value: unknown) {
 
 export async function GET(request: NextRequest) {
   const authz = await getRequestAuthz(request);
-  if (!authz.user_id) {
+  const authRequired = (process.env.BBS_AUTH_MODE || "off").toLowerCase() === "supabase";
+  if (authRequired && !authz.user_id) {
     return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
   }
 

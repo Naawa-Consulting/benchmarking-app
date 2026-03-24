@@ -66,15 +66,22 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  const scopeCountsByUser = new Map<string, { sector: number; subsector: number; category: number }>();
+  const scopeCountsByUser = new Map<
+    string,
+    { market_sector: number; market_subsector: number; market_category: number }
+  >();
   if (Array.isArray(scopesResult.data)) {
     for (const row of scopesResult.data as Array<{ user_id?: string; scope_type?: string }>) {
       if (typeof row.user_id !== "string") continue;
-      const current = scopeCountsByUser.get(row.user_id) || { sector: 0, subsector: 0, category: 0 };
+      const current = scopeCountsByUser.get(row.user_id) || {
+        market_sector: 0,
+        market_subsector: 0,
+        market_category: 0,
+      };
       const type = typeof row.scope_type === "string" ? row.scope_type.toLowerCase() : "";
-      if (type === "sector") current.sector += 1;
-      if (type === "subsector") current.subsector += 1;
-      if (type === "category") current.category += 1;
+      if (type === "market_sector") current.market_sector += 1;
+      if (type === "market_subsector") current.market_subsector += 1;
+      if (type === "market_category") current.market_category += 1;
       scopeCountsByUser.set(row.user_id, current);
     }
   }
@@ -94,7 +101,7 @@ export async function GET(request: NextRequest) {
         last_sign_in_at: user.last_sign_in_at ?? null,
         email_confirmed_at: user.email_confirmed_at ?? null,
         can_toggle_brands: role === "owner" || role === "admin" || canToggleByUser.has(id),
-        scope_counts: scopeCountsByUser.get(id) || { sector: 0, subsector: 0, category: 0 },
+        scope_counts: scopeCountsByUser.get(id) || { market_sector: 0, market_subsector: 0, market_category: 0 },
       };
     })
     .filter((item): item is NonNullable<typeof item> => Boolean(item))

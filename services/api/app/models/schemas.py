@@ -13,6 +13,10 @@ class Study(BaseModel):
     sector: str | None = None
     subsector: str | None = None
     category: str | None = None
+    market_sector: str | None = None
+    market_subsector: str | None = None
+    market_category: str | None = None
+    market_source: str | None = None
 
 
 class JourneyPoint(BaseModel):

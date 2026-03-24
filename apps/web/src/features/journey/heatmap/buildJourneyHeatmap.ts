@@ -91,11 +91,17 @@ export function buildJourneyHeatmap(
   const selected = model.brandStageAggregates.filter(
     (item) => selectedBrands.length === 0 || selectedBrands.includes(item.brandName)
   );
+  const getJourneyIndex = (brand: JourneyBrandAggregate) => {
+    const value = model.journeyIndexByBrand[brand.key]?.value;
+    return typeof value === "number" ? value : Number.NEGATIVE_INFINITY;
+  };
   const sorted = selected
     .slice()
     .sort(
       (a, b) =>
-        (stageVal(b, model.stagesOrdered[0])?.value ?? 0) - (stageVal(a, model.stagesOrdered[0])?.value ?? 0)
+        getJourneyIndex(b) - getJourneyIndex(a) ||
+        (b.totalConversion ?? 0) - (a.totalConversion ?? 0) ||
+        a.brandName.localeCompare(b.brandName)
     );
   const visible = sorted.slice(0, maxBrands);
 

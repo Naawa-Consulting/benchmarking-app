@@ -7,6 +7,7 @@ import duckdb
 from fastapi import APIRouter, Query
 
 from app.data.demographics import load_demographics_config, normalize_demographics_config, respondents_path, value_labels_path
+from app.data.market_lens import market_taxonomy_items_from_standard, resolve_classification
 from app.data.warehouse import get_repo_root
 
 router = APIRouter()
@@ -32,11 +33,20 @@ def _classification_for_study(root: Path, study_id: str) -> dict[str, str | None
         / f"study_id={study_id}.json"
     )
     if not classification_path.exists():
-        return {"sector": None, "subsector": None, "category": None}
+        return {
+            "sector": None,
+            "subsector": None,
+            "category": None,
+            "market_sector": None,
+            "market_subsector": None,
+            "market_category": None,
+            "market_source": None,
+        }
     try:
-        return json.loads(classification_path.read_text(encoding="utf-8"))
+        payload = json.loads(classification_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        return json.loads(classification_path.read_text(encoding="utf-8-sig"))
+        payload = json.loads(classification_path.read_text(encoding="utf-8-sig"))
+    return resolve_classification(payload, root=root)
 
 
 @router.get("/filters/options/studies")
@@ -56,6 +66,10 @@ def filter_study_options() -> dict:
                 "sector": classification.get("sector"),
                 "subsector": classification.get("subsector"),
                 "category": classification.get("category"),
+                "market_sector": classification.get("market_sector"),
+                "market_subsector": classification.get("market_subsector"),
+                "market_category": classification.get("market_category"),
+                "market_source": classification.get("market_source"),
                 "has_demographics": respondents_exists,
                 "has_date": respondents_exists and date_mode != "none",
             }
@@ -64,7 +78,15 @@ def filter_study_options() -> dict:
 
 
 @router.get("/filters/options/taxonomy")
-def filter_taxonomy_options() -> dict:
+def filter_taxonomy_options(view: str = Query("market", description="market|standard")) -> dict:
+    normalized_view = view.lower().strip() if isinstance(view, str) else "market"
+    if normalized_view == "market":
+        items = market_taxonomy_items_from_standard(get_repo_root())
+        sectors = sorted({item.get("sector") for item in items if item.get("sector")})
+        subsectors = sorted({item.get("subsector") for item in items if item.get("subsector")})
+        categories = sorted({item.get("category") for item in items if item.get("category")})
+        return {"items": items, "sectors": sectors, "subsectors": subsectors, "categories": categories}
+
     root = get_repo_root()
     taxonomy_path = (
         root

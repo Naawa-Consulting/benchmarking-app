@@ -6,7 +6,7 @@ import {
   getFilterDateOptionsDetailed,
   getFilterDemographicsOptionsDetailed,
   getFilterStudyOptionsDetailed,
-  getFilterTaxonomyOptionsDetailed,
+  getFilterTaxonomyOptionsByViewDetailed,
   postTouchpointsTableMultiDetailed,
 } from "../../lib/api";
 
@@ -16,6 +16,10 @@ export type StudyOption = {
   sector?: string | null;
   subsector?: string | null;
   category?: string | null;
+  market_sector?: string | null;
+  market_subsector?: string | null;
+  market_category?: string | null;
+  market_source?: "rule" | "manual" | null;
   has_demographics?: boolean;
   has_date?: boolean;
 };
@@ -42,6 +46,7 @@ export type DateOptions = {
 export type ScopeState = {
   studyIds: string[];
   brands: string[];
+  taxonomyView: "market" | "standard";
   sector: string | null;
   subsector: string | null;
   category: string | null;
@@ -57,6 +62,7 @@ export type ScopeState = {
 const DEFAULT_SCOPE: ScopeState = {
   studyIds: [],
   brands: [],
+  taxonomyView: "market",
   sector: null,
   subsector: null,
   category: null,
@@ -87,6 +93,7 @@ const ScopeContext = createContext<ScopeContextValue | null>(null);
 const MANAGED_KEYS = [
   "studies",
   "brands",
+  "taxonomy_view",
   "sector",
   "subsector",
   "category",
@@ -126,6 +133,7 @@ function parseScopeFromQuery(searchParams: URLSearchParams): Partial<ScopeState>
   return {
     studyIds: parseCsv(searchParams.get("studies")),
     brands: parseCsv(searchParams.get("brands")),
+    taxonomyView: searchParams.get("taxonomy_view") === "standard" ? "standard" : "market",
     sector: searchParams.get("sector"),
     subsector: searchParams.get("subsector"),
     category: searchParams.get("category"),
@@ -143,6 +151,7 @@ function createManagedQuery(scope: ScopeState): URLSearchParams {
   const params = new URLSearchParams();
   if (scope.studyIds.length) params.set("studies", scope.studyIds.join(","));
   if (scope.brands.length) params.set("brands", scope.brands.join(","));
+  if (scope.taxonomyView !== "market") params.set("taxonomy_view", scope.taxonomyView);
   if (scope.sector) params.set("sector", scope.sector);
   if (scope.subsector) params.set("subsector", scope.subsector);
   if (scope.category) params.set("category", scope.category);
@@ -194,7 +203,7 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
       setOptionsLoading(true);
       const [studyResult, taxonomyResult] = await Promise.all([
         getFilterStudyOptionsDetailed(),
-        getFilterTaxonomyOptionsDetailed(),
+        getFilterTaxonomyOptionsByViewDetailed(scope.taxonomyView),
       ]);
       if (studyResult.ok && studyResult.data) {
         const payload = studyResult.data as { items?: StudyOption[] };
@@ -207,7 +216,7 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
       setOptionsLoading(false);
     };
     loadStaticOptions();
-  }, []);
+  }, [scope.taxonomyView]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -221,6 +230,7 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
         sector: scope.sector,
         subsector: scope.subsector,
         category: scope.category,
+        taxonomy_view: scope.taxonomyView,
         years: scope.years.length ? scope.years : null,
         gender: scope.gender.length ? scope.gender : null,
         nse: scope.nse.length ? scope.nse : null,
@@ -280,6 +290,7 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
     scope.sector,
     scope.subsector,
     scope.category,
+    scope.taxonomyView,
     scope.years,
     scope.gender,
     scope.nse,
@@ -346,10 +357,21 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
       if (hasSubsector && partial.subsector !== prev.subsector) {
         if (!hasCategory) merged.category = null;
       }
+      if (
+        Object.prototype.hasOwnProperty.call(partial, "taxonomyView") &&
+        partial.taxonomyView &&
+        partial.taxonomyView !== prev.taxonomyView
+      ) {
+        merged.sector = null;
+        merged.subsector = null;
+        merged.category = null;
+        merged.brands = [];
+      }
 
       const changed =
         merged.studyIds.join("|") !== prev.studyIds.join("|") ||
         merged.brands.join("|") !== prev.brands.join("|") ||
+        merged.taxonomyView !== prev.taxonomyView ||
         merged.sector !== prev.sector ||
         merged.subsector !== prev.subsector ||
         merged.category !== prev.category ||

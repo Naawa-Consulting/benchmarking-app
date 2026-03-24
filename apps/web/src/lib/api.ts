@@ -320,6 +320,10 @@ export function getTaxonomyDetailed() {
   return requestDetailed("/taxonomy");
 }
 
+export function getMarketTaxonomyDetailed() {
+  return requestDetailed("/taxonomy/market");
+}
+
 export function getStudyClassificationDetailed(studyId: string) {
   const params = new URLSearchParams({ study_id: studyId });
   return requestDetailed(`/taxonomy/study?${params.toString()}`);
@@ -453,7 +457,11 @@ export function getFilterStudyOptionsDetailed() {
 }
 
 export function getFilterTaxonomyOptionsDetailed() {
-  return requestDetailed("/filters/options/taxonomy");
+  return requestDetailed("/filters/options/taxonomy?view=market");
+}
+
+export function getFilterTaxonomyOptionsByViewDetailed(view: "market" | "standard") {
+  return requestDetailed(`/filters/options/taxonomy?view=${encodeURIComponent(view)}`);
 }
 
 export function getFilterDemographicsOptionsDetailed(studyIds: string[] | null) {
@@ -503,7 +511,7 @@ export function patchAdminUserAccessDetailed(
   userId: string,
   payload: {
     can_toggle_brands: boolean;
-    scopes: { sector: string[]; subsector: string[]; category: string[] };
+    scopes: { market_sector: string[]; market_subsector: string[]; market_category: string[] };
   }
 ) {
   return requestDetailedLocal(`/api/admin/users/${encodeURIComponent(userId)}/access`, {
@@ -511,5 +519,3 @@ export function patchAdminUserAccessDetailed(
     body: JSON.stringify(payload),
   });
 }
-
-

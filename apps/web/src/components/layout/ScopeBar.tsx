@@ -23,6 +23,10 @@ export default function ScopeBar() {
   const searchParams = useSearchParams();
   const { scope, setScope, resetScope, studies, taxonomyItems, demographics, dateOptions, optionsLoading, brands } =
     useScope();
+  const taxonomyLabels =
+    scope.taxonomyView === "market"
+      ? { sector: "Macrosector", subsector: "Segmento", category: "Categoría comercial" }
+      : { sector: "Sector", subsector: "Subsector", category: "Categoría" };
 
   const advancedOpen = searchParams.get("scope_advanced") === "1";
   const [brandsOpen, setBrandsOpen] = useState(false);
@@ -96,31 +100,61 @@ export default function ScopeBar() {
     () =>
       new Set(
         scopedStudies
-          .map((study) => (typeof study.sector === "string" ? study.sector.trim() : ""))
+          .map((study) =>
+            scope.taxonomyView === "market"
+              ? typeof study.market_sector === "string"
+                ? study.market_sector.trim()
+                : ""
+              : typeof study.sector === "string"
+                ? study.sector.trim()
+                : ""
+          )
           .filter(Boolean)
       ),
-    [scopedStudies]
+    [scope.taxonomyView, scopedStudies]
   );
 
   const enabledSubsectors = useMemo(() => {
     if (!scope.sector) return new Set<string>();
     return new Set(
       scopedStudies
-        .filter((study) => study.sector === scope.sector)
-        .map((study) => (typeof study.subsector === "string" ? study.subsector.trim() : ""))
+        .filter((study) =>
+          scope.taxonomyView === "market" ? study.market_sector === scope.sector : study.sector === scope.sector
+        )
+        .map((study) =>
+          scope.taxonomyView === "market"
+            ? typeof study.market_subsector === "string"
+              ? study.market_subsector.trim()
+              : ""
+            : typeof study.subsector === "string"
+              ? study.subsector.trim()
+              : ""
+        )
         .filter(Boolean)
     );
-  }, [scope.sector, scopedStudies]);
+  }, [scope.sector, scope.taxonomyView, scopedStudies]);
 
   const enabledCategories = useMemo(() => {
     if (!scope.sector || !scope.subsector) return new Set<string>();
     return new Set(
       scopedStudies
-        .filter((study) => study.sector === scope.sector && study.subsector === scope.subsector)
-        .map((study) => (typeof study.category === "string" ? study.category.trim() : ""))
+        .filter((study) =>
+          scope.taxonomyView === "market"
+            ? study.market_sector === scope.sector && study.market_subsector === scope.subsector
+            : study.sector === scope.sector && study.subsector === scope.subsector
+        )
+        .map((study) =>
+          scope.taxonomyView === "market"
+            ? typeof study.market_category === "string"
+              ? study.market_category.trim()
+              : ""
+            : typeof study.category === "string"
+              ? study.category.trim()
+              : ""
+        )
         .filter(Boolean)
     );
-  }, [scope.sector, scope.subsector, scopedStudies]);
+  }, [scope.sector, scope.subsector, scope.taxonomyView, scopedStudies]);
 
   const filteredBrands = useMemo(() => {
     const needle = brandSearch.trim().toLowerCase();
@@ -189,15 +223,15 @@ export default function ScopeBar() {
   }, [pathname, scope.brands, scope.category, setScope]);
 
   useEffect(() => {
-    if (scope.sector && !enabledSectors.has(scope.sector)) {
+    if (scope.sector && enabledSectors.size > 0 && !enabledSectors.has(scope.sector)) {
       setScope({ sector: null, subsector: null, category: null, brands: [] });
       return;
     }
-    if (scope.subsector && !enabledSubsectors.has(scope.subsector)) {
+    if (scope.subsector && enabledSubsectors.size > 0 && !enabledSubsectors.has(scope.subsector)) {
       setScope({ subsector: null, category: null, brands: [] });
       return;
     }
-    if (scope.category && !enabledCategories.has(scope.category)) {
+    if (scope.category && enabledCategories.size > 0 && !enabledCategories.has(scope.category)) {
       setScope({ category: null, brands: [] });
     }
   }, [
@@ -224,9 +258,13 @@ export default function ScopeBar() {
             onChange={(event) => setScope({ sector: event.target.value || null })}
             aria-label="Sector filter"
           >
-            <option value="">Sector: All</option>
+            <option value="">{taxonomyLabels.sector}: All</option>
             {sectorOptions.map((value) => (
-              <option key={value} value={value} disabled={!enabledSectors.has(value)}>
+              <option
+                key={value}
+                value={value}
+                disabled={enabledSectors.size > 0 && !enabledSectors.has(value)}
+              >
                 {value}
               </option>
             ))}
@@ -238,11 +276,15 @@ export default function ScopeBar() {
             onChange={(event) => setScope({ subsector: event.target.value || null })}
             aria-label="Subsector filter"
             disabled={!scope.sector}
-            title={!scope.sector ? "Select Sector first" : undefined}
+            title={!scope.sector ? `Select ${taxonomyLabels.sector} first` : undefined}
           >
-            <option value="">Subsector: All</option>
+            <option value="">{taxonomyLabels.subsector}: All</option>
             {subsectorOptions.map((value) => (
-              <option key={value} value={value} disabled={!enabledSubsectors.has(value)}>
+              <option
+                key={value}
+                value={value}
+                disabled={enabledSubsectors.size > 0 && !enabledSubsectors.has(value)}
+              >
                 {value}
               </option>
             ))}
@@ -254,11 +296,15 @@ export default function ScopeBar() {
             onChange={(event) => setScope({ category: event.target.value || null })}
             aria-label="Category filter"
             disabled={!scope.subsector}
-            title={!scope.subsector ? "Select Subsector first" : undefined}
+            title={!scope.subsector ? `Select ${taxonomyLabels.subsector} first` : undefined}
           >
-            <option value="">Category: All</option>
+            <option value="">{taxonomyLabels.category}: All</option>
             {categoryOptions.map((value) => (
-              <option key={value} value={value} disabled={!enabledCategories.has(value)}>
+              <option
+                key={value}
+                value={value}
+                disabled={enabledCategories.size > 0 && !enabledCategories.has(value)}
+              >
                 {value}
               </option>
             ))}
@@ -341,6 +387,14 @@ export default function ScopeBar() {
               </Popover.Portal>
             </Popover.Root>
           )}
+
+          <button
+            type="button"
+            className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm transition hover:bg-slate-50"
+            onClick={() => setScope({ taxonomyView: scope.taxonomyView === "market" ? "standard" : "market" })}
+          >
+            View: {scope.taxonomyView === "market" ? "Market Lens" : "Taxonomía Estándar"}
+          </button>
 
           <Popover.Root
             open={demographicsOpen}

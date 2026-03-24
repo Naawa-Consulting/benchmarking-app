@@ -14,7 +14,6 @@ import JourneyHeatmapTable from "../../features/journey/components/JourneyHeatma
 import { generateJourneyInsights } from "../../features/journey/insights/generateJourneyInsights";
 import type { JourneyInsight } from "../../features/journey/insights/generateJourneyInsights";
 import { buildJourneyHeatmap } from "../../features/journey/heatmap/buildJourneyHeatmap";
-import TimeScrubber from "../../features/journey/components/TimeScrubber";
 import FocusBar from "../../features/journey/components/FocusBar";
 import type { JourneyModel } from "../../features/journey/data/journeySchema";
 
@@ -32,6 +31,8 @@ type TableRow = {
   brand_satisfaction: number | null;
   brand_recommendation: number | null;
 };
+
+type JourneyHierarchyLevel = "sector" | "subsector" | "category";
 
 type JourneyTableMultiPayload = {
   rows?: TableRow[];
@@ -53,13 +54,145 @@ type JourneyTableMultiPayload = {
 const pct = (value: number | null | undefined) =>
   typeof value === "number" ? `${value >= 0 ? "+" : ""}${(value * 100).toFixed(1)} pts` : "n/a";
 
-const extractYear = (value: string | null | undefined): string | null => {
-  if (!value) return null;
-  const match = String(value).match(/(19|20)\d{2}/);
-  return match ? match[0] : null;
+const BRANDS_MODE_STORAGE_KEY = "bbs_brands_mode";
+
+const HIERARCHY_METRIC_KEYS: Array<keyof TableRow> = [
+  "brand_awareness",
+  "ad_awareness",
+  "brand_consideration",
+  "brand_purchase",
+  "brand_satisfaction",
+  "brand_recommendation",
+];
+
+const toNonEmptyString = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
 };
 
-const BRANDS_MODE_STORAGE_KEY = "bbs_brands_mode";
+const toMetricNumber = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return null;
+};
+
+const resolveHierarchyLevel = (
+  sector: string | null,
+  subsector: string | null
+): JourneyHierarchyLevel => {
+  if (!sector) return "sector";
+  if (!subsector) return "subsector";
+  return "category";
+};
+
+const hierarchyFieldByLevel: Record<JourneyHierarchyLevel, keyof Pick<TableRow, "sector" | "subsector" | "category">> =
+  {
+    sector: "sector",
+    subsector: "subsector",
+    category: "category",
+  };
+
+const hierarchyTitleByLevel: Record<JourneyHierarchyLevel, string> = {
+  sector: "Top Funnels por Sector",
+  subsector: "Funnels por Subsector",
+  category: "Funnels por Categoria",
+};
+
+const hierarchySubtitleByLevel: Record<JourneyHierarchyLevel, string> = {
+  sector: "Top 5 sectores por Journey Index en la seleccion actual.",
+  subsector: "Detalle por subsector para el sector seleccionado.",
+  category: "Detalle por categoria para el subsector/categoria seleccionada.",
+};
+
+const hierarchyLegendByLevel: Record<JourneyHierarchyLevel, string> = {
+  sector: "Sector",
+  subsector: "Subsector",
+  category: "Categoria",
+};
+
+const resolveHierarchyFocusLabel = (
+  level: JourneyHierarchyLevel,
+  scope: { sector: string | null; subsector: string | null; category: string | null }
+): string | null => {
+  if (level === "category") return scope.category;
+  if (level === "subsector") return scope.subsector;
+  if (level === "sector") return scope.sector;
+  return null;
+};
+
+function aggregateJourneyRowsByLevel(rows: TableRow[], level: JourneyHierarchyLevel): TableRow[] {
+  const levelField = hierarchyFieldByLevel[level];
+  type AggState = {
+    label: string;
+    sector: string | null;
+    subsector: string | null;
+    category: string | null;
+    weightedSums: Record<string, number>;
+    weightedDenominators: Record<string, number>;
+    studies: Set<string>;
+  };
+
+  const byEntity = new Map<string, AggState>();
+
+  for (const row of rows) {
+    const label = toNonEmptyString(row[levelField]);
+    if (!label) continue;
+    const weightRaw =
+      toMetricNumber(row.base_n_population) ??
+      toMetricNumber(row.aggregation_weight_n) ??
+      toMetricNumber(row.base_n) ??
+      toMetricNumber(row.baseN) ??
+      1;
+    const weight = Number.isFinite(weightRaw) && weightRaw > 0 ? weightRaw : 1;
+
+    const key = label.toLowerCase();
+    if (!byEntity.has(key)) {
+      byEntity.set(key, {
+        label,
+        sector: level === "sector" ? label : toNonEmptyString(row.sector),
+        subsector: level === "subsector" ? label : toNonEmptyString(row.subsector),
+        category: level === "category" ? label : toNonEmptyString(row.category),
+        weightedSums: {},
+        weightedDenominators: {},
+        studies: new Set<string>(),
+      });
+    }
+    const current = byEntity.get(key)!;
+    if (typeof row.study_id === "string" && row.study_id) {
+      current.studies.add(row.study_id);
+    }
+    for (const metricKey of HIERARCHY_METRIC_KEYS) {
+      const metricValue = toMetricNumber(row[metricKey]);
+      if (metricValue == null) continue;
+      current.weightedSums[String(metricKey)] = (current.weightedSums[String(metricKey)] ?? 0) + metricValue * weight;
+      current.weightedDenominators[String(metricKey)] =
+        (current.weightedDenominators[String(metricKey)] ?? 0) + weight;
+    }
+  }
+
+  return Array.from(byEntity.values()).map((entry, index) => {
+    const aggregatedRow: TableRow = {
+      study_id: `agg:${level}:${index + 1}`,
+      sector: entry.sector ?? null,
+      subsector: entry.subsector ?? null,
+      category: entry.category ?? null,
+      brand: entry.label,
+      brand_awareness: null,
+      ad_awareness: null,
+      brand_consideration: null,
+      brand_purchase: null,
+      brand_satisfaction: null,
+      brand_recommendation: null,
+    };
+    for (const metricKey of HIERARCHY_METRIC_KEYS) {
+      const key = String(metricKey);
+      const numerator = entry.weightedSums[key] ?? 0;
+      const denominator = entry.weightedDenominators[key] ?? 0;
+      aggregatedRow[metricKey] = denominator > 0 ? numerator / denominator : null;
+    }
+    return aggregatedRow;
+  });
+}
 
 
 const buildBenchmarkOnlyInsights = (
@@ -241,17 +374,13 @@ export default function JourneyPage() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const { scope, setScope, dateOptions } = useScope();
+  const { scope, setScope } = useScope();
 
   const advancedOpen = searchParams.get("scope_advanced") === "1";
   const [advancedSlot, setAdvancedSlot] = useState<HTMLElement | null>(null);
   const [includeAdAwareness, setIncludeAdAwareness] = useState(false);
   const [focusBrand, setFocusBrand] = useState<string | null>(null);
   const [compareBrand, setCompareBrand] = useState<string | null>(null);
-  const [timeMode, setTimeMode] = useState(false);
-  const [selectedTimeBucket, setSelectedTimeBucket] = useState<string | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [playSpeed, setPlaySpeed] = useState<0.5 | 1 | 2>(1);
   const [insightsState, setInsightsState] = useState<ReturnType<typeof generateJourneyInsights>>([]);
   const [isInsightsPending, startInsightsTransition] = useTransition();
   const [selectionRows, setSelectionRows] = useState<TableRow[]>([]);
@@ -293,18 +422,6 @@ export default function JourneyPage() {
     const set = new Set(availableBrands);
     return scope.brands.filter((brand) => set.has(brand));
   }, [availableBrands, scope.brands]);
-
-  const timeBuckets = useMemo(
-    () => {
-      const set = new Set<string>();
-      for (const quarter of dateOptions.quarters || []) {
-        const year = extractYear(quarter);
-        if (year) set.add(year);
-      }
-      return Array.from(set).sort((a, b) => Number(a) - Number(b));
-    },
-    [dateOptions.quarters]
-  );
 
   const scopeKey = useMemo(
     () =>
@@ -353,13 +470,13 @@ export default function JourneyPage() {
   );
 
   const fetchInputs = useMemo(() => {
-    const effectiveYears = timeMode && selectedTimeBucket ? [selectedTimeBucket] : scope.years;
     const payload = {
       study_ids: scope.studyIds,
+      taxonomy_view: scope.taxonomyView,
       sector: scope.sector,
       subsector: scope.subsector,
       category: scope.category,
-      years: effectiveYears.length ? effectiveYears : null,
+      years: scope.years.length ? scope.years : null,
       gender: scope.gender.length ? scope.gender : null,
       nse: scope.nse.length ? scope.nse : null,
       state: scope.state.length ? scope.state : null,
@@ -369,7 +486,7 @@ export default function JourneyPage() {
     };
     const fingerprint = JSON.stringify(payload);
     return { payload, fingerprint };
-  }, [scopeKey, selectedTimeBucket, timeMode]);
+  }, [scopeKey, scope.taxonomyView]);
 
   useEffect(() => {
     let active = true;
@@ -452,21 +569,6 @@ export default function JourneyPage() {
     return () => window.cancelAnimationFrame(frame);
   }, [advancedOpen]);
 
-  useEffect(() => {
-    if (!timeMode) {
-      setIsPlaying(false);
-      return;
-    }
-    if (!timeBuckets.length) {
-      setSelectedTimeBucket(null);
-      setIsPlaying(false);
-      return;
-    }
-    if (!selectedTimeBucket || !timeBuckets.includes(selectedTimeBucket)) {
-      setSelectedTimeBucket(timeBuckets[0]);
-    }
-  }, [selectedTimeBucket, timeBuckets, timeMode]);
-
   const setIncludeAdAwarenessAndQuery = (nextIncludeAdAwareness: boolean) => {
     setIncludeAdAwareness(nextIncludeAdAwareness);
     const params = new URLSearchParams(searchParams.toString());
@@ -499,6 +601,14 @@ export default function JourneyPage() {
     () => (selectionRows.length ? selectionRows : coreRows),
     [selectionRows, coreRows]
   );
+  const hierarchyLevel = useMemo<JourneyHierarchyLevel>(
+    () => resolveHierarchyLevel(scope.sector, scope.subsector),
+    [scope.sector, scope.subsector]
+  );
+  const hierarchyRows = useMemo(
+    () => aggregateJourneyRowsByLevel(selectionSourceRows, hierarchyLevel),
+    [selectionSourceRows, hierarchyLevel]
+  );
 
   const selectionJourneyModel = useMemo(() => {
     const t0 = performance.now();
@@ -526,8 +636,44 @@ export default function JourneyPage() {
     return model;
   }, [selectionSourceRows, globalBenchmarkRows, includeAdAwareness, modelFilters]);
 
+  const hierarchyJourneyModel = useMemo(
+    () =>
+      buildJourneyModel(hierarchyRows, modelFilters, {
+        includeAdAwareness,
+        benchmarkScope: "category",
+      }),
+    [hierarchyRows, includeAdAwareness, modelFilters]
+  );
+
   const benchmarkLabel = benchmarkMode === "global" ? "Global Benchmark" : "Selection Benchmark";
   const journeyModel = benchmarkMode === "global" ? globalBenchmarkJourneyModel : selectionJourneyModel;
+  const nonBrandJourneyModel = hierarchyJourneyModel;
+  const nonBrandEntityNamesByJourneyIndex = useMemo(() => {
+    return nonBrandJourneyModel.brandStageAggregates
+      .slice()
+      .sort((a, b) => {
+        const aIndex = nonBrandJourneyModel.journeyIndexByBrand[a.key]?.value;
+        const bIndex = nonBrandJourneyModel.journeyIndexByBrand[b.key]?.value;
+        const ai = typeof aIndex === "number" ? aIndex : Number.NEGATIVE_INFINITY;
+        const bi = typeof bIndex === "number" ? bIndex : Number.NEGATIVE_INFINITY;
+        return bi - ai || (b.totalConversion ?? 0) - (a.totalConversion ?? 0) || a.brandName.localeCompare(b.brandName);
+      })
+      .map((item) => item.brandName);
+  }, [nonBrandJourneyModel]);
+  const nonBrandFunnelEntityNames = useMemo(() => {
+    if (hierarchyLevel === "sector") {
+      return nonBrandEntityNamesByJourneyIndex.slice(0, 5);
+    }
+    return nonBrandEntityNamesByJourneyIndex;
+  }, [hierarchyLevel, nonBrandEntityNamesByJourneyIndex]);
+  const nonBrandInsightEntityNames = useMemo(
+    () => (hierarchyLevel === "sector" ? nonBrandEntityNamesByJourneyIndex.slice(0, 5) : nonBrandEntityNamesByJourneyIndex),
+    [hierarchyLevel, nonBrandEntityNamesByJourneyIndex]
+  );
+  const hierarchyFocusLabel = useMemo(
+    () => resolveHierarchyFocusLabel(hierarchyLevel, scope),
+    [hierarchyLevel, scope]
+  );
   const benchmarkFunnelModel = useMemo<JourneyModel>(() => {
     const selectionBenchmarkBrandKey = "selection-benchmark";
     const selectionBenchmarkBrand = {
@@ -563,10 +709,13 @@ export default function JourneyPage() {
 
   const journeyHeatmap = useMemo(() => {
     const t0 = performance.now();
+    const heatmapModel = brandsEnabled ? journeyModel : nonBrandJourneyModel;
+    const heatmapNames = brandsEnabled ? selectedBrands : nonBrandEntityNamesByJourneyIndex;
+    const maxHeatmapRows = brandsEnabled ? Number.MAX_SAFE_INTEGER : Math.max(heatmapNames.length, 1);
     const matrix = buildJourneyHeatmap(
-      journeyModel,
-      selectedBrands,
-      brandsEnabled ? Number.MAX_SAFE_INTEGER : 0,
+      heatmapModel,
+      heatmapNames,
+      maxHeatmapRows,
       {
       benchmarkMode,
       selectionBenchmark: {
@@ -584,7 +733,16 @@ export default function JourneyPage() {
       console.debug("[JourneyPerf] heatmap_ms", Number((t1 - t0).toFixed(2)));
     }
     return matrix;
-  }, [benchmarkMode, brandsEnabled, globalBenchmarkJourneyModel, journeyModel, selectedBrands, selectionJourneyModel]);
+  }, [
+    benchmarkMode,
+    brandsEnabled,
+    globalBenchmarkJourneyModel,
+    journeyModel,
+    nonBrandEntityNamesByJourneyIndex,
+    nonBrandJourneyModel,
+    selectedBrands,
+    selectionJourneyModel,
+  ]);
 
   const journeyInsights = insightsState;
 
@@ -603,7 +761,27 @@ export default function JourneyPage() {
         return;
       }
       if (!brandsEnabled) {
-        setInsightsState(buildBenchmarkOnlyInsights(selectionJourneyModel, globalBenchmarkJourneyModel));
+        const selectedForInsights =
+          hierarchyFocusLabel && nonBrandJourneyModel.brandStageAggregates.some((item) => item.brandName === hierarchyFocusLabel)
+            ? hierarchyFocusLabel
+            : nonBrandInsightEntityNames[0] ?? null;
+        const insightEntities = selectedForInsights
+          ? [selectedForInsights, ...nonBrandInsightEntityNames.filter((name) => name !== selectedForInsights)]
+          : nonBrandInsightEntityNames;
+        const hierarchyInsights = generateJourneyInsights(
+          nonBrandJourneyModel,
+          insightEntities.slice(0, Math.max(3, Math.min(5, insightEntities.length))),
+          hierarchyLevel,
+          {
+            maxItems: 50,
+            focusBrandName: selectedForInsights,
+          }
+        );
+        if (hierarchyInsights.length) {
+          setInsightsState(hierarchyInsights);
+        } else {
+          setInsightsState(buildBenchmarkOnlyInsights(selectionJourneyModel, globalBenchmarkJourneyModel));
+        }
         return;
       }
 
@@ -623,8 +801,12 @@ export default function JourneyPage() {
     compareBrand,
     detailLoading,
     focusBrand,
+    hierarchyFocusLabel,
+    hierarchyLevel,
     globalBenchmarkJourneyModel,
     journeyModel,
+    nonBrandInsightEntityNames,
+    nonBrandJourneyModel,
     selectedBrands,
     selectionJourneyModel,
     startInsightsTransition,
@@ -646,23 +828,6 @@ export default function JourneyPage() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [focusBrand]);
-
-  useEffect(() => {
-    if (!timeMode || !isPlaying || timeBuckets.length < 2) return;
-    const intervalMs = Math.max(300, Math.round(750 / playSpeed));
-    const timer = window.setInterval(() => {
-      setSelectedTimeBucket((prev) => {
-        const currentIndex = prev ? timeBuckets.indexOf(prev) : 0;
-        const nextIndex = currentIndex + 1;
-        if (nextIndex >= timeBuckets.length) {
-          setIsPlaying(false);
-          return prev;
-        }
-        return timeBuckets[nextIndex];
-      });
-    }, intervalMs);
-    return () => window.clearInterval(timer);
-  }, [isPlaying, playSpeed, timeBuckets, timeMode]);
 
   useEffect(() => {
     if (process.env.NODE_ENV === "production") return;
@@ -911,117 +1076,104 @@ export default function JourneyPage() {
 
   const advancedControlsContent =
     advancedOpen && advancedSlot ? (
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <section className="rounded-2xl border border-ink/10 bg-white p-4">
-          <p className="text-xs font-semibold uppercase tracking-[0.08em] text-slate">Funnel Structure</p>
-          <button
-            type="button"
-            className={`mt-3 rounded-full border px-3 py-2 text-xs ${
-              includeAdAwareness
-                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700"
-                : "border-ink/10 bg-white text-slate"
-            }`}
-            onClick={() => setIncludeAdAwarenessAndQuery(!includeAdAwareness)}
-          >
-            Include Ad Awareness: {includeAdAwareness ? "On" : "Off"}
-          </button>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate">Benchmark</span>
-            {(["selection", "global"] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => setBenchmarkMode(mode)}
-                className={`rounded-full border px-3 py-1 text-xs ${
-                  benchmarkMode === mode
-                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700"
-                    : "border-ink/10 text-slate"
-                }`}
-              >
-                {mode === "selection" ? "Selection Benchmark" : "Global Benchmark"}
-              </button>
-            ))}
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate">Brands</span>
-            {([false, true] as const).map((mode) => (
-              <button
-                key={mode ? "enabled" : "disabled"}
-                type="button"
-                onClick={() => setJourneyBrandsEnabledAndQuery(mode)}
-                disabled={mode && !canToggleBrands}
-                className={`rounded-full border px-3 py-1 text-xs ${
-                  brandsEnabled === mode
-                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700"
-                    : "border-ink/10 text-slate"
-                } disabled:cursor-not-allowed disabled:opacity-60`}
-              >
-                {mode ? "Enable" : "Disable"}
-              </button>
-            ))}
-            {!canToggleBrands && (
-              <span className="text-[11px] text-slate">Sin permiso para habilitar Brands.</span>
-            )}
-          </div>
-        </section>
+      <div className="max-h-[68vh] overflow-auto rounded-2xl border border-ink/10 bg-white/90 p-3">
+        <div className="grid gap-3 xl:grid-cols-5">
+          <details open className="rounded-xl border border-ink/10 bg-white p-3 xl:col-span-4">
+            <summary className="cursor-pointer text-xs font-semibold uppercase tracking-[0.08em] text-slate">
+              Funnel Structure
+            </summary>
+            <div className="mt-3">
+              <div className="grid gap-3 lg:grid-cols-3">
+                <div className="rounded-xl border border-ink/10 bg-white p-2.5">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-slate">
+                    Funnel Stages
+                  </div>
+                  <button
+                    type="button"
+                    className={`rounded-full border px-3 py-2 text-xs ${
+                      includeAdAwareness
+                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700"
+                        : "border-ink/10 bg-white text-slate"
+                    }`}
+                    onClick={() => setIncludeAdAwarenessAndQuery(!includeAdAwareness)}
+                  >
+                    Include Ad Awareness: {includeAdAwareness ? "On" : "Off"}
+                  </button>
+                </div>
+                <div className="rounded-xl border border-ink/10 bg-white p-2.5">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-slate">Benchmark</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {(["selection", "global"] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setBenchmarkMode(mode)}
+                        className={`rounded-full border px-3 py-1 text-xs ${
+                          benchmarkMode === mode
+                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700"
+                            : "border-ink/10 text-slate"
+                        }`}
+                      >
+                        {mode === "selection" ? "Selection Benchmark" : "Global Benchmark"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-ink/10 bg-white p-2.5">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-slate">Brands</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {([false, true] as const).map((mode) => (
+                      <button
+                        key={mode ? "enabled" : "disabled"}
+                        type="button"
+                        onClick={() => setJourneyBrandsEnabledAndQuery(mode)}
+                        disabled={mode && !canToggleBrands}
+                        className={`rounded-full border px-3 py-1 text-xs ${
+                          brandsEnabled === mode
+                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700"
+                            : "border-ink/10 text-slate"
+                        } disabled:cursor-not-allowed disabled:opacity-60`}
+                      >
+                        {mode ? "Enable" : "Disable"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              {!canToggleBrands && (
+                <div className="mt-2 text-[11px] text-slate">Sin permiso para habilitar Brands.</div>
+              )}
+            </div>
+          </details>
 
-        <section className="rounded-2xl border border-ink/10 bg-white p-4 md:col-span-2 xl:col-span-1">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-slate">Time Animation</p>
-          <TimeScrubber
-            enabled={timeMode}
-            timeBuckets={timeBuckets}
-            selectedBucket={selectedTimeBucket}
-            isPlaying={isPlaying}
-            speed={playSpeed}
-            onToggleEnabled={(next) => {
-              setTimeMode(next);
-              if (!next) {
-                setSelectedTimeBucket(null);
-                setIsPlaying(false);
-              }
-            }}
-            onSelectBucket={(bucket) => {
-              setSelectedTimeBucket(bucket);
-              setIsPlaying(false);
-            }}
-            onPrev={() => {
-              if (!timeBuckets.length) return;
-              setIsPlaying(false);
-              setSelectedTimeBucket((prev) => {
-                const idx = prev ? timeBuckets.indexOf(prev) : 0;
-                return timeBuckets[Math.max(0, idx - 1)];
-              });
-            }}
-            onNext={() => {
-              if (!timeBuckets.length) return;
-              setIsPlaying(false);
-              setSelectedTimeBucket((prev) => {
-                const idx = prev ? timeBuckets.indexOf(prev) : -1;
-                return timeBuckets[Math.min(timeBuckets.length - 1, idx + 1)];
-              });
-            }}
-            onTogglePlay={() => setIsPlaying((prev) => !prev)}
-            onSpeedChange={setPlaySpeed}
-          />
-        </section>
-
-        <section className="rounded-2xl border border-ink/10 bg-white p-4 md:col-span-2 xl:col-span-1">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-slate">Focus Mode</p>
-          <FocusBar
-            availableBrands={availableBrands}
-            focusBrand={focusBrand}
-            compareBrand={compareBrand}
-            onFocusBrandChange={(brand) => {
-              setFocusBrand(brand);
-              if (brand && compareBrand === brand) setCompareBrand(null);
-            }}
-            onCompareBrandChange={setCompareBrand}
-            onClearFocus={() => {
-              setFocusBrand(null);
-              setCompareBrand(null);
-            }}
-          />
-        </section>
+          <details className="rounded-xl border border-ink/10 bg-white p-3 xl:col-span-1">
+            <summary className="cursor-pointer text-xs font-semibold uppercase tracking-[0.08em] text-slate">
+              Focus Mode
+            </summary>
+            <div className="mt-3">
+              {brandsEnabled ? (
+                <FocusBar
+                  availableBrands={availableBrands}
+                  focusBrand={focusBrand}
+                  compareBrand={compareBrand}
+                  onFocusBrandChange={(brand) => {
+                    setFocusBrand(brand);
+                    if (brand && compareBrand === brand) setCompareBrand(null);
+                  }}
+                  onCompareBrandChange={setCompareBrand}
+                  onClearFocus={() => {
+                    setFocusBrand(null);
+                    setCompareBrand(null);
+                  }}
+                />
+              ) : (
+                <p className="text-sm text-slate">
+                  Focus Mode se habilita cuando Brands esta en modo <strong>Enable</strong>.
+                </p>
+              )}
+            </div>
+          </details>
+        </div>
       </div>
     ) : null;
 
@@ -1055,7 +1207,6 @@ export default function JourneyPage() {
           title="Benchmark Funnel"
           subtitle="Comparativa entre Selection Benchmark y Global Benchmark."
           primaryLegendLabel="Selection Benchmark"
-          timeBucketLabel={timeMode ? selectedTimeBucket : null}
         />
         {isBenchmarkUpdating && (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-[2rem] border border-amber-500/25 bg-white/55 backdrop-blur-[1px]">
@@ -1073,13 +1224,39 @@ export default function JourneyPage() {
             selectedBrandNames={selectedBrands}
             focusBrandName={focusBrand}
             compareBrandName={compareBrand}
-            timeBucketLabel={timeMode ? selectedTimeBucket : null}
             benchmarkLabel={benchmarkLabel}
           />
           {isBrandUpdating && (
             <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-[2rem] border border-amber-500/25 bg-white/55 backdrop-blur-[1px]">
               <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-700">
                 Updating Brands...
+              </span>
+            </div>
+          )}
+        </section>
+      )}
+      {!brandsEnabled && (
+        <section className="relative">
+          <HeroSankey
+            model={nonBrandJourneyModel}
+            selectedBrandNames={nonBrandFunnelEntityNames}
+            benchmarkLabel={benchmarkLabel}
+            title={hierarchyTitleByLevel[hierarchyLevel]}
+            subtitle={hierarchySubtitleByLevel[hierarchyLevel]}
+            primaryLegendLabel={hierarchyLegendByLevel[hierarchyLevel]}
+            itemLabelPlural={
+              hierarchyLevel === "sector"
+                ? "sectores"
+                : hierarchyLevel === "subsector"
+                  ? "subsectores"
+                  : "categorias"
+            }
+            maxVisibleItems={hierarchyLevel === "sector" ? 5 : Math.max(nonBrandFunnelEntityNames.length, 1)}
+          />
+          {isBenchmarkUpdating && (
+            <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-[2rem] border border-amber-500/25 bg-white/40">
+              <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-700">
+                Updating Hierarchy...
               </span>
             </div>
           )}
@@ -1093,6 +1270,7 @@ export default function JourneyPage() {
           benchmarkLabel={benchmarkLabel}
           focusedBrandName={focusBrand}
           onFocusBrand={(brand) => {
+            if (!brandsEnabled) return;
             setFocusBrand(brand);
             if (brand && compareBrand === brand) setCompareBrand(null);
           }}

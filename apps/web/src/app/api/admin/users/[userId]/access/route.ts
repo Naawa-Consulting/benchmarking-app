@@ -44,8 +44,12 @@ export async function GET(
     supabaseAdminPostgrest(
       `user_access_scopes?select=scope_type,scope_key&user_id=eq.${encodeURIComponent(userId)}`
     ),
-    supabaseAdminPostgrest("study_catalog?select=sector,subsector,category"),
+    supabaseAdminPostgrest("study_catalog?select=market_sector,market_subsector,market_category"),
   ]);
+  const effectiveTaxonomyResult =
+    taxonomyResult.response.ok
+      ? taxonomyResult
+      : await supabaseAdminPostgrest("study_catalog?select=sector,subsector,category");
 
   const canToggleBrands =
     Array.isArray(permissionsResult.data) &&
@@ -53,44 +57,60 @@ export async function GET(
       (row) => row.permission === "brands.toggle"
     );
 
-  const scopes = { sector: [] as string[], subsector: [] as string[], category: [] as string[] };
+  const scopes = { market_sector: [] as string[], market_subsector: [] as string[], market_category: [] as string[] };
   if (Array.isArray(scopesResult.data)) {
     for (const row of scopesResult.data as Array<{ scope_type?: string; scope_key?: string }>) {
       const key = typeof row.scope_key === "string" ? row.scope_key.trim() : "";
       const type = typeof row.scope_type === "string" ? row.scope_type.toLowerCase() : "";
       if (!key) continue;
-      if (type === "sector") scopes.sector.push(key);
-      if (type === "subsector") scopes.subsector.push(key);
-      if (type === "category") scopes.category.push(key);
+      if (type === "market_sector") scopes.market_sector.push(key);
+      if (type === "market_subsector") scopes.market_subsector.push(key);
+      if (type === "market_category") scopes.market_category.push(key);
     }
   }
 
-  const available = { sector: [] as string[], subsector: [] as string[], category: [] as string[] };
-  if (Array.isArray(taxonomyResult.data)) {
+  const available = { market_sector: [] as string[], market_subsector: [] as string[], market_category: [] as string[] };
+  if (Array.isArray(effectiveTaxonomyResult.data)) {
     const sectorSet = new Set<string>();
     const subsectorSet = new Set<string>();
     const categorySet = new Set<string>();
-    for (const row of taxonomyResult.data as Array<{
+    for (const row of effectiveTaxonomyResult.data as Array<{
+      market_sector?: string | null;
+      market_subsector?: string | null;
+      market_category?: string | null;
       sector?: string | null;
       subsector?: string | null;
       category?: string | null;
     }>) {
-      if (typeof row.sector === "string" && row.sector.trim()) sectorSet.add(row.sector.trim());
-      if (typeof row.subsector === "string" && row.subsector.trim()) subsectorSet.add(row.subsector.trim());
-      if (typeof row.category === "string" && row.category.trim()) categorySet.add(row.category.trim());
+      const sector = row.market_sector || row.sector;
+      const subsector = row.market_subsector || row.subsector;
+      const category = row.market_category || row.category;
+      if (typeof sector === "string" && sector.trim()) sectorSet.add(sector.trim());
+      if (typeof row.market_subsector === "string" && row.market_subsector.trim()) {
+        subsectorSet.add(row.market_subsector.trim());
+      }
+      if (typeof subsector === "string" && subsector.trim()) {
+        subsectorSet.add(subsector.trim());
+      }
+      if (typeof row.market_category === "string" && row.market_category.trim()) {
+        categorySet.add(row.market_category.trim());
+      }
+      if (typeof category === "string" && category.trim()) {
+        categorySet.add(category.trim());
+      }
     }
-    available.sector = Array.from(sectorSet).sort();
-    available.subsector = Array.from(subsectorSet).sort();
-    available.category = Array.from(categorySet).sort();
+    available.market_sector = Array.from(sectorSet).sort();
+    available.market_subsector = Array.from(subsectorSet).sort();
+    available.market_category = Array.from(categorySet).sort();
   }
 
   return NextResponse.json({
     user_id: userId,
     can_toggle_brands: canToggleBrands,
     scopes: {
-      sector: normalizeStrings(scopes.sector),
-      subsector: normalizeStrings(scopes.subsector),
-      category: normalizeStrings(scopes.category),
+      market_sector: normalizeStrings(scopes.market_sector),
+      market_subsector: normalizeStrings(scopes.market_subsector),
+      market_category: normalizeStrings(scopes.market_category),
     },
     available,
   });
@@ -110,13 +130,13 @@ export async function PATCH(
 
   const payload = (await request.json().catch(() => ({}))) as {
     can_toggle_brands?: boolean;
-    scopes?: { sector?: string[]; subsector?: string[]; category?: string[] };
+    scopes?: { market_sector?: string[]; market_subsector?: string[]; market_category?: string[] };
   };
 
   const canToggleBrands = Boolean(payload.can_toggle_brands);
-  const sector = normalizeStrings(payload.scopes?.sector ?? []);
-  const subsector = normalizeStrings(payload.scopes?.subsector ?? []);
-  const category = normalizeStrings(payload.scopes?.category ?? []);
+  const sector = normalizeStrings(payload.scopes?.market_sector ?? []);
+  const subsector = normalizeStrings(payload.scopes?.market_subsector ?? []);
+  const category = normalizeStrings(payload.scopes?.market_category ?? []);
 
   const deletePerms = await supabaseAdminPostgrest(`user_permissions?user_id=eq.${encodeURIComponent(userId)}`, {
     method: "DELETE",
@@ -156,9 +176,9 @@ export async function PATCH(
   }
 
   const scopeRows = [
-    ...sector.map((scope_key) => ({ user_id: userId, scope_type: "sector", scope_key })),
-    ...subsector.map((scope_key) => ({ user_id: userId, scope_type: "subsector", scope_key })),
-    ...category.map((scope_key) => ({ user_id: userId, scope_type: "category", scope_key })),
+    ...sector.map((scope_key) => ({ user_id: userId, scope_type: "market_sector", scope_key })),
+    ...subsector.map((scope_key) => ({ user_id: userId, scope_type: "market_subsector", scope_key })),
+    ...category.map((scope_key) => ({ user_id: userId, scope_type: "market_category", scope_key })),
   ];
 
   if (scopeRows.length) {
@@ -179,6 +199,6 @@ export async function PATCH(
     ok: true,
     user_id: userId,
     can_toggle_brands: canToggleBrands,
-    scopes: { sector, subsector, category },
+    scopes: { market_sector: sector, market_subsector: subsector, market_category: category },
   });
 }

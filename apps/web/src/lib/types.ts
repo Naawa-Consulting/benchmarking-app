@@ -13,6 +13,10 @@ export interface Study {
   sector?: string | null;
   subsector?: string | null;
   category?: string | null;
+  market_sector?: string | null;
+  market_subsector?: string | null;
+  market_category?: string | null;
+  market_source?: "rule" | "manual" | null;
 }
 
 export interface JourneyPoint {
@@ -109,12 +113,24 @@ export interface TaxonomyItem {
   category: string;
 }
 
+export interface MarketTaxonomyItem {
+  market_sector: string;
+  market_subsector: string;
+  market_category: string;
+}
+
 export interface StudyClassification {
   study_id: string;
   sector: string | null;
   subsector: string | null;
   category: string | null;
+  market_sector?: string | null;
+  market_subsector?: string | null;
+  market_category?: string | null;
+  market_source?: "rule" | "manual" | null;
 }
+
+export type TaxonomyView = "market" | "standard";
 
 export interface StudyConfig {
   study_id: string;
@@ -158,9 +174,9 @@ export interface AdminUserItem {
   email_confirmed_at: string | null;
   can_toggle_brands: boolean;
   scope_counts: {
-    sector: number;
-    subsector: number;
-    category: number;
+    market_sector: number;
+    market_subsector: number;
+    market_category: number;
   };
 }
 
@@ -168,14 +184,14 @@ export interface UserAccessPayload {
   user_id: string;
   can_toggle_brands: boolean;
   scopes: {
-    sector: string[];
-    subsector: string[];
-    category: string[];
+    market_sector: string[];
+    market_subsector: string[];
+    market_category: string[];
   };
   available: {
-    sector: string[];
-    subsector: string[];
-    category: string[];
+    market_sector: string[];
+    market_subsector: string[];
+    market_category: string[];
   };
 }
 

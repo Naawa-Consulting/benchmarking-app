@@ -3,12 +3,12 @@ import { NextRequest } from "next/server";
 
 export type BbsRole = "owner" | "admin" | "analyst" | "viewer";
 
-export type ScopeType = "sector" | "subsector" | "category";
+export type ScopeType = "market_sector" | "market_subsector" | "market_category";
 
 export type EffectiveScopes = {
-  sector: string[];
-  subsector: string[];
-  category: string[];
+  market_sector: string[];
+  market_subsector: string[];
+  market_category: string[];
 };
 
 export type RequestAuthz = {
@@ -149,22 +149,22 @@ async function fetchUserScopesWithServiceKey(userId: string): Promise<EffectiveS
   const rows = (await response.json()) as Array<{ scope_type?: string; scope_key?: string }>;
   if (!Array.isArray(rows)) return null;
 
-  const sector = new Set<string>();
-  const subsector = new Set<string>();
-  const category = new Set<string>();
+  const marketSector = new Set<string>();
+  const marketSubsector = new Set<string>();
+  const marketCategory = new Set<string>();
   for (const row of rows) {
     const key = typeof row.scope_key === "string" ? row.scope_key.trim() : "";
     const type = typeof row.scope_type === "string" ? row.scope_type.trim().toLowerCase() : "";
     if (!key) continue;
-    if (type === "sector") sector.add(key);
-    if (type === "subsector") subsector.add(key);
-    if (type === "category") category.add(key);
+    if (type === "market_sector" || type === "sector") marketSector.add(key);
+    if (type === "market_subsector" || type === "subsector") marketSubsector.add(key);
+    if (type === "market_category" || type === "category") marketCategory.add(key);
   }
 
   return {
-    sector: Array.from(sector).sort(),
-    subsector: Array.from(subsector).sort(),
-    category: Array.from(category).sort(),
+    market_sector: Array.from(marketSector).sort(),
+    market_subsector: Array.from(marketSubsector).sort(),
+    market_category: Array.from(marketCategory).sort(),
   };
 }
 
@@ -190,7 +190,7 @@ export async function getRequestAuthz(request: NextRequest): Promise<RequestAuth
       permissions: ["*"],
       can_toggle_brands: true,
       is_admin_module_allowed: true,
-      effective_scopes: { sector: [], subsector: [], category: [] },
+      effective_scopes: { market_sector: [], market_subsector: [], market_category: [] },
       can_mutate: true,
       is_viewer: false,
     };
@@ -210,7 +210,7 @@ export async function getRequestAuthz(request: NextRequest): Promise<RequestAuth
       permissions: [],
       can_toggle_brands: false,
       is_admin_module_allowed: false,
-      effective_scopes: { sector: [], subsector: [], category: [] },
+      effective_scopes: { market_sector: [], market_subsector: [], market_category: [] },
       can_mutate: false,
       is_viewer: true,
     };
@@ -239,7 +239,7 @@ export async function getRequestAuthz(request: NextRequest): Promise<RequestAuth
       permissions: [],
       can_toggle_brands: false,
       is_admin_module_allowed: false,
-      effective_scopes: { sector: [], subsector: [], category: [] },
+      effective_scopes: { market_sector: [], market_subsector: [], market_category: [] },
       can_mutate: false,
       is_viewer: true,
     };
@@ -282,13 +282,13 @@ export async function getRequestAuthz(request: NextRequest): Promise<RequestAuth
   let effectiveScopes =
     (await fetchUserScopesWithServiceKey(user.id)) ??
     ({
-      sector: [],
-      subsector: [],
-      category: [],
+      market_sector: [],
+      market_subsector: [],
+      market_category: [],
     } satisfies EffectiveScopes);
 
   if (!effectiveScopes) {
-    effectiveScopes = { sector: [], subsector: [], category: [] };
+    effectiveScopes = { market_sector: [], market_subsector: [], market_category: [] };
   }
 
   const mergedPermissions = Array.from(new Set([...(permissions ?? []), ...userPermissionRows]));

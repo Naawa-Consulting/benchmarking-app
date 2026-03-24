@@ -25,6 +25,7 @@ import {
   getDataStudiesDetailed,
   getStudyClassificationDetailed,
   getTaxonomyDetailed,
+  getMarketTaxonomyDetailed,
   pingHealthDetailed,
   rebuildBaseDetailed,
   runRulesDetailed,
@@ -47,6 +48,7 @@ import {
   StudyConfig,
   StudyRuleScope,
   StudyVariable,
+  MarketTaxonomyItem,
   TaxonomyItem,
 } from "../../lib/types";
 import JourneyDataValidationTables from "../../features/journey/components/JourneyDataValidationTables";
@@ -240,12 +242,17 @@ export default function RulesStudioPage() {
   const [scopeError, setScopeError] = useState<string | null>(null);
 
   const [taxonomyItems, setTaxonomyItems] = useState<TaxonomyItem[]>([]);
+  const [marketTaxonomyItems, setMarketTaxonomyItems] = useState<MarketTaxonomyItem[]>([]);
   const [taxonomyState, setTaxonomyState] = useState<ActionState>("idle");
   const [classificationState, setClassificationState] = useState<ActionState>("idle");
   const [classification, setClassification] = useState<StudyClassification | null>(null);
   const [sector, setSector] = useState<string>("");
   const [subsector, setSubsector] = useState<string>("");
   const [category, setCategory] = useState<string>("");
+  const [marketSector, setMarketSector] = useState<string>("");
+  const [marketSubsector, setMarketSubsector] = useState<string>("");
+  const [marketCategory, setMarketCategory] = useState<string>("");
+  const [marketSource, setMarketSource] = useState<"rule" | "manual">("rule");
   const [classificationError, setClassificationError] = useState<string | null>(null);
 
   const [studyConfigState, setStudyConfigState] = useState<ActionState>("idle");
@@ -410,6 +417,36 @@ export default function RulesStudioPage() {
     ).sort();
   }, [taxonomyItems, sector, subsector]);
 
+  const marketSectors = useMemo(() => {
+    return Array.from(new Set(marketTaxonomyItems.map((item) => item.market_sector))).sort();
+  }, [marketTaxonomyItems]);
+
+  const marketSubsectors = useMemo(() => {
+    if (!marketSector) return [];
+    return Array.from(
+      new Set(
+        marketTaxonomyItems
+          .filter((item) => item.market_sector === marketSector)
+          .map((item) => item.market_subsector)
+      )
+    ).sort();
+  }, [marketTaxonomyItems, marketSector]);
+
+  const marketCategories = useMemo(() => {
+    if (!marketSector || !marketSubsector) return [];
+    return Array.from(
+      new Set(
+        marketTaxonomyItems
+          .filter(
+            (item) =>
+              item.market_sector === marketSector &&
+              item.market_subsector === marketSubsector
+          )
+          .map((item) => item.market_category)
+      )
+    ).sort();
+  }, [marketTaxonomyItems, marketSector, marketSubsector]);
+
   useEffect(() => {
     const ping = async () => {
       const result = await pingHealthDetailed();
@@ -468,11 +505,23 @@ export default function RulesStudioPage() {
   useEffect(() => {
     const loadTaxonomy = async () => {
       setTaxonomyState("loading");
-      const result = await getTaxonomyDetailed();
-      setLastResponse(result);
-      if (result.ok && result.data && typeof result.data === "object") {
-        const data = result.data as { items?: TaxonomyItem[] };
-        setTaxonomyItems(Array.isArray(data.items) ? data.items : []);
+      const [standardResult, marketResult] = await Promise.all([
+        getTaxonomyDetailed(),
+        getMarketTaxonomyDetailed(),
+      ]);
+      setLastResponse(marketResult.ok ? marketResult : standardResult);
+      if (
+        standardResult.ok &&
+        standardResult.data &&
+        typeof standardResult.data === "object" &&
+        marketResult.ok &&
+        marketResult.data &&
+        typeof marketResult.data === "object"
+      ) {
+        const standardData = standardResult.data as { items?: TaxonomyItem[] };
+        const marketData = marketResult.data as { items?: MarketTaxonomyItem[] };
+        setTaxonomyItems(Array.isArray(standardData.items) ? standardData.items : []);
+        setMarketTaxonomyItems(Array.isArray(marketData.items) ? marketData.items : []);
         setTaxonomyState("success");
       } else {
         setTaxonomyState("error");
@@ -553,6 +602,10 @@ export default function RulesStudioPage() {
         setSector(data.sector || "");
         setSubsector(data.subsector || "");
         setCategory(data.category || "");
+        setMarketSector(data.market_sector || "");
+        setMarketSubsector(data.market_subsector || "");
+        setMarketCategory(data.market_category || "");
+        setMarketSource(data.market_source === "manual" ? "manual" : "rule");
         setClassificationState("success");
         setClassificationError(null);
       } else {
@@ -1047,10 +1100,15 @@ export default function RulesStudioPage() {
   const handleSaveClassification = async () => {
     if (!selectedStudyId) return;
     setClassificationState("loading");
+    const hasManualMarket = Boolean(marketSector || marketSubsector || marketCategory);
     const payload = {
       sector: sector || null,
       subsector: subsector || null,
       category: category || null,
+      market_sector: marketSector || null,
+      market_subsector: marketSubsector || null,
+      market_category: marketCategory || null,
+      market_source: hasManualMarket ? "manual" : "rule",
     };
     const result = await saveStudyClassificationDetailed(selectedStudyId, payload);
     setLastResponse(result);
@@ -1062,10 +1120,23 @@ export default function RulesStudioPage() {
       setStudies((prev) =>
         prev.map((study) =>
           study.id === selectedStudyId
-            ? { ...study, sector: data.sector, subsector: data.subsector, category: data.category }
+            ? {
+                ...study,
+                sector: data.sector,
+                subsector: data.subsector,
+                category: data.category,
+                market_sector: data.market_sector,
+                market_subsector: data.market_subsector,
+                market_category: data.market_category,
+                market_source: data.market_source,
+              }
             : study
         )
       );
+      setMarketSector(data.market_sector || "");
+      setMarketSubsector(data.market_subsector || "");
+      setMarketCategory(data.market_category || "");
+      setMarketSource(data.market_source === "manual" ? "manual" : "rule");
     } else {
       setClassificationState("error");
       setClassificationError(result.error || "Failed to save classification.");
@@ -1076,6 +1147,10 @@ export default function RulesStudioPage() {
     setSector("");
     setSubsector("");
     setCategory("");
+    setMarketSector("");
+    setMarketSubsector("");
+    setMarketCategory("");
+    setMarketSource("rule");
     await handleSaveClassification();
   };
 
@@ -1237,6 +1312,13 @@ export default function RulesStudioPage() {
 
   const handlePublish = async (force: boolean) => {
     if (!selectedStudyId) return;
+    const missingStandard = !sector || !subsector || !category;
+    const missingMarket = !marketSector || !marketSubsector || !marketCategory;
+    if (missingStandard || missingMarket) {
+      setPublishState("error");
+      setClassificationError("Classification incomplete: complete Taxonomía Estándar and Market Lens before publish.");
+      return;
+    }
     setPublishState("loading");
     const result = await ensureJourneyDetailed(selectedStudyId, force);
     setPublishDetails(result);
@@ -1332,10 +1414,17 @@ export default function RulesStudioPage() {
               </select>
               <p className="mt-2 text-xs text-slate">
                 {classification?.sector
-                  ? `${classification.sector} → ${classification.subsector || "—"} → ${
+                  ? `Taxonomía Estándar: ${classification.sector} → ${classification.subsector || "—"} → ${
                       classification.category || "—"
                     }`
                   : "Unassigned"}
+              </p>
+              <p className="mt-1 text-xs text-slate">
+                {classification?.market_sector
+                  ? `Market Lens (${classification.market_source || "rule"}): ${classification.market_sector} → ${
+                      classification.market_subsector || "—"
+                    } → ${classification.market_category || "—"}`
+                  : "Market Lens: Unassigned"}
               </p>
             </div>
 
@@ -1716,59 +1805,130 @@ export default function RulesStudioPage() {
               <span className="text-xs text-slate">{classificationState}</span>
             </div>
             {classificationError && <p className="text-xs text-red-600">{classificationError}</p>}
-            <div>
-              <p className="text-xs text-slate">Sector</p>
-              <select
-                className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
-                value={sector}
-                onChange={(event) => {
-                  setSector(event.target.value);
-                  setSubsector("");
-                  setCategory("");
-                }}
-              >
-                <option value="">Unassigned</option>
-                {sectors.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
-                  </option>
-                ))}
-              </select>
+            <div className="rounded-2xl border border-ink/10 bg-white p-3 space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate">Taxonomía Estándar</p>
+              <div>
+                <p className="text-xs text-slate">Sector</p>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={sector}
+                  onChange={(event) => {
+                    setSector(event.target.value);
+                    setSubsector("");
+                    setCategory("");
+                  }}
+                >
+                  <option value="">Unassigned</option>
+                  {sectors.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <p className="text-xs text-slate">Subsector</p>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={subsector}
+                  onChange={(event) => {
+                    setSubsector(event.target.value);
+                    setCategory("");
+                  }}
+                  disabled={!sector}
+                >
+                  <option value="">Unassigned</option>
+                  {subsectors.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <p className="text-xs text-slate">Category</p>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={category}
+                  onChange={(event) => setCategory(event.target.value)}
+                  disabled={!sector || !subsector}
+                >
+                  <option value="">Unassigned</option>
+                  {categories.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
-            <div>
-              <p className="text-xs text-slate">Subsector</p>
-              <select
-                className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
-                value={subsector}
-                onChange={(event) => {
-                  setSubsector(event.target.value);
-                  setCategory("");
-                }}
-                disabled={!sector}
-              >
-                <option value="">Unassigned</option>
-                {subsectors.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <p className="text-xs text-slate">Category</p>
-              <select
-                className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
-                value={category}
-                onChange={(event) => setCategory(event.target.value)}
-                disabled={!sector || !subsector}
-              >
-                <option value="">Unassigned</option>
-                {categories.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
-                  </option>
-                ))}
-              </select>
+
+            <div className="rounded-2xl border border-ink/10 bg-white p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate">Market Lens</p>
+                <span className="rounded-full border border-ink/10 px-2 py-0.5 text-[10px] uppercase text-slate">
+                  {marketSource}
+                </span>
+              </div>
+              <div>
+                <p className="text-xs text-slate">Macrosector</p>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={marketSector}
+                  onChange={(event) => {
+                    setMarketSector(event.target.value);
+                    setMarketSubsector("");
+                    setMarketCategory("");
+                    setMarketSource("manual");
+                  }}
+                >
+                  <option value="">Auto (rule)</option>
+                  {marketSectors.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <p className="text-xs text-slate">Segmento</p>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={marketSubsector}
+                  onChange={(event) => {
+                    setMarketSubsector(event.target.value);
+                    setMarketCategory("");
+                    setMarketSource("manual");
+                  }}
+                  disabled={!marketSector}
+                >
+                  <option value="">Auto (rule)</option>
+                  {marketSubsectors.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <p className="text-xs text-slate">Categoría Comercial</p>
+                <select
+                  className="mt-2 w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm"
+                  value={marketCategory}
+                  onChange={(event) => {
+                    setMarketCategory(event.target.value);
+                    setMarketSource("manual");
+                  }}
+                  disabled={!marketSector || !marketSubsector}
+                >
+                  <option value="">Auto (rule)</option>
+                  {marketCategories.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
             <div className="flex flex-wrap gap-2">
               <button

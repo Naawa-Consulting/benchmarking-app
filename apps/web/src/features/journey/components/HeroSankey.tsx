@@ -23,6 +23,8 @@ type HeroSankeyProps = {
   title?: string;
   subtitle?: string;
   primaryLegendLabel?: string;
+  itemLabelPlural?: string;
+  maxVisibleItems?: number;
 };
 
 type SankeyUnit = {
@@ -460,6 +462,8 @@ export default function HeroSankey({
   title = "Brand Funnel",
   subtitle,
   primaryLegendLabel = "Brand",
+  itemLabelPlural = "marcas",
+  maxVisibleItems = 5,
 }: HeroSankeyProps) {
   const [showBenchmarkOverlay, setShowBenchmarkOverlay] = useState(true);
 
@@ -492,8 +496,8 @@ export default function HeroSankey({
         if (indexDelta !== 0) return indexDelta;
         return (b.totalConversion || 0) - (a.totalConversion || 0);
       });
-    return sorted.slice(0, 5);
-  }, [model.journeyIndexByBrand, selectedBrands]);
+    return sorted.slice(0, Math.max(1, maxVisibleItems));
+  }, [maxVisibleItems, model.journeyIndexByBrand, selectedBrands]);
 
   const hiddenCount = Math.max(0, selectedBrands.length - limitedBrands.length);
 
@@ -575,7 +579,7 @@ export default function HeroSankey({
       {!focusBrandName && hiddenCount > 0 && (
         <div className="mt-4">
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs text-amber-700">
-            Mostrando 5 de {selectedBrands.length} marcas (ajusta filtros).
+            Mostrando {limitedBrands.length} de {selectedBrands.length} {itemLabelPlural} (ajusta filtros).
           </span>
         </div>
       )}

@@ -4,6 +4,7 @@ import re
 
 from fastapi import APIRouter, HTTPException, Query
 
+from app.data.market_lens import resolve_classification
 from app.data.ingest_from_landing import ensure_raw_from_landing
 from app.data.warehouse import get_duckdb_connection, get_repo_root, load_parquet_as_view
 from app.models.schemas import PreviewVariable, Study, StudyPreviewResponse
@@ -29,18 +30,30 @@ def _classification_for_study(root: Path, study_id: str) -> dict[str, str | None
         / f"study_id={study_id}.json"
     )
     if not path.exists():
-        return {"sector": None, "subsector": None, "category": None}
+        return {
+            "sector": None,
+            "subsector": None,
+            "category": None,
+            "market_sector": None,
+            "market_subsector": None,
+            "market_category": None,
+            "market_source": None,
+        }
     try:
         import json
 
-        data = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return {"sector": None, "subsector": None, "category": None}
-    return {
-        "sector": data.get("sector"),
-        "subsector": data.get("subsector"),
-        "category": data.get("category"),
-    }
+        return {
+            "sector": None,
+            "subsector": None,
+            "category": None,
+            "market_sector": None,
+            "market_subsector": None,
+            "market_category": None,
+            "market_source": None,
+        }
+    return resolve_classification(payload, root=root)
 
 
 @router.get("/")
@@ -81,6 +94,10 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
                         sector=classification["sector"],
                         subsector=classification["subsector"],
                         category=classification["category"],
+                        market_sector=classification["market_sector"],
+                        market_subsector=classification["market_subsector"],
+                        market_category=classification["market_category"],
+                        market_source=classification["market_source"],
                     )
                 )
                 seen.add(study_id)
@@ -101,6 +118,10 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
                 sector=classification["sector"],
                 subsector=classification["subsector"],
                 category=classification["category"],
+                market_sector=classification["market_sector"],
+                market_subsector=classification["market_subsector"],
+                market_category=classification["market_category"],
+                market_source=classification["market_source"],
             )
         )
         seen.add(study_id)
@@ -124,6 +145,10 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
                     sector=classification["sector"],
                     subsector=classification["subsector"],
                     category=classification["category"],
+                    market_sector=classification["market_sector"],
+                    market_subsector=classification["market_subsector"],
+                    market_category=classification["market_category"],
+                    market_source=classification["market_source"],
                 )
             )
 

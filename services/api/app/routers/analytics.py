@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.data.demographics import load_demographics_config, normalize_demographics_config
+from app.data.market_lens import resolve_classification
 from app.data.warehouse import get_duckdb_connection, get_repo_root, load_parquet_as_view
 from app.models.schemas import JourneyPoint, JourneyResponse
 
@@ -134,6 +135,9 @@ def _parse_filters(payload: dict | None) -> dict:
     return {
         "study_ids": study_ids,
         "brands": brands,
+        "taxonomy_view": "standard"
+        if str(payload.get("taxonomy_view") or "").strip().lower() == "standard"
+        else "market",
         "years": normalized_years,
         "sector": payload.get("sector"),
         "subsector": payload.get("subsector"),
@@ -146,6 +150,22 @@ def _parse_filters(payload: dict | None) -> dict:
         "date_grain": payload.get("date_grain") or "Q",
         "date_from": payload.get("date_from"),
         "date_to": payload.get("date_to"),
+}
+
+
+def _taxonomy_key(filters: dict, key: str) -> str:
+    if filters.get("taxonomy_view") == "standard":
+        return key
+    return f"market_{key}"
+
+
+def _effective_classification_values(
+    classification: dict[str, str | None], filters: dict
+) -> dict[str, str]:
+    return {
+        "sector": (classification.get(_taxonomy_key(filters, "sector")) or "").strip() or "Unassigned",
+        "subsector": (classification.get(_taxonomy_key(filters, "subsector")) or "").strip() or "Unassigned",
+        "category": (classification.get(_taxonomy_key(filters, "category")) or "").strip() or "Unassigned",
     }
 
 
@@ -295,27 +315,30 @@ def _build_series_metric_payload(period_keys: list[str], value_by_period: dict[s
 
 
 def _resolve_tracking_breakdown(filters: dict) -> tuple[str, str]:
+    labels = (
+        ("Macrosector", "Segmento", "Categoría comercial")
+        if filters.get("taxonomy_view") == "market"
+        else ("Sector", "Subsector", "Category")
+    )
     if not filters.get("sector"):
-        return "sector", "Sector"
+        return "sector", labels[0]
     if not filters.get("subsector"):
-        return "subsector", "Subsector"
+        return "subsector", labels[1]
     if not filters.get("category"):
-        return "category", "Category"
+        return "category", labels[2]
     return "brand", "Brand"
 
 
 def _tracking_entity_name(
     breakdown: str,
     classification: dict[str, str | None],
+    filters: dict,
     brand_name: str | None = None,
 ) -> str:
     if breakdown == "brand":
         return (brand_name or "").strip() or "Unassigned"
-    if breakdown == "sector":
-        return (classification.get("sector") or "").strip() or "Unassigned"
-    if breakdown == "subsector":
-        return (classification.get("subsector") or "").strip() or "Unassigned"
-    return (classification.get("category") or "").strip() or "Unassigned"
+    key = _taxonomy_key(filters, breakdown)
+    return (classification.get(key) or "").strip() or "Unassigned"
 
 
 def _tracking_series_filtered(filters: dict) -> dict:
@@ -438,7 +461,7 @@ def _tracking_series_filtered(filters: dict) -> dict:
                     continue
                 if resolved_breakdown == "brand" and filters.get("brands") and brand_name not in filters.get("brands"):
                     continue
-                entity_name = _tracking_entity_name(resolved_breakdown, classification, brand_name)
+                entity_name = _tracking_entity_name(resolved_breakdown, classification, filters, brand_name)
                 entity_period_buckets.setdefault(entity_name, {}).setdefault(period_key, []).append(row)
 
         for q_key, touchpoint_rows in touchpoint_rows_by_quarter.items():
@@ -587,11 +610,7 @@ def _collect_journey_rows(
             local_classification_cache[study_id] = classification
         if not _study_matches_taxonomy(filters, classification):
             continue
-        safe_classification = {
-            "sector": classification.get("sector") or "Unassigned",
-            "subsector": classification.get("subsector") or "Unassigned",
-            "category": classification.get("category") or "Unassigned",
-        }
+        safe_classification = _effective_classification_values(classification, filters)
         filtered_rows = _compute_table_rows_filtered(study_id, filters)
         if filtered_rows:
             matched_studies.append(study_id)
@@ -704,9 +723,10 @@ def _study_matches_taxonomy(filters: dict, classification: dict[str, str | None]
         value = filters.get(key)
         if not value:
             continue
-        if not classification.get(key):
+        taxonomy_key = _taxonomy_key(filters, key)
+        if not classification.get(taxonomy_key):
             return False
-        if classification.get(key) != value:
+        if classification.get(taxonomy_key) != value:
             return False
     return True
 
@@ -878,11 +898,20 @@ def _classification_for_study(root: Path, study_id: str) -> dict[str, str | None
         / f"study_id={study_id}.json"
     )
     if not classification_path.exists():
-        return {"sector": None, "subsector": None, "category": None}
+        return {
+            "sector": None,
+            "subsector": None,
+            "category": None,
+            "market_sector": None,
+            "market_subsector": None,
+            "market_category": None,
+            "market_source": None,
+        }
     try:
-        return json.loads(classification_path.read_text(encoding="utf-8"))
+        payload = json.loads(classification_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        return json.loads(classification_path.read_text(encoding="utf-8-sig"))
+        payload = json.loads(classification_path.read_text(encoding="utf-8-sig"))
+    return resolve_classification(payload, root=root)
 
 
 def _compute_table_rows_internal(
@@ -1969,15 +1998,25 @@ def _journey_table_multi_filtered(
 @router.get("/journey/table_multi")
 def journey_table_multi(
     studies: str | None = Query(None, description="Comma-separated study ids"),
+    sector: str | None = Query(None),
+    subsector: str | None = Query(None),
+    category: str | None = Query(None),
+    taxonomy_view: str | None = Query("market", description="market|standard"),
     limit_mode: str = Query("top10", description="top10|top25|all"),
     sort_by: str = Query("brand_awareness", description="Metric to sort by"),
     sort_dir: str = Query("desc", description="asc|desc"),
     include_global_benchmark: bool = Query(False, description="Include selection and global rows in one response"),
     response_mode: str = Query("full", description="full|benchmark_global|benchmark_selection"),
 ) -> dict:
-    filters = _parse_filters({})
-    if studies:
-        filters["study_ids"] = [study.strip() for study in studies.split(",") if study.strip()]
+    filters = _parse_filters(
+        {
+            "study_ids": studies,
+            "sector": sector,
+            "subsector": subsector,
+            "category": category,
+            "taxonomy_view": taxonomy_view,
+        }
+    )
     return _journey_table_multi_filtered(
         filters, limit_mode, sort_by, sort_dir, include_global_benchmark, response_mode
     )
@@ -2030,11 +2069,7 @@ def _touchpoints_table_multi_filtered(
         classification = _classification_for_study(root, study_id)
         if not _study_matches_taxonomy(filters, classification):
             continue
-        safe_classification = {
-            "sector": classification.get("sector") or "Unassigned",
-            "subsector": classification.get("subsector") or "Unassigned",
-            "category": classification.get("category") or "Unassigned",
-        }
+        safe_classification = _effective_classification_values(classification, filters)
         filtered_rows = _compute_touchpoint_rows_filtered(study_id, filters)
         for row in filtered_rows:
             rows.append(
@@ -2071,13 +2106,23 @@ def _touchpoints_table_multi_filtered(
 @router.get("/touchpoints/table_multi")
 def touchpoints_table_multi(
     studies: str | None = Query(None, description="Comma-separated study ids"),
+    sector: str | None = Query(None),
+    subsector: str | None = Query(None),
+    category: str | None = Query(None),
+    taxonomy_view: str | None = Query("market", description="market|standard"),
     limit_mode: str = Query("top25", description="top10|top25|all"),
     sort_by: str = Query("recall", description="Metric to sort by"),
     sort_dir: str = Query("desc", description="asc|desc"),
 ) -> dict:
-    filters = _parse_filters({})
-    if studies:
-        filters["study_ids"] = [study.strip() for study in studies.split(",") if study.strip()]
+    filters = _parse_filters(
+        {
+            "study_ids": studies,
+            "sector": sector,
+            "subsector": subsector,
+            "category": category,
+            "taxonomy_view": taxonomy_view,
+        }
+    )
     return _touchpoints_table_multi_filtered(filters, limit_mode, sort_by, sort_dir)
 
 
@@ -2106,6 +2151,7 @@ def tracking_series_get(
     age_max: int | None = Query(None),
     years: str | None = Query(None, description="Comma-separated years"),
     brands: str | None = Query(None, description="Comma-separated brand names"),
+    taxonomy_view: str | None = Query("market", description="market|standard"),
 ) -> dict:
     filters = _parse_filters(
         {
@@ -2113,6 +2159,7 @@ def tracking_series_get(
             "sector": sector,
             "subsector": subsector,
             "category": category,
+            "taxonomy_view": taxonomy_view,
             "gender": gender,
             "nse": nse,
             "state": state,

@@ -485,6 +485,7 @@ export default function DemandNetworkPage() {
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ metric_mode: metric });
+    params.set("taxonomy_view", scope.taxonomyView);
     if (scope.studyIds.length) {
       params.set("study_ids", scope.studyIds.join(","));
     }
