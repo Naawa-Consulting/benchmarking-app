@@ -3,6 +3,7 @@ import { handleWithDataSource } from "../_lib/backend";
 import { getScopeContext, scopeStudyIdsCsv } from "../_lib/access-scope";
 import { resolveMarketLens } from "../_lib/market-lens";
 import { applyMarketFilterToStudyIds } from "../_lib/market-filter-scope";
+import { expandNseInQuery } from "../_lib/demographics";
 
 export const dynamic = "force-dynamic";
 
@@ -82,7 +83,7 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const initialQuery = Object.fromEntries(request.nextUrl.searchParams.entries());
+  const initialQuery = expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries()));
   const marketScoped = await applyMarketFilterToStudyIds({
     query: initialQuery,
     payload: {},

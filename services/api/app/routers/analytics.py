@@ -130,7 +130,22 @@ def _parse_filters(payload: dict | None) -> dict:
         return []
 
     genders = _normalize_demo_values(payload.get("gender"))
-    nses = _normalize_demo_values(payload.get("nse"))
+    nses_raw = _normalize_demo_values(payload.get("nse"))
+
+    nse_group_map = {
+        "AB": ["AB", "A", "B"],
+        "C": ["C+", "C", "C-"],
+        "DE": ["D+", "D", "DE", "E"],
+    }
+    nses: list[str] = []
+    for value in nses_raw:
+        token = value.strip().upper().replace(" ", "")
+        if token in nse_group_map:
+            nses.extend(nse_group_map[token])
+        else:
+            nses.append(value)
+    nses = list(dict.fromkeys(nses))
+
     states = _normalize_demo_values(payload.get("state"))
     return {
         "study_ids": study_ids,
@@ -772,7 +787,8 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
     age_var = config.get("age_var")
     date_mode = (config.get("date") or {}).get("mode", "none")
 
-    if filters.get("gender") and (not gender_var or "gender_code" not in respondent_columns):
+    has_gender_standard = "gender" in respondent_columns
+    if filters.get("gender") and (not has_gender_standard and (not gender_var or "gender_code" not in respondent_columns)):
         return None, [], False
     if filters.get("nse") and (not nse_var or "nse_code" not in respondent_columns):
         return None, [], False
@@ -810,7 +826,10 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
     genders = filters.get("gender") or []
     if genders:
         placeholders = ",".join("?" for _ in genders)
-        conditions.append(f"gender_label IN ({placeholders})")
+        if has_gender_standard:
+            conditions.append(f"gender_standard IN ({placeholders})")
+        else:
+            conditions.append(f"gender_label IN ({placeholders})")
         params.extend(genders)
     nses = filters.get("nse") or []
     if nses:
@@ -849,6 +868,7 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
             SELECT
                 respondent_id,
                 {_column_or_null(respondent_columns, "gender_code")},
+                {_column_or_null(respondent_columns, "gender")},
                 {_column_or_null(respondent_columns, "nse_code")},
                 {_column_or_null(respondent_columns, "state_code")},
                 {_column_or_null(respondent_columns, "age")},
@@ -866,6 +886,31 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
                 TRY_CAST(r.date AS DATE) AS date_dt,
                 EXTRACT(year FROM TRY_CAST(r.date AS DATE)) * 10
                     + EXTRACT(quarter FROM TRY_CAST(r.date AS DATE)) AS q_key,
+                CASE
+                    WHEN r.gender IS NOT NULL AND TRIM(CAST(r.gender AS VARCHAR)) <> '' THEN CAST(r.gender AS VARCHAR)
+                    WHEN g.value_label IS NULL OR TRIM(CAST(g.value_label AS VARCHAR)) = '' THEN 'Unknown'
+                    WHEN LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%prefiere no%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%prefer not%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%declina%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%no responde%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%refus%' THEN 'Prefer not to say'
+                    WHEN LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%non-binary%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%non binary%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%no binario%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%no binaria%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%no binarie%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) IN ('nb', 'genderqueer') THEN 'Non-binary'
+                    WHEN LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%female%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%femen%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%mujer%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) IN ('f', 'fem') THEN 'Female'
+                    WHEN LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%male%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%mascul%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%hombre%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) LIKE '%varon%'
+                        OR LOWER(CAST(g.value_label AS VARCHAR)) IN ('m', 'masc') THEN 'Male'
+                    ELSE 'Unknown'
+                END AS gender_standard,
                 g.value_label AS gender_label,
                 n.value_label AS nse_label,
                 s.value_label AS state_label
@@ -985,9 +1030,13 @@ def _compute_table_rows_internal(
                 SELECT
                     b.brand,
                     COUNT(DISTINCT CASE WHEN b.stage = 'awareness' AND b.v_int = 1 THEN b.respondent_id END) AS awareness_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'awareness' THEN b.respondent_id END) AS awareness_denom,
                     COUNT(DISTINCT CASE WHEN b.stage = 'ad_awareness' AND b.v_int = 1 THEN b.respondent_id END) AS ad_awareness_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'ad_awareness' THEN b.respondent_id END) AS ad_awareness_denom,
                     COUNT(DISTINCT CASE WHEN b.stage = 'consideration' AND b.v_int = 1 THEN b.respondent_id END) AS consideration_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'consideration' THEN b.respondent_id END) AS consideration_denom,
                     COUNT(DISTINCT CASE WHEN b.stage = 'purchase' AND b.v_int = 1 THEN b.respondent_id END) AS purchase_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'purchase' THEN b.respondent_id END) AS purchase_denom,
                     COUNT(
                         DISTINCT CASE
                             WHEN b.stage = 'satisfaction'
@@ -998,6 +1047,7 @@ def _compute_table_rows_internal(
                             THEN b.respondent_id
                         END
                     ) AS satisfaction_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'satisfaction' THEN b.respondent_id END) AS satisfaction_denom,
                     COUNT(
                         DISTINCT CASE
                             WHEN b.stage = 'recommendation'
@@ -1007,7 +1057,8 @@ def _compute_table_rows_internal(
                                  )
                             THEN b.respondent_id
                         END
-                    ) AS recommendation_num
+                    ) AS recommendation_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'recommendation' THEN b.respondent_id END) AS recommendation_denom
                 FROM base b
                 LEFT JOIN stage_stats ss ON ss.stage = 'satisfaction'
                 LEFT JOIN stage_stats rs ON rs.stage = 'recommendation'
@@ -1081,11 +1132,17 @@ def _compute_table_rows_internal(
                 b.brand,
                 p.population_n,
                 s.awareness_num,
+                s.awareness_denom,
                 s.ad_awareness_num,
+                s.ad_awareness_denom,
                 s.consideration_num,
+                s.consideration_denom,
                 s.purchase_num,
+                s.purchase_denom,
                 s.satisfaction_num,
+                s.satisfaction_denom,
                 s.recommendation_num,
+                s.recommendation_denom,
                 e.purchase_n,
                 e.top2_n,
                 e.bottom2_n,
@@ -1108,11 +1165,17 @@ def _compute_table_rows_internal(
             brand,
             population_n,
             awareness_num,
+            awareness_denom,
             ad_awareness_num,
+            ad_awareness_denom,
             consideration_num,
+            consideration_denom,
             purchase_num,
+            purchase_denom,
             satisfaction_num,
+            satisfaction_denom,
             recommendation_num,
+            recommendation_denom,
             purchaser_n,
             top2_n,
             bottom2_n,
@@ -1134,8 +1197,17 @@ def _compute_table_rows_internal(
                     "brand_satisfaction": satisfaction_num,
                     "brand_recommendation": recommendation_num,
                 }
+                denominator_map = {
+                    "brand_awareness": awareness_denom,
+                    "ad_awareness": ad_awareness_denom,
+                    "brand_consideration": consideration_denom,
+                    "brand_purchase": purchase_denom,
+                    "brand_satisfaction": satisfaction_denom,
+                    "brand_recommendation": recommendation_denom,
+                }
                 for metric, numerator in numerator_map.items():
-                    if numerator is None:
+                    stage_denom = denominator_map.get(metric)
+                    if not stage_denom or stage_denom <= 0 or numerator is None:
                         continue
                     values[metric] = round((float(numerator) / float(population_n)) * 100, 1)
 
@@ -1261,9 +1333,13 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                     b.q_key,
                     b.brand,
                     COUNT(DISTINCT CASE WHEN b.stage = 'awareness' AND b.v_int = 1 THEN b.respondent_id END) AS awareness_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'awareness' THEN b.respondent_id END) AS awareness_denom,
                     COUNT(DISTINCT CASE WHEN b.stage = 'ad_awareness' AND b.v_int = 1 THEN b.respondent_id END) AS ad_awareness_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'ad_awareness' THEN b.respondent_id END) AS ad_awareness_denom,
                     COUNT(DISTINCT CASE WHEN b.stage = 'consideration' AND b.v_int = 1 THEN b.respondent_id END) AS consideration_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'consideration' THEN b.respondent_id END) AS consideration_denom,
                     COUNT(DISTINCT CASE WHEN b.stage = 'purchase' AND b.v_int = 1 THEN b.respondent_id END) AS purchase_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'purchase' THEN b.respondent_id END) AS purchase_denom,
                     COUNT(
                         DISTINCT CASE
                             WHEN b.stage = 'satisfaction'
@@ -1274,6 +1350,7 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                             THEN b.respondent_id
                         END
                     ) AS satisfaction_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'satisfaction' THEN b.respondent_id END) AS satisfaction_denom,
                     COUNT(
                         DISTINCT CASE
                             WHEN b.stage = 'recommendation'
@@ -1283,7 +1360,8 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                                  )
                             THEN b.respondent_id
                         END
-                    ) AS recommendation_num
+                    ) AS recommendation_num,
+                    COUNT(DISTINCT CASE WHEN b.stage = 'recommendation' THEN b.respondent_id END) AS recommendation_denom
                 FROM base b
                 LEFT JOIN stage_stats ss ON ss.q_key = b.q_key AND ss.stage = 'satisfaction'
                 LEFT JOIN stage_stats rs ON rs.q_key = b.q_key AND rs.stage = 'recommendation'
@@ -1363,11 +1441,17 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                 b.brand,
                 p.population_n,
                 s.awareness_num,
+                s.awareness_denom,
                 s.ad_awareness_num,
+                s.ad_awareness_denom,
                 s.consideration_num,
+                s.consideration_denom,
                 s.purchase_num,
+                s.purchase_denom,
                 s.satisfaction_num,
+                s.satisfaction_denom,
                 s.recommendation_num,
+                s.recommendation_denom,
                 e.purchase_n,
                 e.top2_n,
                 e.bottom2_n,
@@ -1389,11 +1473,17 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
         brand,
         population_n,
         awareness_num,
+        awareness_denom,
         ad_awareness_num,
+        ad_awareness_denom,
         consideration_num,
+        consideration_denom,
         purchase_num,
+        purchase_denom,
         satisfaction_num,
+        satisfaction_denom,
         recommendation_num,
+        recommendation_denom,
         purchaser_n,
         top2_n,
         bottom2_n,
@@ -1416,8 +1506,17 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                 "brand_satisfaction": satisfaction_num,
                 "brand_recommendation": recommendation_num,
             }
+            denominator_map = {
+                "brand_awareness": awareness_denom,
+                "ad_awareness": ad_awareness_denom,
+                "brand_consideration": consideration_denom,
+                "brand_purchase": purchase_denom,
+                "brand_satisfaction": satisfaction_denom,
+                "brand_recommendation": recommendation_denom,
+            }
             for metric, numerator in numerator_map.items():
-                if numerator is None:
+                stage_denom = denominator_map.get(metric)
+                if not stage_denom or stage_denom <= 0 or numerator is None:
                     continue
                 values[metric] = round((float(numerator) / float(population_n)) * 100, 1)
 

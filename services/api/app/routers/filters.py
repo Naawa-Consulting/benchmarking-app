@@ -12,6 +12,43 @@ from app.data.warehouse import get_repo_root
 
 router = APIRouter()
 
+def _normalize_gender_label(value: object) -> str:
+    if value is None:
+        return "Unknown"
+    text = str(value).strip().lower()
+    if not text:
+        return "Unknown"
+    text = (
+        text.replace("á", "a")
+        .replace("é", "e")
+        .replace("í", "i")
+        .replace("ó", "o")
+        .replace("ú", "u")
+    )
+
+    if (
+        "prefiere no" in text
+        or "prefer not" in text
+        or "declina" in text
+        or "no responde" in text
+        or "refus" in text
+    ):
+        return "Prefer not to say"
+    if (
+        "non-binary" in text
+        or "non binary" in text
+        or "no binario" in text
+        or "no binaria" in text
+        or "no binarie" in text
+        or text in {"nb", "genderqueer"}
+    ):
+        return "Non-binary"
+    if "female" in text or "femen" in text or "mujer" in text or text in {"f", "fem"}:
+        return "Female"
+    if "male" in text or "mascul" in text or "hombre" in text or "varon" in text or text in {"m", "masc"}:
+        return "Male"
+    return "Unknown"
+
 
 def _discover_curated_studies(root: Path) -> list[str]:
     curated_root = root / "data" / "warehouse" / "curated"
@@ -153,22 +190,51 @@ def filter_demographic_options(
                 continue
             conn.execute(f"CREATE OR REPLACE VIEW labels AS SELECT * FROM read_parquet('{labels_path}')")
 
-            gender_var = config.get("gender_var")
-            if gender_var:
+            respondent_columns = {
+                column[0]
+                for column in conn.execute(
+                    f"SELECT * FROM read_parquet('{resp_path}') LIMIT 0"
+                ).description
+            }
+
+            if "gender" in respondent_columns:
                 rows = conn.execute(
                     """
-                    SELECT DISTINCT l.value_label
-                    FROM labels l
-                    WHERE l.var_code = ?
-                      AND l.value_code IN (
-                        SELECT DISTINCT CAST(gender_code AS VARCHAR)
-                        FROM respondents
-                        WHERE gender_code IS NOT NULL
-                      )
-                    """,
-                    [gender_var],
+                    SELECT DISTINCT gender
+                    FROM respondents
+                    WHERE gender IS NOT NULL
+                    """
                 ).fetchall()
-                gender_values.update({str(row[0]).strip() for row in rows if row[0] is not None and str(row[0]).strip()})
+                gender_values.update(
+                    {
+                        _normalize_gender_label(row[0])
+                        for row in rows
+                        if row[0] is not None and str(row[0]).strip()
+                    }
+                )
+            else:
+                gender_var = config.get("gender_var")
+                if gender_var:
+                    rows = conn.execute(
+                        """
+                        SELECT DISTINCT l.value_label
+                        FROM labels l
+                        WHERE l.var_code = ?
+                          AND l.value_code IN (
+                            SELECT DISTINCT CAST(gender_code AS VARCHAR)
+                            FROM respondents
+                            WHERE gender_code IS NOT NULL
+                          )
+                        """,
+                        [gender_var],
+                    ).fetchall()
+                    gender_values.update(
+                        {
+                            _normalize_gender_label(row[0])
+                            for row in rows
+                            if row[0] is not None and str(row[0]).strip()
+                        }
+                    )
 
             nse_var = config.get("nse_var")
             if nse_var:
@@ -208,8 +274,10 @@ def filter_demographic_options(
         finally:
             conn.close()
 
+    ordered_gender = ["Male", "Female", "Non-binary", "Prefer not to say", "Unknown"]
+    normalized_gender = [value for value in ordered_gender if value in gender_values]
     return {
-        "gender": sorted(gender_values),
+        "gender": normalized_gender,
         "nse": sorted(nse_values),
         "state": sorted(state_values),
         "age": {"min": age_min, "max": age_max},

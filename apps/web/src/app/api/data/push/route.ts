@@ -329,10 +329,14 @@ export async function POST(request: NextRequest) {
 
     const [journeyResult, touchpointResult, studiesResult, taxonomyResult, demographicsResult] =
       await Promise.all([
-        fetchLegacyJson(`/analytics/journey/table_multi?studies=${studiesParam}&limit_mode=all&sort_by=brand_awareness&sort_dir=desc`),
-        fetchLegacyJson(`/analytics/touchpoints/table_multi?studies=${studiesParam}&limit_mode=all&sort_by=recall&sort_dir=desc`),
+        fetchLegacyJson(
+          `/analytics/journey/table_multi?studies=${studiesParam}&taxonomy_view=standard&limit_mode=all&sort_by=brand_awareness&sort_dir=desc`
+        ),
+        fetchLegacyJson(
+          `/analytics/touchpoints/table_multi?studies=${studiesParam}&taxonomy_view=standard&limit_mode=all&sort_by=recall&sort_dir=desc`
+        ),
         fetchLegacyJson("/studies"),
-        fetchLegacyJson("/filters/options/taxonomy"),
+        fetchLegacyJson("/filters/options/taxonomy?view=standard"),
         fetchLegacyJson(`/filters/options/demographics?study_ids=${studiesParam}`),
       ]);
 

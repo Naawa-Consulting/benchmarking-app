@@ -3,6 +3,7 @@ import { handleWithDataSource } from "../../../_lib/backend";
 import { getScopeContext, parseStudyIdsInput, scopeStudyIds, scopeStudyIdsCsv } from "../../../_lib/access-scope";
 import { resolveMarketLens } from "../../../_lib/market-lens";
 import { applyMarketFilterToStudyIds } from "../../../_lib/market-filter-scope";
+import { expandNseInPayload, expandNseInQuery } from "../../../_lib/demographics";
 
 export const dynamic = "force-dynamic";
 
@@ -131,7 +132,7 @@ export async function GET(request: NextRequest) {
 
   if (skipViewerScoping) {
     const preScoped = await applyMarketFilterToStudyIds({
-      query: Object.fromEntries(request.nextUrl.searchParams.entries()),
+      query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
       payload: {},
       allowedStudyIds: null,
     });
@@ -154,7 +155,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ rows: [], selection_rows: [], global_rows: [] });
   }
   const marketScoped = await applyMarketFilterToStudyIds({
-    query: Object.fromEntries(request.nextUrl.searchParams.entries()),
+    query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
     payload: {},
     allowedStudyIds: scopeContext.allowedStudyIds,
   });
@@ -180,7 +181,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   const scopeContext = await getScopeContext(request);
-  const payload = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const payload = expandNseInPayload((await request.json().catch(() => ({}))) as Record<string, unknown>);
   const taxonomyView =
     typeof payload.taxonomy_view === "string" && payload.taxonomy_view.toLowerCase() === "standard"
       ? "standard"
@@ -201,7 +202,7 @@ export async function POST(request: NextRequest) {
 
   if (skipViewerScoping) {
     const preScoped = await applyMarketFilterToStudyIds({
-      query: Object.fromEntries(request.nextUrl.searchParams.entries()),
+      query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
       payload,
       allowedStudyIds: null,
     });
@@ -224,7 +225,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ rows: [], selection_rows: [], global_rows: [] });
   }
   const marketScoped = await applyMarketFilterToStudyIds({
-    query: Object.fromEntries(request.nextUrl.searchParams.entries()),
+    query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
     payload,
     allowedStudyIds: scopeContext.allowedStudyIds,
   });

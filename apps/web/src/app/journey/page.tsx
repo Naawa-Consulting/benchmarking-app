@@ -30,6 +30,8 @@ type TableRow = {
   brand_purchase: number | null;
   brand_satisfaction: number | null;
   brand_recommendation: number | null;
+  csat: number | null;
+  nps: number | null;
 };
 
 type JourneyHierarchyLevel = "sector" | "subsector" | "category";
@@ -56,24 +58,10 @@ const pct = (value: number | null | undefined) =>
 
 const BRANDS_MODE_STORAGE_KEY = "bbs_brands_mode";
 
-const HIERARCHY_METRIC_KEYS: Array<keyof TableRow> = [
-  "brand_awareness",
-  "ad_awareness",
-  "brand_consideration",
-  "brand_purchase",
-  "brand_satisfaction",
-  "brand_recommendation",
-];
-
 const toNonEmptyString = (value: unknown): string | null => {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length ? trimmed : null;
-};
-
-const toMetricNumber = (value: unknown): number | null => {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  return null;
 };
 
 const resolveHierarchyLevel = (
@@ -122,75 +110,24 @@ const resolveHierarchyFocusLabel = (
 
 function aggregateJourneyRowsByLevel(rows: TableRow[], level: JourneyHierarchyLevel): TableRow[] {
   const levelField = hierarchyFieldByLevel[level];
-  type AggState = {
-    label: string;
-    sector: string | null;
-    subsector: string | null;
-    category: string | null;
-    weightedSums: Record<string, number>;
-    weightedDenominators: Record<string, number>;
-    studies: Set<string>;
-  };
-
-  const byEntity = new Map<string, AggState>();
-
-  for (const row of rows) {
+  return rows.flatMap((row) => {
     const label = toNonEmptyString(row[levelField]);
-    if (!label) continue;
-    const weightRaw =
-      toMetricNumber(row.base_n_population) ??
-      toMetricNumber(row.aggregation_weight_n) ??
-      toMetricNumber(row.base_n) ??
-      toMetricNumber(row.baseN) ??
-      1;
-    const weight = Number.isFinite(weightRaw) && weightRaw > 0 ? weightRaw : 1;
+    if (!label) return [];
 
-    const key = label.toLowerCase();
-    if (!byEntity.has(key)) {
-      byEntity.set(key, {
-        label,
-        sector: level === "sector" ? label : toNonEmptyString(row.sector),
-        subsector: level === "subsector" ? label : toNonEmptyString(row.subsector),
-        category: level === "category" ? label : toNonEmptyString(row.category),
-        weightedSums: {},
-        weightedDenominators: {},
-        studies: new Set<string>(),
-      });
-    }
-    const current = byEntity.get(key)!;
-    if (typeof row.study_id === "string" && row.study_id) {
-      current.studies.add(row.study_id);
-    }
-    for (const metricKey of HIERARCHY_METRIC_KEYS) {
-      const metricValue = toMetricNumber(row[metricKey]);
-      if (metricValue == null) continue;
-      current.weightedSums[String(metricKey)] = (current.weightedSums[String(metricKey)] ?? 0) + metricValue * weight;
-      current.weightedDenominators[String(metricKey)] =
-        (current.weightedDenominators[String(metricKey)] ?? 0) + weight;
-    }
-  }
+    const sector = level === "sector" ? label : toNonEmptyString(row.sector);
+    const subsector =
+      level === "sector" ? null : level === "subsector" ? label : toNonEmptyString(row.subsector);
+    const category = level === "category" ? label : null;
 
-  return Array.from(byEntity.values()).map((entry, index) => {
-    const aggregatedRow: TableRow = {
-      study_id: `agg:${level}:${index + 1}`,
-      sector: entry.sector ?? null,
-      subsector: entry.subsector ?? null,
-      category: entry.category ?? null,
-      brand: entry.label,
-      brand_awareness: null,
-      ad_awareness: null,
-      brand_consideration: null,
-      brand_purchase: null,
-      brand_satisfaction: null,
-      brand_recommendation: null,
-    };
-    for (const metricKey of HIERARCHY_METRIC_KEYS) {
-      const key = String(metricKey);
-      const numerator = entry.weightedSums[key] ?? 0;
-      const denominator = entry.weightedDenominators[key] ?? 0;
-      aggregatedRow[metricKey] = denominator > 0 ? numerator / denominator : null;
-    }
-    return aggregatedRow;
+    return [
+      {
+        ...row,
+        brand: label,
+        sector,
+        subsector,
+        category,
+      },
+    ];
   });
 }
 
@@ -1268,12 +1205,6 @@ export default function JourneyPage() {
         <JourneyHeatmapTable
           matrix={journeyHeatmap}
           benchmarkLabel={benchmarkLabel}
-          focusedBrandName={focusBrand}
-          onFocusBrand={(brand) => {
-            if (!brandsEnabled) return;
-            setFocusBrand(brand);
-            if (brand && compareBrand === brand) setCompareBrand(null);
-          }}
         />
         {isHeatmapUpdating && (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-[2rem] border border-amber-500/25 bg-white/35">

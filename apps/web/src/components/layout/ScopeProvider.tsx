@@ -140,7 +140,7 @@ function parseScopeFromQuery(searchParams: URLSearchParams): Partial<ScopeState>
     years,
     gender: parseCsv(searchParams.get("gender")),
     nse: parseCsv(searchParams.get("nse")),
-    state: parseCsv(searchParams.get("state")),
+    state: [],
     ageMin,
     ageMax,
     timeGranularity: "Q",
@@ -158,7 +158,6 @@ function createManagedQuery(scope: ScopeState): URLSearchParams {
   if (scope.years.length) params.set("years", scope.years.join(","));
   if (scope.gender.length) params.set("gender", scope.gender.join(","));
   if (scope.nse.length) params.set("nse", scope.nse.join(","));
-  if (scope.state.length) params.set("state", scope.state.join(","));
   if (scope.ageMin !== null || scope.ageMax !== null) {
     params.set("age", `${scope.ageMin ?? ""}-${scope.ageMax ?? ""}`);
   }

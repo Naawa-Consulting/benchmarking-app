@@ -86,17 +86,17 @@ def main() -> int:
         _require_env()
         print("[seed] loading local journey rows...")
         journey_rows = _load_local_rows(
-            "/analytics/journey/table_multi?limit_mode=all&sort_by=brand_awareness&sort_dir=desc",
+            "/analytics/journey/table_multi?taxonomy_view=standard&limit_mode=all&sort_by=brand_awareness&sort_dir=desc",
             payload={},
         )
         print("[seed] loading local touchpoint rows...")
         touchpoint_rows = _load_local_rows(
-            "/analytics/touchpoints/table_multi?limit_mode=all&sort_by=recall&sort_dir=desc",
+            "/analytics/touchpoints/table_multi?taxonomy_view=standard&limit_mode=all&sort_by=recall&sort_dir=desc",
             payload={},
         )
         print("[seed] loading local filter options...")
         studies_payload = _load_local_object("/filters/options/studies")
-        taxonomy_payload = _load_local_object("/filters/options/taxonomy")
+        taxonomy_payload = _load_local_object("/filters/options/taxonomy?view=standard")
         demographics_payload = _load_local_object("/filters/options/demographics")
 
         for row in journey_rows:

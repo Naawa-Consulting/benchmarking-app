@@ -116,6 +116,7 @@ export default function JourneyHeatmapTable({
   const [scrollTop, setScrollTop] = useState(0);
   const ROW_HEIGHT = 33;
   const VIEWPORT_HEIGHT = 620;
+  const benchmarkStickyBg = "#f1f5f9";
 
   const columns = useMemo(() => {
     const levels = matrix.columns.filter((col) => col.group === "stage" || col.group === "metric");
@@ -266,7 +267,7 @@ export default function JourneyHeatmapTable({
         {showRightShadow && <div className="pointer-events-none absolute bottom-0 right-0 top-0 z-30 w-4 bg-gradient-to-l from-slate-300/20 to-transparent" />}
 
         <div ref={scrollerRef} className="max-h-[620px] overflow-auto rounded-2xl">
-          <table className="w-full border-collapse text-xs">
+          <table className="w-full border-separate border-spacing-0 text-xs">
             <thead className="sticky top-0 z-20 bg-white">
               <tr className="border-b border-ink/10">
                 <th className="sticky left-0 z-30 min-w-[190px] border-r border-ink/10 bg-white px-3 py-2 text-left">
@@ -301,8 +302,8 @@ export default function JourneyHeatmapTable({
                 {sortedRows.benchmarkRows.map((benchmarkRow, idx) => (
                   <tr key={benchmarkRow.key} className="border-b border-ink/10">
                     <td
-                      className="sticky left-0 z-[19] border-r border-ink/10 bg-slate-100 px-3 py-2 font-semibold text-ink"
-                      style={{ top: `${33 + idx * 33}px` }}
+                      className="sticky left-0 z-[19] border-r border-ink/10 px-3 py-2 font-semibold text-ink"
+                      style={{ top: `${33 + idx * 33}px`, backgroundColor: benchmarkStickyBg }}
                     >
                       {benchmarkRow.brandName}
                     </td>
@@ -312,7 +313,7 @@ export default function JourneyHeatmapTable({
                         <td
                           key={`${benchmarkRow.key}-${col.key}`}
                           className="sticky z-[18] min-w-[96px] px-2 py-2 text-center text-ink"
-                          style={{ top: `${33 + idx * 33}px`, background: "rgba(241,245,249,1)" }}
+                          style={{ top: `${33 + idx * 33}px`, backgroundColor: benchmarkStickyBg }}
                           title={buildTooltip(activeTab, benchmarkRow.brandName, col, cell, benchmarkLabel)}
                         >
                           {cell?.missing ? <span className="text-slate">—</span> : <p>{formatValue(col, cell?.value ?? null)}</p>}
@@ -345,16 +346,9 @@ export default function JourneyHeatmapTable({
                         isFocused ? "shadow-[inset_3px_0_0_0_rgba(16,185,129,0.85)]" : ""
                       }`}
                     >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!onFocusBrand) return;
-                          onFocusBrand(row.brandName === focusedBrandName ? null : row.brandName);
-                        }}
-                        className={`w-full text-left ${isFocused ? "font-semibold text-emerald-700" : "text-ink"}`}
-                      >
+                      <span className={`block w-full text-left ${isFocused ? "font-semibold text-emerald-700" : "text-ink"}`}>
                         {row.brandName}
-                      </button>
+                      </span>
                     </td>
 
                     {columns.map((col) => {

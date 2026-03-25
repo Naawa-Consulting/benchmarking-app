@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleWithDataSource } from "../../../_lib/backend";
 import { getScopeContext, parseStudyIdsInput, scopeStudyIds, scopeStudyIdsCsv } from "../../../_lib/access-scope";
+import { expandNseInPayload, expandNseInQuery } from "../../../_lib/demographics";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +33,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ rows: [] });
   }
   const scoped = withStudyScope(
-    Object.fromEntries(request.nextUrl.searchParams.entries()),
+    expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
     {},
     scopeContext.allowedStudyIds
   );
@@ -55,9 +56,9 @@ export async function POST(request: NextRequest) {
   if (scopeContext.allowedStudyIds && scopeContext.allowedStudyIds.length === 0) {
     return NextResponse.json({ rows: [] });
   }
-  const payload = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const payload = expandNseInPayload((await request.json().catch(() => ({}))) as Record<string, unknown>);
   const scoped = withStudyScope(
-    Object.fromEntries(request.nextUrl.searchParams.entries()),
+    expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
     payload,
     scopeContext.allowedStudyIds
   );

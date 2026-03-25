@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from pathlib import Path
 
 import duckdb
@@ -18,6 +20,86 @@ from app.data.demographics import (
 from app.data.warehouse import get_repo_root
 
 router = APIRouter()
+
+GENDER_STANDARD_VALUES = (
+    "Male",
+    "Female",
+    "Non-binary",
+    "Prefer not to say",
+    "Unknown",
+)
+
+
+def _normalize_text(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip().lower()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _standardize_gender(raw_label: object) -> str:
+    text = _normalize_text(raw_label)
+    if not text:
+        return "Unknown"
+
+    unknown_markers = {
+        "unknown",
+        "unk",
+        "desconocido",
+        "no sabe",
+        "ns/nc",
+        "ns",
+        "nc",
+        "n/a",
+        "na",
+        "sin dato",
+        "sin informacion",
+        "otro",
+        "otros",
+    }
+    if text in unknown_markers:
+        return "Unknown"
+
+    if (
+        "prefiere no" in text
+        or "prefer not" in text
+        or "declina" in text
+        or "no responde" in text
+        or "refus" in text
+    ):
+        return "Prefer not to say"
+
+    if (
+        "non-binary" in text
+        or "non binary" in text
+        or "no binario" in text
+        or "no binaria" in text
+        or "no binarie" in text
+        or text in {"nb", "genderqueer"}
+    ):
+        return "Non-binary"
+
+    if (
+        "female" in text
+        or "femen" in text
+        or "mujer" in text
+        or text in {"f", "fem"}
+    ):
+        return "Female"
+
+    if (
+        "male" in text
+        or "mascul" in text
+        or "hombre" in text
+        or "varon" in text
+        or text in {"m", "masc"}
+    ):
+        return "Male"
+
+    return "Unknown"
 
 
 @router.get("/demographics/schema")
@@ -136,6 +218,31 @@ def _build_respondents_parquet(study_id: str, config: dict) -> None:
             state_var,
         ],
     ).df()
+    gender_labels = {}
+    labels_file = value_labels_path(study_id)
+    if labels_file.exists() and gender_var:
+        try:
+            labels_df = pd.read_parquet(labels_file, columns=["var_code", "value_code", "value_label"])
+            labels_df = labels_df[labels_df["var_code"].astype(str) == str(gender_var)]
+            gender_labels = {
+                str(row["value_code"]): str(row["value_label"])
+                for row in labels_df.to_dict(orient="records")
+                if row.get("value_code") is not None and row.get("value_label") is not None
+            }
+        except Exception:
+            gender_labels = {}
+
+    def _gender_from_code(code: object) -> str:
+        if code is None:
+            return "Unknown"
+        code_key = str(code)
+        raw_label = gender_labels.get(code_key, code_key)
+        return _standardize_gender(raw_label)
+
+    df["gender"] = df["gender_code"].map(_gender_from_code)
+    if not df["gender"].isin(GENDER_STANDARD_VALUES).all():
+        df["gender"] = "Unknown"
+
     if date_mode == "constant" and date_constant:
         df["date"] = date_constant
     elif date_mode == "none":
@@ -239,6 +346,73 @@ def demographics_value_labels(
         {"value_code": str(row["value_code"]), "value_label": str(row["value_label"])}
         for row in df.to_dict(orient="records")
     ]
+    return {"study_id": study_id, "var_code": var_code, "items": items}
+
+
+@router.get("/demographics/gender-map-preview")
+def demographics_gender_map_preview(
+    study_id: str = Query(..., description="Study id"),
+    var_code: str = Query(..., description="Gender variable code"),
+    limit: int = Query(50, ge=1, le=500),
+) -> dict:
+    responses_path = (
+        get_repo_root()
+        / "data"
+        / "warehouse"
+        / "raw"
+        / f"study_id={study_id}"
+        / "raw_responses.parquet"
+    )
+    if not responses_path.exists():
+        raise HTTPException(status_code=404, detail="raw_responses.parquet not found for study.")
+
+    labels_path = value_labels_path(study_id)
+    labels: dict[str, str] = {}
+    if labels_path.exists():
+        try:
+            labels_df = pd.read_parquet(labels_path, columns=["var_code", "value_code", "value_label"])
+            labels_df = labels_df[labels_df["var_code"].astype(str) == str(var_code)]
+            labels = {
+                str(row["value_code"]): str(row["value_label"])
+                for row in labels_df.to_dict(orient="records")
+                if row.get("value_code") is not None and row.get("value_label") is not None
+            }
+        except Exception:
+            labels = {}
+
+    conn = duckdb.connect()
+    try:
+        conn.execute(
+            f"CREATE OR REPLACE VIEW responses AS SELECT * FROM read_parquet('{responses_path}')"
+        )
+        rows = conn.execute(
+            """
+            SELECT value, COUNT(*) AS cnt
+            FROM responses
+            WHERE var_code = ?
+              AND value IS NOT NULL
+              AND TRIM(CAST(value AS VARCHAR)) <> ''
+            GROUP BY value
+            ORDER BY cnt DESC
+            LIMIT ?
+            """,
+            [var_code, limit],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    items = []
+    for value, count in rows:
+        raw_value = str(value)
+        raw_label = labels.get(raw_value, raw_value)
+        items.append(
+            {
+                "raw_value": raw_value,
+                "raw_label": raw_label,
+                "standard_value": _standardize_gender(raw_label),
+                "count": int(count or 0),
+            }
+        )
     return {"study_id": study_id, "var_code": var_code, "items": items}
 
 

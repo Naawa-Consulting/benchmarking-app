@@ -390,6 +390,11 @@ export function getDemographicsValueLabelsDetailed(studyId: string, varCode: str
   return requestDetailed(`/demographics/value-labels?${params.toString()}`);
 }
 
+export function getDemographicsGenderMapPreviewDetailed(studyId: string, varCode: string, limit = 50) {
+  const params = new URLSearchParams({ study_id: studyId, var_code: varCode, limit: String(limit) });
+  return requestDetailed(`/demographics/gender-map-preview?${params.toString()}`);
+}
+
 export function getDemographicsPreviewDetailed(studyId: string, varCode: string, limit = 5) {
   const params = new URLSearchParams({ study_id: studyId, var_code: varCode, n: String(limit) });
   return requestDetailed(`/demographics/preview?${params.toString()}`);

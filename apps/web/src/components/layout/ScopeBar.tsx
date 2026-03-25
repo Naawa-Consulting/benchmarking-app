@@ -206,6 +206,11 @@ export default function ScopeBar() {
   };
 
   useEffect(() => {
+    if (scope.state.length === 0) return;
+    setScope({ state: [] });
+  }, [scope.state, setScope]);
+
+  useEffect(() => {
     if (!scope.brands.length) return;
     const availableSet = new Set(brands);
     const valid = scope.brands.filter((brand) => availableSet.has(brand));
@@ -451,21 +456,6 @@ export default function ScopeBar() {
                             type="checkbox"
                             checked={scope.nse.includes(value)}
                             onChange={() => toggleListValue("nse", value)}
-                          />
-                          <span>{value}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="col-span-2">
-                    <p className="mb-2 font-semibold text-ink">State</p>
-                    <div className="grid grid-cols-2 gap-1 pr-1">
-                      {demographics.state.map((value) => (
-                        <label key={value} className="flex items-center gap-2">
-                          <input
-                            type="checkbox"
-                            checked={scope.state.includes(value)}
-                            onChange={() => toggleListValue("state", value)}
                           />
                           <span>{value}</span>
                         </label>

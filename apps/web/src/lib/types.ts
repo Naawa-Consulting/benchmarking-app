@@ -163,6 +163,13 @@ export interface DemographicsValueLabel {
   value_label: string;
 }
 
+export interface DemographicsGenderMapItem {
+  raw_value: string;
+  raw_label: string;
+  standard_value: "Male" | "Female" | "Non-binary" | "Prefer not to say" | "Unknown";
+  count: number;
+}
+
 export type BbsRole = "owner" | "admin" | "analyst" | "viewer";
 
 export interface AdminUserItem {

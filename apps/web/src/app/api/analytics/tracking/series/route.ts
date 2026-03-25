@@ -3,6 +3,7 @@ import { getDataSource, handleWithDataSource } from "../../../_lib/backend";
 import { getScopeContext, parseStudyIdsInput, scopeStudyIds, scopeStudyIdsCsv } from "../../../_lib/access-scope";
 import { resolveMarketLens } from "../../../_lib/market-lens";
 import { applyMarketFilterToStudyIds, resolveStandardFallbackForMarketSelection } from "../../../_lib/market-filter-scope";
+import { expandNseInPayload, expandNseInQuery } from "../../../_lib/demographics";
 
 export const dynamic = "force-dynamic";
 
@@ -67,9 +68,66 @@ type TrackingPayload = {
   metric_meta_touchpoint?: Record<string, unknown>;
   resolved_breakdown?: string;
   entity_label?: string;
-  periods?: Array<{ key?: string }>;
+  periods?: Array<{ key?: string; label?: string }>;
   resolved_granularity?: string;
 };
+
+function parseYearsInput(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter((item) => /^\d{4}$/.test(item));
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => /^\d{4}$/.test(item));
+  }
+  return [];
+}
+
+function isQuarterLabel(value: string | null | undefined): boolean {
+  if (!value) return false;
+  return /^\d{4}-Q[1-4]$/i.test(value.trim());
+}
+
+function shouldPreferQuarterView(
+  series: TrackingPayload | null,
+  query: Record<string, string>,
+  payload: Record<string, unknown>
+): boolean {
+  const selectedYears = parseYearsInput(payload.years).length
+    ? parseYearsInput(payload.years)
+    : parseYearsInput(query.years);
+  if (selectedYears.length === 1) return true;
+
+  const hasTaxonomySelection =
+    (typeof payload.sector === "string" && payload.sector.trim().length > 0) ||
+    (typeof payload.subsector === "string" && payload.subsector.trim().length > 0) ||
+    (typeof payload.category === "string" && payload.category.trim().length > 0) ||
+    (typeof query.sector === "string" && query.sector.trim().length > 0) ||
+    (typeof query.subsector === "string" && query.subsector.trim().length > 0) ||
+    (typeof query.category === "string" && query.category.trim().length > 0);
+
+  if (!hasTaxonomySelection || !series) return false;
+  const periods = Array.isArray(series.periods) ? series.periods : [];
+  const labels = periods
+    .map((period) => (typeof period?.label === "string" ? period.label.trim() : ""))
+    .filter(Boolean);
+  if (labels.length === 0) return false;
+  const hasQuarter = labels.some((label) => isQuarterLabel(label));
+  if (hasQuarter) return false;
+  const uniqueYears = new Set(
+    labels
+      .map((label) => {
+        const m = label.match(/(19|20)\d{2}/);
+        return m ? m[0] : null;
+      })
+      .filter((year): year is string => Boolean(year))
+  );
+  return uniqueYears.size <= 1;
+}
 
 function toPeriodKeys(payload: TrackingPayload): string[] {
   const keys = Array.isArray(payload.periods)
@@ -291,11 +349,36 @@ function toSeriesObject(payload: unknown): TrackingPayload | null {
   return payload as TrackingPayload;
 }
 
+async function maybeQuarterFallbackFromLegacy(
+  request: NextRequest,
+  method: "GET" | "POST",
+  query: Record<string, string>,
+  payload: Record<string, unknown>,
+  currentPayload: unknown
+): Promise<unknown> {
+  if (getDataSource() !== "supabase") return currentPayload;
+  const currentSeries = toSeriesObject(currentPayload);
+  if (!shouldPreferQuarterView(currentSeries, query, payload)) return currentPayload;
+  const constrained = await constrainLegacyFallbackToSupabaseStudies(request, query, payload);
+  const legacyPayload = await tryLegacyTrackingSeries(method, constrained.query, constrained.payload);
+  if (!legacyPayload) return currentPayload;
+  const legacySeries = toSeriesObject(legacyPayload);
+  if (!legacySeries) return currentPayload;
+  const legacyPeriods = Array.isArray(legacySeries.periods) ? legacySeries.periods : [];
+  const hasQuarter = legacyPeriods.some((period) =>
+    isQuarterLabel(typeof period?.label === "string" ? period.label : null)
+  );
+  return hasQuarter ? legacyPayload : currentPayload;
+}
+
 type StudyCatalogItem = {
   study_id: string;
   sector: string | null;
+  subsector: string | null;
+  category: string | null;
   market_sector: string | null;
   market_subsector: string | null;
+  market_category: string | null;
 };
 
 async function fetchStudiesForTracking(request: NextRequest): Promise<StudyCatalogItem[]> {
@@ -313,14 +396,87 @@ async function fetchStudiesForTracking(request: NextRequest): Promise<StudyCatal
     .map((row) => ({
       study_id: String(row.study_id || "").trim(),
       sector: typeof row.sector === "string" && row.sector.trim() ? row.sector.trim() : null,
+      subsector: typeof row.subsector === "string" && row.subsector.trim() ? row.subsector.trim() : null,
+      category: typeof row.category === "string" && row.category.trim() ? row.category.trim() : null,
       market_sector:
         typeof row.market_sector === "string" && row.market_sector.trim() ? row.market_sector.trim() : null,
       market_subsector:
         typeof row.market_subsector === "string" && row.market_subsector.trim()
           ? row.market_subsector.trim()
           : null,
+      market_category:
+        typeof row.market_category === "string" && row.market_category.trim()
+          ? row.market_category.trim()
+          : null,
     }))
     .filter((row) => row.study_id);
+}
+
+function parseStudyIdsFromInputs(query: Record<string, string>, payload: Record<string, unknown>): string[] {
+  const fromPayload = parseStudyIdsInput(payload.study_ids) || [];
+  if (fromPayload.length) return fromPayload;
+  return parseStudyIdsInput(query.study_ids || query.studies) || [];
+}
+
+function normalizeTaxonomyViewFromInputs(query: Record<string, string>, payload: Record<string, unknown>) {
+  const payloadView = typeof payload.taxonomy_view === "string" ? payload.taxonomy_view.toLowerCase() : null;
+  if (payloadView === "standard") return "standard" as const;
+  if (query.taxonomy_view === "standard") return "standard" as const;
+  return "market" as const;
+}
+
+async function constrainLegacyFallbackToSupabaseStudies(
+  request: NextRequest,
+  query: Record<string, string>,
+  payload: Record<string, unknown>
+): Promise<{ query: Record<string, string>; payload: Record<string, unknown> }> {
+  if (getDataSource() !== "supabase") return { query, payload };
+
+  const studies = await fetchStudiesForTracking(request);
+  if (!studies.length) return { query, payload };
+
+  const requestedIds = parseStudyIdsFromInputs(query, payload);
+  const taxonomyView = normalizeTaxonomyViewFromInputs(query, payload);
+  const sector =
+    (typeof payload.sector === "string" ? payload.sector : null) ||
+    (typeof query.sector === "string" ? query.sector : null);
+  const subsector =
+    (typeof payload.subsector === "string" ? payload.subsector : null) ||
+    (typeof query.subsector === "string" ? query.subsector : null);
+  const category =
+    (typeof payload.category === "string" ? payload.category : null) ||
+    (typeof query.category === "string" ? query.category : null);
+
+  const ids = studies
+    .filter((row) => (requestedIds.length ? requestedIds.includes(row.study_id) : true))
+    .filter((row) => {
+      if (taxonomyView === "standard") {
+        return (
+          (sector ? row.sector === sector : true) &&
+          (subsector ? row.subsector === subsector : true) &&
+          (category ? row.category === category : true)
+        );
+      }
+      return (
+        (sector ? row.market_sector === sector : true) &&
+        (subsector ? row.market_subsector === subsector : true) &&
+        (category ? row.market_category === category : true)
+      );
+    })
+    .map((row) => row.study_id);
+
+  const finalIds = Array.from(new Set(ids.length ? ids : studies.map((row) => row.study_id)));
+  return {
+    query: {
+      ...query,
+      study_ids: finalIds.join(","),
+      studies: finalIds.join(","),
+    },
+    payload: {
+      ...payload,
+      study_ids: finalIds,
+    },
+  };
 }
 
 function topString(values: Array<string | null | undefined>): string | null {
@@ -582,7 +738,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(emptyTrackingSeries());
   }
   const marketScoped = await applyMarketFilterToStudyIds({
-    query: Object.fromEntries(request.nextUrl.searchParams.entries()),
+    query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
     payload: {},
     allowedStudyIds: scopeContext.allowedStudyIds,
     preserveTaxonomyFilters: true,
@@ -615,7 +771,12 @@ export async function GET(request: NextRequest) {
   );
   if (!response.ok) {
     if (taxonomyView === "market" && getDataSource() === "supabase") {
-      const legacyPayload = await tryLegacyTrackingSeries("GET", supabaseFallback.query, supabaseFallback.payload);
+      const constrained = await constrainLegacyFallbackToSupabaseStudies(
+        request,
+        supabaseFallback.query,
+        supabaseFallback.payload
+      );
+      const legacyPayload = await tryLegacyTrackingSeries("GET", constrained.query, constrained.payload);
       if (legacyPayload) {
         const normalizedLegacy = normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView);
         const filteredLegacy = filterTrackingBySelection(normalizedLegacy, taxonomyView, selection);
@@ -624,9 +785,18 @@ export async function GET(request: NextRequest) {
     }
     return response;
   }
-  if (taxonomyView !== "market") return response;
-  const payload = await response.json().catch(() => null);
-  const normalized = normalizeTrackingPayloadTaxonomy(payload, taxonomyView);
+  const raw = await response.json().catch(() => null);
+  const preferred = await maybeQuarterFallbackFromLegacy(
+    request,
+    "GET",
+    supabaseFallback.query,
+    supabaseFallback.payload,
+    raw
+  );
+  if (taxonomyView !== "market") {
+    return NextResponse.json(preferred, { status: response.status });
+  }
+  const normalized = normalizeTrackingPayloadTaxonomy(preferred, taxonomyView);
   const filtered = filterTrackingBySelection(normalized, taxonomyView, selection);
   return NextResponse.json(filtered, { status: response.status });
 }
@@ -636,7 +806,7 @@ export async function POST(request: NextRequest) {
   if (scopeContext.allowedStudyIds && scopeContext.allowedStudyIds.length === 0) {
     return NextResponse.json(emptyTrackingSeries());
   }
-  const payload = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const payload = expandNseInPayload((await request.json().catch(() => ({}))) as Record<string, unknown>);
   const taxonomyView =
     typeof payload.taxonomy_view === "string" && payload.taxonomy_view.toLowerCase() === "standard"
       ? "standard"
@@ -652,7 +822,7 @@ export async function POST(request: NextRequest) {
       (typeof payload.category === "string" ? payload.category : null) ?? request.nextUrl.searchParams.get("category"),
   };
   const marketScoped = await applyMarketFilterToStudyIds({
-    query: Object.fromEntries(request.nextUrl.searchParams.entries()),
+    query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
     payload,
     allowedStudyIds: scopeContext.allowedStudyIds,
     preserveTaxonomyFilters: true,
@@ -698,7 +868,12 @@ export async function POST(request: NextRequest) {
   );
   if (!response.ok) {
     if (taxonomyView === "market" && getDataSource() === "supabase") {
-      const legacyPayload = await tryLegacyTrackingSeries("POST", supabaseFallback.query, supabaseFallback.payload);
+      const constrained = await constrainLegacyFallbackToSupabaseStudies(
+        request,
+        supabaseFallback.query,
+        supabaseFallback.payload
+      );
+      const legacyPayload = await tryLegacyTrackingSeries("POST", constrained.query, constrained.payload);
       if (legacyPayload) {
         const normalizedLegacy = normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView);
         const filteredLegacy = filterTrackingBySelection(normalizedLegacy, taxonomyView, selection);
@@ -707,9 +882,18 @@ export async function POST(request: NextRequest) {
     }
     return response;
   }
-  if (taxonomyView !== "market") return response;
   const raw = await response.json().catch(() => null);
-  const normalized = normalizeTrackingPayloadTaxonomy(raw, taxonomyView);
+  const preferred = await maybeQuarterFallbackFromLegacy(
+    request,
+    "POST",
+    supabaseFallback.query,
+    supabaseFallback.payload,
+    raw
+  );
+  if (taxonomyView !== "market") {
+    return NextResponse.json(preferred, { status: response.status });
+  }
+  const normalized = normalizeTrackingPayloadTaxonomy(preferred, taxonomyView);
   const filtered = filterTrackingBySelection(normalized, taxonomyView, selection);
   return NextResponse.json(filtered, { status: response.status });
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import {
@@ -9,6 +9,7 @@ import {
   bulkUpdateQuestionMapDetailed,
   coverageRulesDetailed,
   getDemographicsConfigDetailed,
+  getDemographicsGenderMapPreviewDetailed,
   getDemographicsDatePreview,
   getDemographicsPreviewDetailed,
   getDemographicsValueLabelsDetailed,
@@ -38,6 +39,7 @@ import {
 } from "../../lib/api";
 import {
   DemographicsConfig,
+  DemographicsGenderMapItem,
   DemographicsValueLabel,
   QuestionItem,
   QuestionMapRow,
@@ -271,6 +273,8 @@ export default function RulesStudioPage() {
   const [demographicsLabels, setDemographicsLabels] = useState<
     Record<string, DemographicsValueLabel[]>
   >({});
+  const [genderMapPreviewItems, setGenderMapPreviewItems] = useState<DemographicsGenderMapItem[]>([]);
+  const [genderMapPreviewState, setGenderMapPreviewState] = useState<ActionState>("idle");
   const [demographicsPreview, setDemographicsPreview] = useState<
     Record<
       string,
@@ -672,9 +676,29 @@ export default function RulesStudioPage() {
     loadBasePreview();
   }, [selectedStudyId]);
 
+  const loadGenderMapPreview = useCallback(async (varCode: string | null | undefined) => {
+    if (!selectedStudyId || !varCode) {
+      setGenderMapPreviewItems([]);
+      setGenderMapPreviewState("idle");
+      return;
+    }
+    setGenderMapPreviewState("loading");
+    const preview = await getDemographicsGenderMapPreviewDetailed(selectedStudyId, varCode, 50);
+    if (preview.ok && preview.data && typeof preview.data === "object") {
+      const data = preview.data as { items?: DemographicsGenderMapItem[] };
+      setGenderMapPreviewItems(Array.isArray(data.items) ? data.items : []);
+      setGenderMapPreviewState("success");
+    } else {
+      setGenderMapPreviewItems([]);
+      setGenderMapPreviewState("error");
+    }
+  }, [selectedStudyId]);
+
   useEffect(() => {
     if (!selectedStudyId) return;
     setDemographicsLabels({});
+    setGenderMapPreviewItems([]);
+    setGenderMapPreviewState("idle");
     setDemographicsPreview({});
     const loadDemographicsConfig = async () => {
       setDemographicsState("loading");
@@ -688,15 +712,18 @@ export default function RulesStudioPage() {
         setDateConstant(config.date?.constant || "");
         setDemographicsState("success");
         setDemographicsError(null);
+        await loadGenderMapPreview(config.gender_var);
       } else {
         setDemographicsConfig(null);
         setDemographicsState("error");
         setDemographicsError(result.error || "Failed to load demographics config.");
+        setGenderMapPreviewItems([]);
+        setGenderMapPreviewState("idle");
       }
     };
 
     loadDemographicsConfig();
-  }, [selectedStudyId]);
+  }, [selectedStudyId, loadGenderMapPreview]);
 
   useEffect(() => {
     if (!selectedStudyId || !rulesPayload) return;
@@ -1213,9 +1240,11 @@ export default function RulesStudioPage() {
     });
     setLastResponse(result);
     if (result.ok && result.data) {
-      setDemographicsConfig(result.data as DemographicsConfig);
+      const saved = result.data as DemographicsConfig;
+      setDemographicsConfig(saved);
       setDemographicsState("success");
       setDemographicsError(null);
+      await loadGenderMapPreview(saved.gender_var);
     } else {
       setDemographicsState("error");
       setDemographicsError(result.error || "Failed to save demographics.");
@@ -1248,6 +1277,8 @@ export default function RulesStudioPage() {
     if (result.ok) {
       setDemographicsState("success");
       setDemographicsError(null);
+      setGenderMapPreviewItems([]);
+      setGenderMapPreviewState("idle");
     } else {
       setDemographicsState("error");
       setDemographicsError(result.error || "Failed to clear demographics.");
@@ -1258,6 +1289,10 @@ export default function RulesStudioPage() {
     if (!demographicsConfig) return;
     const next = { ...demographicsConfig, [key]: value || null };
     setDemographicsConfig(next);
+
+    if (key === "gender_var") {
+      await loadGenderMapPreview(value || null);
+    }
 
     if (key === "age_var" && value) {
       const preview = await getDemographicsPreviewDetailed(selectedStudyId, value, 10);
@@ -1673,6 +1708,35 @@ export default function RulesStudioPage() {
                     ))}
                   </div>
                 )}
+                {demographicsConfig?.gender_var ? (
+                  <div className="mt-2 rounded-xl border border-ink/10 bg-white p-2 text-[10px] text-slate">
+                    <div className="mb-1 flex items-center justify-between">
+                      <p className="font-medium text-ink">Gender normalization preview</p>
+                      <span>{genderMapPreviewState}</span>
+                    </div>
+                    {genderMapPreviewItems.length === 0 ? (
+                      <p>No rows to preview.</p>
+                    ) : (
+                      <div className="max-h-40 overflow-auto">
+                        <div className="grid grid-cols-[1.6fr_1fr_72px] gap-2 border-b border-ink/10 pb-1 font-medium text-ink">
+                          <span>Raw label</span>
+                          <span>Standard</span>
+                          <span className="text-right">Count</span>
+                        </div>
+                        {genderMapPreviewItems.map((item, idx) => (
+                          <div
+                            key={`gender-map-${idx}-${item.raw_value}`}
+                            className="grid grid-cols-[1.6fr_1fr_72px] gap-2 py-1"
+                          >
+                            <span className="truncate">{item.raw_label}</span>
+                            <span>{item.standard_value}</span>
+                            <span className="text-right">{item.count}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
               </div>
               <div>
                 <p className="text-xs text-slate">Age (numeric)</p>
