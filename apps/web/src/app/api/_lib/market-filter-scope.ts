@@ -144,6 +144,17 @@ async function getStudiesCatalog(): Promise<StudyCatalogItem[]> {
   return items;
 }
 
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+  const set = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const key = value.trim();
+    if (!key) continue;
+    set.add(key);
+  }
+  return Array.from(set);
+}
+
 export async function resolveStandardFallbackForMarketSelection(input: {
   selection: MarketSelection;
   allowedStudyIds: string[] | null;
@@ -167,11 +178,17 @@ export async function resolveStandardFallbackForMarketSelection(input: {
       .filter((row) => (input.selection.sector ? row.market_sector === input.selection.sector : true));
   }
 
-  return {
-    sector: topValue(rows.map((row) => row.sector)),
-    subsector: topValue(rows.map((row) => row.subsector)),
-    category: topValue(rows.map((row) => row.category)),
-  };
+  const sectors = uniqueNonEmpty(rows.map((row) => row.sector));
+  const subsectors = uniqueNonEmpty(rows.map((row) => row.subsector));
+  const categories = uniqueNonEmpty(rows.map((row) => row.category));
+
+  // Avoid collapsing Market Lens selections into a single standard bucket when
+  // the selection spans multiple standard sectors/subsectors/categories.
+  const sector = sectors.length === 1 ? sectors[0] : null;
+  const subsector = subsectors.length === 1 ? subsectors[0] : null;
+  const category = categories.length === 1 ? categories[0] : null;
+
+  return { sector, subsector, category };
 }
 
 export async function applyMarketFilterToStudyIds(input: ScopePatchInput): Promise<ScopePatchResult> {

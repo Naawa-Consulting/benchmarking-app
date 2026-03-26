@@ -360,6 +360,12 @@ function hasMeaningfulEntities(payload: unknown): boolean {
   });
 }
 
+function countEntities(payload: unknown): number {
+  const series = toSeriesObject(payload);
+  const rows = Array.isArray(series?.entity_rows) ? series.entity_rows : [];
+  return rows.length;
+}
+
 async function maybeQuarterFallbackFromLegacy(
   request: NextRequest,
   method: "GET" | "POST",
@@ -698,6 +704,11 @@ async function applySupabaseMarketFallback(
 ) {
   if (getDataSource() !== "supabase") return { query, payload };
   if (!selection.sector && !selection.subsector && !selection.category) return { query, payload };
+  // When only macro-sector is selected, keep native Market Lens query.
+  // Falling back to standard here can collapse heterogeneous buckets and hide segments (e.g. Fashion).
+  if (selection.sector && !selection.subsector && !selection.category) {
+    return { query, payload };
+  }
 
   const requestedStudyIds = parseStudyIdsInput(payload.study_ids);
   const fallback = await resolveStandardFallbackForMarketSelection({
@@ -807,6 +818,11 @@ export async function GET(request: NextRequest) {
   }
   const normalized = normalizeTrackingPayloadTaxonomy(preferred, taxonomyView);
   const filteredNormalized = filterTrackingBySelection(normalized, taxonomyView, selection);
+  if (selection.sector && !selection.subsector && !selection.category) {
+    if (countEntities(filteredNormalized) <= 1 && countEntities(normalized) > 1) {
+      return NextResponse.json(normalized, { status: response.status });
+    }
+  }
   if (ENABLE_LEGACY_MARKET_REBUILD) {
     const rebuiltMarket = await rebuildSupabaseMarketSeries(
       request,
@@ -917,6 +933,11 @@ export async function POST(request: NextRequest) {
   }
   const normalized = normalizeTrackingPayloadTaxonomy(preferred, taxonomyView);
   const filteredNormalized = filterTrackingBySelection(normalized, taxonomyView, selection);
+  if (selection.sector && !selection.subsector && !selection.category) {
+    if (countEntities(filteredNormalized) <= 1 && countEntities(normalized) > 1) {
+      return NextResponse.json(normalized, { status: response.status });
+    }
+  }
   if (ENABLE_LEGACY_MARKET_REBUILD) {
     const rebuiltMarket = await rebuildSupabaseMarketSeries(
       request,
