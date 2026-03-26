@@ -425,6 +425,25 @@ export default function JourneyPage() {
     return { payload, fingerprint };
   }, [scopeKey, scope.taxonomyView]);
 
+  const globalFetchInputs = useMemo(() => {
+    const payload = {
+      study_ids: null,
+      taxonomy_view: scope.taxonomyView,
+      sector: null,
+      subsector: null,
+      category: null,
+      years: null,
+      gender: null,
+      nse: null,
+      state: null,
+      age_min: null,
+      age_max: null,
+      date_grain: null,
+    };
+    const fingerprint = JSON.stringify(payload);
+    return { payload, fingerprint };
+  }, [scope.taxonomyView]);
+
   useEffect(() => {
     let active = true;
     fetch("/api/auth/me", { cache: "no-store" })
@@ -794,7 +813,7 @@ export default function JourneyPage() {
   useEffect(() => {
     const seq = coreReqSeqRef.current + 1;
     coreReqSeqRef.current = seq;
-    coreFingerprintRef.current = fetchInputs.fingerprint;
+    coreFingerprintRef.current = globalFetchInputs.fingerprint;
     coreAbortRef.current?.abort();
     const abortController = new AbortController();
     coreAbortRef.current = abortController;
@@ -803,7 +822,7 @@ export default function JourneyPage() {
     setCoreLoading(true);
     setCoreMessage(null);
 
-    postJourneyTableMultiDetailed(fetchInputs.payload, "all", "brand_awareness", "desc", {
+    postJourneyTableMultiDetailed(globalFetchInputs.payload, "all", "brand_awareness", "desc", {
       responseMode: "benchmark_global",
       signal: abortController.signal,
     })
@@ -811,7 +830,7 @@ export default function JourneyPage() {
         if (
           abortController.signal.aborted ||
           seq !== coreReqSeqRef.current ||
-          coreFingerprintRef.current !== fetchInputs.fingerprint
+          coreFingerprintRef.current !== globalFetchInputs.fingerprint
         )
           return;
         if (!result.ok) {
@@ -843,7 +862,7 @@ export default function JourneyPage() {
         if (
           abortController.signal.aborted ||
           seq !== coreReqSeqRef.current ||
-          coreFingerprintRef.current !== fetchInputs.fingerprint
+          coreFingerprintRef.current !== globalFetchInputs.fingerprint
         )
           return;
         setCoreMessage(error instanceof Error ? error.message : "Unable to load global benchmark.");
@@ -852,7 +871,7 @@ export default function JourneyPage() {
         if (
           abortController.signal.aborted ||
           seq !== coreReqSeqRef.current ||
-          coreFingerprintRef.current !== fetchInputs.fingerprint
+          coreFingerprintRef.current !== globalFetchInputs.fingerprint
         )
           return;
         setCoreLoading(false);
@@ -861,7 +880,7 @@ export default function JourneyPage() {
     return () => {
       abortController.abort();
     };
-  }, [fetchInputs]);
+  }, [globalFetchInputs]);
 
   useEffect(() => {
     if (brandsEnabled) {
