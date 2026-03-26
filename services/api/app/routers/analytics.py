@@ -52,6 +52,7 @@ CORE_AWARENESS_BOUNDED_METRICS = (
     "brand_satisfaction",
     "brand_recommendation",
 )
+MIN_EXPERIENCE_BASE_N = 30
 
 
 def _discover_curated_studies(root: Path) -> list[str]:
@@ -1086,6 +1087,8 @@ def _compute_table_rows_internal(
             experience AS (
                 SELECT
                     p.brand,
+                    ss.max_v AS sat_scale_max,
+                    rs.max_v AS rec_scale_max,
                     COUNT(DISTINCT p.respondent_id) AS purchase_n,
                     COUNT(
                         DISTINCT CASE
@@ -1143,6 +1146,8 @@ def _compute_table_rows_internal(
                 s.satisfaction_denom,
                 s.recommendation_num,
                 s.recommendation_denom,
+                e.sat_scale_max,
+                e.rec_scale_max,
                 e.purchase_n,
                 e.top2_n,
                 e.bottom2_n,
@@ -1176,6 +1181,8 @@ def _compute_table_rows_internal(
             satisfaction_denom,
             recommendation_num,
             recommendation_denom,
+            sat_scale_max,
+            rec_scale_max,
             purchaser_n,
             top2_n,
             bottom2_n,
@@ -1211,12 +1218,19 @@ def _compute_table_rows_internal(
                         continue
                     values[metric] = round((float(numerator) / float(population_n)) * 100, 1)
 
-            if purchaser_n and purchaser_n > 0:
-                values["csat"] = round(((float(top2_n or 0) - float(bottom2_n or 0)) / float(purchaser_n)) * 100, 1)
-                values["nps"] = round(((float(promoters_n or 0) - float(detractors_n or 0)) / float(purchaser_n)) * 100, 1)
-            else:
-                values["csat"] = None
-                values["nps"] = None
+            values["csat"] = None
+            values["nps"] = None
+            if purchaser_n and purchaser_n >= MIN_EXPERIENCE_BASE_N:
+                # Only compute derived metrics when their source stage exists in this study slice.
+                if sat_scale_max is not None:
+                    values["csat"] = round(
+                        ((float(top2_n or 0) - float(bottom2_n or 0)) / float(purchaser_n)) * 100, 1
+                    )
+                # Only compute NPS when recommendation scale is NPS-like (0-10 or 1-10).
+                if rec_scale_max is not None and rec_scale_max >= 9:
+                    values["nps"] = round(
+                        ((float(promoters_n or 0) - float(detractors_n or 0)) / float(purchaser_n)) * 100, 1
+                    )
 
             awareness_ceiling_applied = _apply_awareness_ceiling(values)
             result_rows.append(
@@ -1390,6 +1404,8 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                 SELECT
                     p.q_key,
                     p.brand,
+                    ss.max_v AS sat_scale_max,
+                    rs.max_v AS rec_scale_max,
                     COUNT(DISTINCT p.respondent_id) AS purchase_n,
                     COUNT(
                         DISTINCT CASE
@@ -1452,6 +1468,8 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                 s.satisfaction_denom,
                 s.recommendation_num,
                 s.recommendation_denom,
+                e.sat_scale_max,
+                e.rec_scale_max,
                 e.purchase_n,
                 e.top2_n,
                 e.bottom2_n,
@@ -1484,6 +1502,8 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
         satisfaction_denom,
         recommendation_num,
         recommendation_denom,
+        sat_scale_max,
+        rec_scale_max,
         purchaser_n,
         top2_n,
         bottom2_n,
@@ -1520,12 +1540,14 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                     continue
                 values[metric] = round((float(numerator) / float(population_n)) * 100, 1)
 
-        if purchaser_n and purchaser_n > 0:
-            values["csat"] = round(((float(top2_n or 0) - float(bottom2_n or 0)) / float(purchaser_n)) * 100, 1)
-            values["nps"] = round(((float(promoters_n or 0) - float(detractors_n or 0)) / float(purchaser_n)) * 100, 1)
-        else:
-            values["csat"] = None
-            values["nps"] = None
+        values["csat"] = None
+        values["nps"] = None
+        if purchaser_n and purchaser_n >= MIN_EXPERIENCE_BASE_N:
+            if sat_scale_max is not None:
+                values["csat"] = round(((float(top2_n or 0) - float(bottom2_n or 0)) / float(purchaser_n)) * 100, 1)
+            # Only compute NPS when recommendation scale is NPS-like (0-10 or 1-10).
+            if rec_scale_max is not None and rec_scale_max >= 9:
+                values["nps"] = round(((float(promoters_n or 0) - float(detractors_n or 0)) / float(purchaser_n)) * 100, 1)
 
         awareness_ceiling_applied = _apply_awareness_ceiling(values)
         buckets.setdefault(q_key_int, []).append(

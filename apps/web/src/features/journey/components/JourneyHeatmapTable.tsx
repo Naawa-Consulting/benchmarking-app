@@ -54,6 +54,7 @@ const formatValue = (col: HeatmapColumn, value: number | null) => {
   if (col.key === "nps" || col.key === "csat") return `${(value * 100).toFixed(1)}%`;
   return pct(value);
 };
+const formatSample = (value: number) => Math.round(value).toLocaleString();
 
 const buildTooltip = (
   tab: HeatmapTab,
@@ -69,7 +70,7 @@ const buildTooltip = (
     return [
       `${rowLabel} - ${col.label}`,
       `Value: ${formatValue(col, cell.value)}`,
-      `Coverage: ${cell.coverageStudies}/${cell.totalStudies} studies`,
+      `Muestra entrevistada: ${formatSample(cell.coverageSample)} panelistas`,
     ].join("\n");
   }
 
@@ -86,7 +87,7 @@ const buildTooltip = (
       `${rowLabel} - ${col.label}`,
       `Conversion: ${pct(cell.value)}`,
       `Drop vs bench: ${pts(cell.delta)}`,
-      `Coverage: ${cell.coverageStudies}/${cell.totalStudies} studies`,
+      `Muestra entrevistada: ${formatSample(cell.coverageSample)} panelistas`,
       quality,
     ].join("\n");
   }
@@ -96,7 +97,7 @@ const buildTooltip = (
     `Value: ${formatValue(col, cell.value)}`,
     `${benchmarkLabel}: ${formatValue(col, cell.benchmarkValue)}`,
     `Delta: ${pts(cell.delta)}`,
-    `Coverage: ${cell.coverageStudies}/${cell.totalStudies} studies`,
+    `Muestra entrevistada: ${formatSample(cell.coverageSample)} panelistas`,
   ].join("\n");
 };
 

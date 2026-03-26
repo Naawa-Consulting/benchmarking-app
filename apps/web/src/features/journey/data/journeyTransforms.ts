@@ -64,7 +64,8 @@ const toNumber = (value: unknown): number | null => {
 };
 
 const normalizePct = (value: number): number => {
-  if (value <= 1) return Math.max(0, Math.min(1, value));
+  // Journey API values are percentage points (0..100). Keep a single scale path:
+  // 0.9 means 0.9%, not 90%.
   return Math.max(0, Math.min(1, value / 100));
 };
 

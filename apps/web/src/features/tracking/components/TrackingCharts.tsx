@@ -58,11 +58,32 @@ export default function TrackingCharts({
   const metricLabel = meta[effectiveMetric]?.label || effectiveMetric;
   const periodColors = ["#93c5fd", "#60a5fa", "#38bdf8", "#0ea5e9", "#2563eb", "#1d4ed8"];
   const deltaColors = ["#a7f3d0", "#6ee7b7", "#34d399", "#fcd34d", "#fca5a5", "#f87171"];
+  const toOneDecimal = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "--");
+  const escapeHtml = (value: string) =>
+    value
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
 
   const evolutionOption = useMemo(
     () => ({
       animationDuration: 300,
-      tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "shadow" },
+        formatter: (params: Array<{ axisValueLabel?: string; marker?: string; seriesName?: string; value?: unknown }>) => {
+          const items = Array.isArray(params) ? params : [];
+          const title = escapeHtml(String(items[0]?.axisValueLabel ?? ""));
+          const lines = items.map((item) => {
+            const marker = item.marker ?? "";
+            const seriesName = escapeHtml(String(item.seriesName ?? ""));
+            return `${marker}${seriesName}: ${toOneDecimal(item.value)}${unit}`;
+          });
+          return [title, ...lines].join("<br/>");
+        },
+      },
       legend: { top: 0, textStyle: { color: "#5b697f" } },
       grid: { top: 34, right: 20, bottom: 90, left: 52 },
       xAxis: { type: "category", data: labels, axisLabel: { color: "#1f2a3d", rotate: 24, interval: 0 } },
@@ -84,7 +105,20 @@ export default function TrackingCharts({
   const deltaOption = useMemo(
     () => ({
       animationDuration: 300,
-      tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "shadow" },
+        formatter: (params: Array<{ axisValueLabel?: string; marker?: string; seriesName?: string; value?: unknown }>) => {
+          const items = Array.isArray(params) ? params : [];
+          const title = escapeHtml(String(items[0]?.axisValueLabel ?? ""));
+          const lines = items.map((item) => {
+            const marker = item.marker ?? "";
+            const seriesName = escapeHtml(String(item.seriesName ?? ""));
+            return `${marker}${seriesName}: ${toOneDecimal(item.value)} pts`;
+          });
+          return [title, ...lines].join("<br/>");
+        },
+      },
       legend: { top: 0, textStyle: { color: "#5b697f" } },
       grid: { top: 24, right: 20, bottom: 90, left: 52 },
       xAxis: { type: "category", data: labels, axisLabel: { color: "#1f2a3d", rotate: 24, interval: 0 } },

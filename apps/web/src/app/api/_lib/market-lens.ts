@@ -29,6 +29,26 @@ function valueOr(defaultValue: string, value: unknown) {
   return trimmed || defaultValue;
 }
 
+function isGenericMarketFallback(market: MarketLens) {
+  const sector = normalize(market.market_sector);
+  const subsector = normalize(market.market_subsector);
+  const category = normalize(market.market_category);
+  if (
+    sector === "industry & manufacturing" &&
+    subsector === "manufacturing" &&
+    category === "general industry"
+  ) {
+    return true;
+  }
+  if (sector === "services" && subsector === "consumer services" && category === "general services") {
+    return true;
+  }
+  if (sector === "retail & commerce" && subsector === "retail" && category === "general retail") {
+    return true;
+  }
+  return false;
+}
+
 const CATEGORY_RULES: Record<string, MarketLens> = {
   farmacias: {
     market_sector: "Health & Wellness",
@@ -50,6 +70,31 @@ const CATEGORY_RULES: Record<string, MarketLens> = {
     market_subsector: "Healthcare Services",
     market_category: "Labs",
   },
+  medicamentos: {
+    market_sector: "Health & Wellness",
+    market_subsector: "Consumer Health",
+    market_category: "OTC Brands",
+  },
+  "tiendas de descuento": {
+    market_sector: "Retail & Commerce",
+    market_subsector: "Mass Retail",
+    market_category: "Discount Retail",
+  },
+  "tiendas de ropa": {
+    market_sector: "Retail & Commerce",
+    market_subsector: "Fashion",
+    market_category: "Apparel Stores",
+  },
+  "quimicos y soluciones para la construccion": {
+    market_sector: "Industry & Manufacturing",
+    market_subsector: "Home Improvement",
+    market_category: "Materials & Supplies",
+  },
+  "quimicos y soluciones para la construcciã³n": {
+    market_sector: "Industry & Manufacturing",
+    market_subsector: "Home Improvement",
+    market_category: "Materials & Supplies",
+  },
 };
 
 const SUBSECTOR_RULES: Record<string, MarketLens> = {
@@ -60,8 +105,23 @@ const SUBSECTOR_RULES: Record<string, MarketLens> = {
   },
   autoservicios: {
     market_sector: "Retail & Commerce",
-    market_subsector: "Modern Trade",
+    market_subsector: "Mass Retail",
     market_category: "Mass Retail",
+  },
+  salud: {
+    market_sector: "Health & Wellness",
+    market_subsector: "Consumer Health",
+    market_category: "OTC Brands",
+  },
+  "materiales para la construccion": {
+    market_sector: "Industry & Manufacturing",
+    market_subsector: "Home Improvement",
+    market_category: "Materials & Supplies",
+  },
+  "materiales para la construcciã³n": {
+    market_sector: "Industry & Manufacturing",
+    market_subsector: "Home Improvement",
+    market_category: "Materials & Supplies",
   },
   "comercio especializado": {
     market_sector: "Retail & Commerce",
@@ -115,6 +175,8 @@ export function deriveMarketLens(input: DeriveInput): MarketLens {
 }
 
 export function resolveMarketLens(input: DeriveInput): MarketLens {
+  const derived = deriveMarketLens(input);
+
   const explicitMarket =
     typeof input.market_sector === "string" &&
     input.market_sector.trim() &&
@@ -134,9 +196,13 @@ export function resolveMarketLens(input: DeriveInput): MarketLens {
       normalize(market.market_subsector) === normalize(input.subsector) &&
       normalize(market.market_category) === normalize(input.category);
     if (!looksLikeStandard) {
+      // Auto-repair stale legacy "generic" mappings persisted in Supabase snapshots.
+      if (isGenericMarketFallback(market) && !isGenericMarketFallback(derived)) {
+        return derived;
+      }
       return market;
     }
   }
 
-  return deriveMarketLens(input);
+  return derived;
 }

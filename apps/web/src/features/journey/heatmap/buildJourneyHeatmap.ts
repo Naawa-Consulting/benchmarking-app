@@ -35,6 +35,7 @@ export type HeatmapCell = {
   delta: number | null;
   coverageStudies: number;
   totalStudies: number;
+  coverageSample: number;
   missing: boolean;
   anomalyFlag?: boolean;
   excludedFromIndex?: boolean;
@@ -88,6 +89,17 @@ export function buildJourneyHeatmap(
   options?: BuildJourneyHeatmapOptions
 ): JourneyHeatmapMatrix {
   const totalStudies = new Set(model.rows.map((row) => row.studyId)).size;
+  const studySampleById = new Map<string, number>();
+  const brandSampleByName = new Map<string, number>();
+  for (const row of model.rows) {
+    const sample = row.basePopulationN ?? row.baseN ?? null;
+    if (typeof sample !== "number" || sample <= 0) continue;
+    const studyPrev = studySampleById.get(row.studyId) ?? 0;
+    if (sample > studyPrev) studySampleById.set(row.studyId, sample);
+    const brandPrev = brandSampleByName.get(row.brandName) ?? 0;
+    if (sample > brandPrev) brandSampleByName.set(row.brandName, sample);
+  }
+  const selectionSampleN = Array.from(studySampleById.values()).reduce((sum, n) => sum + n, 0);
   const selected = model.brandStageAggregates.filter(
     (item) => selectedBrands.length === 0 || selectedBrands.includes(item.brandName)
   );
@@ -162,6 +174,7 @@ export function buildJourneyHeatmap(
           delta: 0,
           coverageStudies: stage?.stageCoverageStudies ?? 0,
           totalStudies,
+          coverageSample: selectionSampleN,
           missing: stage?.value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -176,6 +189,7 @@ export function buildJourneyHeatmap(
           delta: 0,
           coverageStudies: link?.linkCoverageStudies ?? 0,
           totalStudies,
+          coverageSample: selectionSampleN,
           missing: link?.conversion == null,
           anomalyFlag: link?.anomalyFlag ?? false,
           excludedFromIndex: link?.excludedFromIndex ?? false,
@@ -189,6 +203,7 @@ export function buildJourneyHeatmap(
           delta: 0,
           coverageStudies: journeyIndex.studiesCovered,
           totalStudies,
+          coverageSample: selectionSampleN,
           missing: journeyIndex.value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -200,6 +215,7 @@ export function buildJourneyHeatmap(
           delta: 0,
           coverageStudies: stageMap.get("Brand Satisfaction")?.stageCoverageStudies ?? 0,
           totalStudies,
+          coverageSample: selectionSampleN,
           missing: aggregate.csat.value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -211,6 +227,7 @@ export function buildJourneyHeatmap(
           delta: 0,
           coverageStudies: stageMap.get("Brand Recommendation")?.stageCoverageStudies ?? 0,
           totalStudies,
+          coverageSample: selectionSampleN,
           missing: aggregate.nps.value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -249,6 +266,7 @@ export function buildJourneyHeatmap(
           delta: typeof value === "number" && typeof benchValue === "number" ? value - benchValue : null,
           coverageStudies: val?.stageCoverageStudies ?? 0,
           totalStudies,
+          coverageSample: brandSampleByName.get(brand.brandName) ?? 0,
           missing: value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -266,6 +284,7 @@ export function buildJourneyHeatmap(
           delta: typeof value === "number" && typeof benchValue === "number" ? value - benchValue : null,
           coverageStudies: val?.linkCoverageStudies ?? 0,
           totalStudies,
+          coverageSample: brandSampleByName.get(brand.brandName) ?? 0,
           missing: value == null,
           anomalyFlag: val?.anomalyFlag ?? false,
           excludedFromIndex: val?.excludedFromIndex ?? false,
@@ -283,6 +302,7 @@ export function buildJourneyHeatmap(
           delta: typeof value === "number" && typeof benchValue === "number" ? value - benchValue : null,
           coverageStudies: indexEntry?.studiesCovered ?? 0,
           totalStudies,
+          coverageSample: brandSampleByName.get(brand.brandName) ?? 0,
           missing: value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -296,6 +316,7 @@ export function buildJourneyHeatmap(
           delta: typeof value === "number" && typeof benchValue === "number" ? value - benchValue : null,
           coverageStudies: stageVal(brand, "Brand Satisfaction")?.stageCoverageStudies ?? 0,
           totalStudies,
+          coverageSample: brandSampleByName.get(brand.brandName) ?? 0,
           missing: value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -309,6 +330,7 @@ export function buildJourneyHeatmap(
           delta: typeof value === "number" && typeof benchValue === "number" ? value - benchValue : null,
           coverageStudies: stageVal(brand, "Brand Recommendation")?.stageCoverageStudies ?? 0,
           totalStudies,
+          coverageSample: brandSampleByName.get(brand.brandName) ?? 0,
           missing: value == null,
           anomalyFlag: false,
           excludedFromIndex: false,

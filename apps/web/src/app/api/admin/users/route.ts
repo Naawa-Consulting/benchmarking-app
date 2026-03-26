@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getRequestAuthz } from "../../_lib/authz";
-import { supabaseAdminPostgrest, supabaseAuthAdmin } from "../../_lib/supabase-admin";
+import { getSupabaseAdminConfig, supabaseAdminPostgrest, supabaseAuthAdmin } from "../../_lib/supabase-admin";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +10,7 @@ type AuthAdminUser = {
   created_at?: string | null;
   last_sign_in_at?: string | null;
   email_confirmed_at?: string | null;
+  banned_until?: string | null;
 };
 
 const ALLOWED_ROLES = new Set(["owner", "admin", "analyst", "viewer"]);
@@ -17,6 +18,39 @@ const ALLOWED_ROLES = new Set(["owner", "admin", "analyst", "viewer"]);
 function normalizeRole(value: unknown) {
   const role = typeof value === "string" ? value.trim().toLowerCase() : "";
   return ALLOWED_ROLES.has(role) ? role : "viewer";
+}
+
+async function supabaseAuthRequest(
+  path: string,
+  init: {
+    method?: "GET" | "POST" | "PATCH" | "DELETE";
+    body?: unknown;
+    headers?: Record<string, string>;
+  } = {}
+) {
+  const { url, serviceRoleKey } = getSupabaseAdminConfig();
+  const method = init.method || "GET";
+  const response = await fetch(`${url}/auth/v1/${path.replace(/^\/+/, "")}`, {
+    method,
+    headers: {
+      apikey: serviceRoleKey,
+      Authorization: `Bearer ${serviceRoleKey}`,
+      "Content-Type": "application/json",
+      ...init.headers,
+    },
+    body: init.body == null ? undefined : JSON.stringify(init.body),
+    cache: "no-store",
+  });
+  const text = await response.text();
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+  return { response, data };
 }
 
 async function requireAdminAccess(request: NextRequest) {
@@ -100,6 +134,7 @@ export async function GET(request: NextRequest) {
         created_at: user.created_at ?? null,
         last_sign_in_at: user.last_sign_in_at ?? null,
         email_confirmed_at: user.email_confirmed_at ?? null,
+        disabled: Boolean(user.banned_until),
         can_toggle_brands: role === "owner" || role === "admin" || canToggleByUser.has(id),
         scope_counts: scopeCountsByUser.get(id) || { market_sector: 0, market_subsector: 0, market_category: 0 },
       };
@@ -153,15 +188,49 @@ export async function POST(request: NextRequest) {
     body: [{ user_id: userId, role }],
   });
 
-  const redirectTo = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000/auth/reset";
-  const recoveryResult = await supabaseAuthAdmin("generate_link", {
+  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000").replace(/\/+$/, "");
+  const redirectTo = `${siteUrl}/auth/reset`;
+
+  let inviteMethod: "invite" | "recover" | "generate_link" = "invite";
+  let inviteSent = false;
+  let inviteError: unknown = null;
+  let manualLink: string | null = null;
+
+  const inviteResult = await supabaseAuthRequest("invite", {
     method: "POST",
-    body: {
-      type: "recovery",
-      email,
-      options: { redirectTo },
-    },
+    body: { email, data: { invited_by_bbs_admin: true }, redirect_to: redirectTo },
   });
+  if (inviteResult.response.ok) {
+    inviteSent = true;
+  } else {
+    inviteMethod = "recover";
+    const recoverResult = await supabaseAuthRequest("recover", {
+      method: "POST",
+      body: { email, redirect_to: redirectTo },
+    });
+    if (recoverResult.response.ok) {
+      inviteSent = true;
+    } else {
+      inviteMethod = "generate_link";
+      const recoveryResult = await supabaseAuthAdmin("generate_link", {
+        method: "POST",
+        body: {
+          type: "recovery",
+          email,
+          options: { redirectTo, redirect_to: redirectTo },
+        },
+      });
+      if (recoveryResult.response.ok) {
+        const payload = recoveryResult.data as { properties?: { action_link?: string | null } } | null;
+        manualLink = payload?.properties?.action_link || null;
+      } else {
+        inviteError = recoveryResult.data;
+      }
+      if (!inviteError) {
+        inviteError = { invite: inviteResult.data, recover: recoverResult.data };
+      }
+    }
+  }
 
   return NextResponse.json({
     ok: true,
@@ -171,8 +240,10 @@ export async function POST(request: NextRequest) {
       role,
     },
     invite: {
-      sent: recoveryResult.response.ok,
-      error: recoveryResult.response.ok ? null : recoveryResult.data,
+      sent: inviteSent,
+      method: inviteMethod,
+      manual_link: manualLink,
+      error: inviteSent ? null : inviteError,
     },
   });
 }

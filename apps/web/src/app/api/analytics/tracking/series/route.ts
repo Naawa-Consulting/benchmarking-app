@@ -6,6 +6,7 @@ import { applyMarketFilterToStudyIds, resolveStandardFallbackForMarketSelection 
 import { expandNseInPayload, expandNseInQuery } from "../../../_lib/demographics";
 
 export const dynamic = "force-dynamic";
+const ENABLE_LEGACY_MARKET_REBUILD = process.env.BBS_ENABLE_LEGACY_MARKET_REBUILD === "1";
 
 function getLegacyBaseUrlForTracking() {
   const base = (
@@ -349,6 +350,16 @@ function toSeriesObject(payload: unknown): TrackingPayload | null {
   return payload as TrackingPayload;
 }
 
+function hasMeaningfulEntities(payload: unknown): boolean {
+  const series = toSeriesObject(payload);
+  const rows = Array.isArray(series?.entity_rows) ? series.entity_rows : [];
+  if (!rows.length) return false;
+  return rows.some((row) => {
+    const entity = typeof row.entity === "string" ? row.entity.trim().toLowerCase() : "";
+    return entity.length > 0 && entity !== "unassigned";
+  });
+}
+
 async function maybeQuarterFallbackFromLegacy(
   request: NextRequest,
   method: "GET" | "POST",
@@ -617,16 +628,14 @@ async function rebuildSupabaseMarketSeries(
     const series = toSeriesObject(json);
     if (!series || !Array.isArray(series.entity_rows)) continue;
     if (!template) template = series;
-    if (series.resolved_breakdown === "subsector") {
-      for (const row of series.entity_rows) {
-        const tagged: TaggedTrackingRow = {
-          entity: row.entity,
-          metrics: row.metrics,
-          __market_sector: group.marketSector,
-          __market_subsector: group.marketSubsector || null,
-        };
-        rows.push(tagged);
-      }
+    for (const row of series.entity_rows) {
+      const tagged: TaggedTrackingRow = {
+        entity: row.entity,
+        metrics: row.metrics,
+        __market_sector: group.marketSector,
+        __market_subsector: group.marketSubsector || null,
+      };
+      rows.push(tagged);
     }
   }
 
@@ -797,8 +806,21 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(preferred, { status: response.status });
   }
   const normalized = normalizeTrackingPayloadTaxonomy(preferred, taxonomyView);
-  const filtered = filterTrackingBySelection(normalized, taxonomyView, selection);
-  return NextResponse.json(filtered, { status: response.status });
+  const filteredNormalized = filterTrackingBySelection(normalized, taxonomyView, selection);
+  if (ENABLE_LEGACY_MARKET_REBUILD) {
+    const rebuiltMarket = await rebuildSupabaseMarketSeries(
+      request,
+      supabaseFallback.payload,
+      selection
+    );
+    if (rebuiltMarket && hasMeaningfulEntities(rebuiltMarket)) {
+      const filteredRebuilt = filterTrackingBySelection(rebuiltMarket, taxonomyView, selection);
+      if (hasMeaningfulEntities(filteredRebuilt)) {
+        return NextResponse.json(filteredRebuilt, { status: response.status });
+      }
+    }
+  }
+  return NextResponse.json(filteredNormalized, { status: response.status });
 }
 
 export async function POST(request: NextRequest) {
@@ -894,8 +916,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(preferred, { status: response.status });
   }
   const normalized = normalizeTrackingPayloadTaxonomy(preferred, taxonomyView);
-  const filtered = filterTrackingBySelection(normalized, taxonomyView, selection);
-  return NextResponse.json(filtered, { status: response.status });
+  const filteredNormalized = filterTrackingBySelection(normalized, taxonomyView, selection);
+  if (ENABLE_LEGACY_MARKET_REBUILD) {
+    const rebuiltMarket = await rebuildSupabaseMarketSeries(
+      request,
+      supabaseFallback.payload,
+      selection
+    );
+    if (rebuiltMarket && hasMeaningfulEntities(rebuiltMarket)) {
+      const filteredRebuilt = filterTrackingBySelection(rebuiltMarket, taxonomyView, selection);
+      if (hasMeaningfulEntities(filteredRebuilt)) {
+        return NextResponse.json(filteredRebuilt, { status: response.status });
+      }
+    }
+  }
+  return NextResponse.json(filteredNormalized, { status: response.status });
 }
 
 

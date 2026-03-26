@@ -18,7 +18,7 @@ function withAuthHeaders(serviceRoleKey: string, extra?: Record<string, string>)
 export async function supabaseAdminPostgrest(
   path: string,
   init: {
-    method?: "GET" | "POST" | "PATCH" | "DELETE";
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
     body?: unknown;
     headers?: Record<string, string>;
   } = {}
@@ -49,7 +49,7 @@ export async function supabaseAdminPostgrest(
 export async function supabaseAuthAdmin(
   path: string,
   init: {
-    method?: "GET" | "POST" | "PATCH" | "DELETE";
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
     body?: unknown;
     headers?: Record<string, string>;
   } = {}

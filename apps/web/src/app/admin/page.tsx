@@ -1,8 +1,9 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useState } from "react";
 import {
   createAdminUserDetailed,
+  deleteAdminUserDetailed,
   getAdminUserAccessDetailed,
   getAdminUsersDetailed,
   patchAdminUserAccessDetailed,
@@ -132,13 +133,18 @@ export default function AdminUsersPage() {
 
   const selectedUserRole: BbsRole = selectedUser?.role || "viewer";
   const extractError = (result: { error: string | null; data: unknown }) => {
+    const parts: string[] = [];
     if (result.data && typeof result.data === "object") {
       const data = result.data as { detail?: string; error?: unknown };
-      if (typeof data.detail === "string" && data.detail.trim()) return data.detail;
-      if (typeof data.error === "string" && data.error.trim()) return data.error;
-      if (data.error) return JSON.stringify(data.error);
+      if (typeof data.detail === "string" && data.detail.trim()) parts.push(data.detail);
+      if (typeof data.error === "string" && data.error.trim()) {
+        parts.push(data.error);
+      } else if (data.error) {
+        parts.push(JSON.stringify(data.error));
+      }
     }
-    return result.error || "Unexpected error";
+    if (result.error) parts.push(result.error);
+    return parts.join(" ") || "Unexpected error";
   };
 
   return (
@@ -180,7 +186,7 @@ export default function AdminUsersPage() {
               >
                 <p className="font-medium text-ink">{user.email || user.id}</p>
               <p className="text-xs text-slate">
-                  Role: {roleLabel(user.role)} · Scopes: MS:{user.scope_counts.market_sector} SEG:
+                  Role: {roleLabel(user.role)} {user.disabled ? "· Disabled" : "· Enabled"} · Scopes: MS:{user.scope_counts.market_sector} SEG:
                   {user.scope_counts.market_subsector} CAT:{user.scope_counts.market_category}
                 </p>
               </button>
@@ -221,7 +227,18 @@ export default function AdminUsersPage() {
                   setSaving(false);
                   return;
                 }
-                setMessage("Usuario creado. Se intentó enviar recovery link para definir contraseña.");
+                const data = (result.data || {}) as {
+                  invite?: { sent?: boolean; manual_link?: string | null; error?: unknown };
+                };
+                if (data.invite?.sent) {
+                  setMessage("Usuario creado y correo de invitación enviado.");
+                } else if (typeof data.invite?.manual_link === "string" && data.invite.manual_link.trim()) {
+                  setMessage(
+                    `Usuario creado. No se pudo enviar email automático; usa este link manual: ${data.invite.manual_link}`
+                  );
+                } else {
+                  setMessage("Usuario creado. No se pudo enviar email automático.");
+                }
                 setNewEmail("");
                 setNewRole("viewer");
                 await loadUsers();
@@ -245,6 +262,9 @@ export default function AdminUsersPage() {
                 </p>
                 <p className="text-xs text-slate">
                   Created: {selectedUser.created_at || "-"} · Last sign in: {selectedUser.last_sign_in_at || "-"}
+                </p>
+                <p className="text-xs text-slate">
+                  Estado: {selectedUser.disabled ? "Deshabilitado" : "Habilitado"}
                 </p>
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium">Role</span>
@@ -272,6 +292,60 @@ export default function AdminUsersPage() {
                       </option>
                     ))}
                   </select>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    className="rounded-full border border-ink/10 px-3 py-1.5 text-xs font-medium"
+                    disabled={saving}
+                    onClick={async () => {
+                      setSaving(true);
+                      setError(null);
+                      const result = await patchAdminUserRoleDetailed(selectedUser.id, {
+                        disabled: !Boolean(selectedUser.disabled),
+                      });
+                      if (!result.ok) {
+                        setError(`No se pudo actualizar el estado del usuario. ${extractError(result)}`);
+                        setSaving(false);
+                        return;
+                      }
+                      setMessage(
+                        !Boolean(selectedUser.disabled)
+                          ? "Usuario deshabilitado."
+                          : "Usuario habilitado."
+                      );
+                      await loadUsers();
+                      setSaving(false);
+                    }}
+                  >
+                    {selectedUser.disabled ? "Enable user" : "Disable user"}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700"
+                    disabled={saving}
+                    onClick={async () => {
+                      const confirmed = window.confirm(
+                        "¿Eliminar este usuario? Esta acción borra accesos/roles y no se puede deshacer."
+                      );
+                      if (!confirmed) return;
+                      setSaving(true);
+                      setError(null);
+                      const result = await deleteAdminUserDetailed(selectedUser.id);
+                      if (!result.ok) {
+                        setError(`No se pudo eliminar el usuario. ${extractError(result)}`);
+                        setSaving(false);
+                        return;
+                      }
+                      setMessage("Usuario eliminado.");
+                      setSelectedUserId("");
+                      setAccess(null);
+                      await loadUsers();
+                      setSaving(false);
+                    }}
+                  >
+                    Delete user
+                  </button>
                 </div>
               </div>
 
@@ -364,3 +438,4 @@ export default function AdminUsersPage() {
     </main>
   );
 }
+

@@ -176,6 +176,7 @@ export interface AdminUserItem {
   id: string;
   email: string | null;
   role: BbsRole;
+  disabled?: boolean;
   created_at: string | null;
   last_sign_in_at: string | null;
   email_confirmed_at: string | null;

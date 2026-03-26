@@ -500,11 +500,17 @@ export function createAdminUserDetailed(payload: { email: string; role: "owner" 
 
 export function patchAdminUserRoleDetailed(
   userId: string,
-  payload: { role: "owner" | "admin" | "analyst" | "viewer" }
+  payload: { role?: "owner" | "admin" | "analyst" | "viewer"; disabled?: boolean }
 ) {
   return requestDetailedLocal(`/api/admin/users/${encodeURIComponent(userId)}`, {
     method: "PATCH",
     body: JSON.stringify(payload),
+  });
+}
+
+export function deleteAdminUserDetailed(userId: string) {
+  return requestDetailedLocal(`/api/admin/users/${encodeURIComponent(userId)}`, {
+    method: "DELETE",
   });
 }
 

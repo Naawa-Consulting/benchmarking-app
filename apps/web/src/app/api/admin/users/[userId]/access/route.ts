@@ -15,6 +15,19 @@ function normalizeStrings(values: unknown): string[] {
   ).sort();
 }
 
+function isScopeTypeConstraintError(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const payload = error as { code?: string; message?: string; details?: string; hint?: string };
+  const code = typeof payload.code === "string" ? payload.code : "";
+  const details = `${payload.message || ""} ${payload.details || ""} ${payload.hint || ""}`.toLowerCase();
+  return (
+    code === "23514" ||
+    code === "PGRST204" ||
+    details.includes("scope_type") ||
+    details.includes("check constraint")
+  );
+}
+
 async function requireAdminAccess(request: NextRequest) {
   const authz = await getRequestAuthz(request);
   if (!authz.is_admin_module_allowed) {
@@ -63,9 +76,9 @@ export async function GET(
       const key = typeof row.scope_key === "string" ? row.scope_key.trim() : "";
       const type = typeof row.scope_type === "string" ? row.scope_type.toLowerCase() : "";
       if (!key) continue;
-      if (type === "market_sector") scopes.market_sector.push(key);
-      if (type === "market_subsector") scopes.market_subsector.push(key);
-      if (type === "market_category") scopes.market_category.push(key);
+      if (type === "market_sector" || type === "sector") scopes.market_sector.push(key);
+      if (type === "market_subsector" || type === "subsector") scopes.market_subsector.push(key);
+      if (type === "market_category" || type === "category") scopes.market_category.push(key);
     }
   }
 
@@ -182,17 +195,41 @@ export async function PATCH(
   ];
 
   if (scopeRows.length) {
-    const insertScopes = await supabaseAdminPostgrest("user_access_scopes", {
+    let insertScopes = await supabaseAdminPostgrest("user_access_scopes", {
       method: "POST",
       headers: { Prefer: "resolution=ignore-duplicates,return=minimal" },
       body: scopeRows,
     });
+
+    let scopeMode: "market" | "legacy" = "market";
+    if (!insertScopes.response.ok && isScopeTypeConstraintError(insertScopes.data)) {
+      const legacyRows = [
+        ...sector.map((scope_key) => ({ user_id: userId, scope_type: "sector", scope_key })),
+        ...subsector.map((scope_key) => ({ user_id: userId, scope_type: "subsector", scope_key })),
+        ...category.map((scope_key) => ({ user_id: userId, scope_type: "category", scope_key })),
+      ];
+      insertScopes = await supabaseAdminPostgrest("user_access_scopes", {
+        method: "POST",
+        headers: { Prefer: "resolution=ignore-duplicates,return=minimal" },
+        body: legacyRows,
+      });
+      scopeMode = "legacy";
+    }
+
     if (!insertScopes.response.ok) {
       return NextResponse.json(
         { detail: "Failed to save user scopes.", error: insertScopes.data },
         { status: insertScopes.response.status || 500 }
       );
     }
+
+    return NextResponse.json({
+      ok: true,
+      user_id: userId,
+      can_toggle_brands: canToggleBrands,
+      scope_mode: scopeMode,
+      scopes: { market_sector: sector, market_subsector: subsector, market_category: category },
+    });
   }
 
   return NextResponse.json({
