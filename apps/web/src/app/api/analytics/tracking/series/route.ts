@@ -95,6 +95,33 @@ function sanitizeMetricSeries(
   return { values, deltas };
 }
 
+function sanitizeUnknownMetrics(
+  metrics: unknown,
+  validPeriods: Set<string>,
+  validDeltaKeys: Set<string>
+): Record<string, MetricSeries> {
+  const safeMetrics = (metrics && typeof metrics === "object" ? metrics : {}) as Record<string, MetricSeries>;
+  return Object.fromEntries(
+    Object.entries(safeMetrics).map(([metricKey, metricSeries]) => [
+      metricKey,
+      sanitizeMetricSeries(metricSeries, validPeriods, validDeltaKeys),
+    ])
+  );
+}
+
+function sanitizeUnknownRow(
+  row: unknown,
+  validPeriods: Set<string>,
+  validDeltaKeys: Set<string>
+) {
+  if (!row || typeof row !== "object") return row;
+  const safeRow = row as Record<string, unknown>;
+  return {
+    ...safeRow,
+    metrics: sanitizeUnknownMetrics(safeRow.metrics, validPeriods, validDeltaKeys),
+  };
+}
+
 function sanitizeSeriesObject(series: TrackingPayload): TrackingPayload {
   const rawPeriods = Array.isArray(series.periods) ? series.periods : [];
   const periods = rawPeriods
@@ -145,26 +172,10 @@ function sanitizeSeriesObject(series: TrackingPayload): TrackingPayload {
     entity_rows: sanitizeRows(series.entity_rows),
     secondary_rows: sanitizeRows(series.secondary_rows as unknown as TrackingRow[]) as unknown as TrackingPayload["secondary_rows"],
     brand_rows: Array.isArray(series.brand_rows)
-      ? series.brand_rows.map((row) => ({
-          ...row,
-          metrics: Object.fromEntries(
-            Object.entries((row as { metrics?: Record<string, MetricSeries> }).metrics || {}).map(([metricKey, metricSeries]) => [
-              metricKey,
-              sanitizeMetricSeries(metricSeries, validPeriods, validDeltaKeys),
-            ])
-          ),
-        }))
+      ? series.brand_rows.map((row) => sanitizeUnknownRow(row, validPeriods, validDeltaKeys))
       : series.brand_rows,
     touchpoint_rows: Array.isArray(series.touchpoint_rows)
-      ? series.touchpoint_rows.map((row) => ({
-          ...row,
-          metrics: Object.fromEntries(
-            Object.entries((row as { metrics?: Record<string, MetricSeries> }).metrics || {}).map(([metricKey, metricSeries]) => [
-              metricKey,
-              sanitizeMetricSeries(metricSeries, validPeriods, validDeltaKeys),
-            ])
-          ),
-        }))
+      ? series.touchpoint_rows.map((row) => sanitizeUnknownRow(row, validPeriods, validDeltaKeys))
       : series.touchpoint_rows,
   };
 }
