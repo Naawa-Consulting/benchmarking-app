@@ -230,7 +230,9 @@ const getOfficialMetric = (rows: JourneyStageRow[], fields: string[]) => {
       if (!Object.hasOwn(raw, field)) continue;
       const valueRaw = numberOrNull(raw[field]);
       if (valueRaw == null) continue;
-      const value = valueRaw > 1 ? valueRaw / 100 : valueRaw;
+      // Normalize percentage-point inputs to 0..1 preserving sign.
+      // Example: 53.5 -> 0.535, -15.8 -> -0.158.
+      const value = Math.abs(valueRaw) > 1 ? valueRaw / 100 : valueRaw;
       points.push({ value, weight: row.weight });
       break;
     }

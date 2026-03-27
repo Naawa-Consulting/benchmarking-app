@@ -22,6 +22,47 @@ type MarketSelection = {
   category: string | null;
 };
 
+function buildGlobalBenchmarkInputs(
+  query: Record<string, string>,
+  payload: Record<string, unknown>
+): { query: Record<string, string>; payload: Record<string, unknown> } {
+  const nextQuery = { ...query };
+  const nextPayload: Record<string, unknown> = { ...payload };
+
+  const clearQueryKeys = [
+    "studies",
+    "study_ids",
+    "sector",
+    "subsector",
+    "category",
+    "years",
+    "gender",
+    "nse",
+    "state",
+    "age_min",
+    "age_max",
+    "date_grain",
+  ];
+  for (const key of clearQueryKeys) {
+    delete nextQuery[key];
+  }
+
+  nextPayload.study_ids = null;
+  nextPayload.sector = null;
+  nextPayload.subsector = null;
+  nextPayload.category = null;
+  nextPayload.years = null;
+  nextPayload.gender = null;
+  nextPayload.nse = null;
+  nextPayload.state = null;
+  nextPayload.age_min = null;
+  nextPayload.age_max = null;
+  nextPayload.date_grain = null;
+  nextPayload.brands = null;
+
+  return { query: nextQuery, payload: nextPayload };
+}
+
 function applyMarketLensToRow(row: JourneyRow): JourneyRow {
   const market = resolveMarketLens({
     sector: typeof row.sector === "string" ? row.sector : null,
@@ -88,12 +129,15 @@ function applySelectionFilterToJourneyPayload(
 async function respondWithTaxonomyNormalization(
   response: NextResponse,
   taxonomyView: "market" | "standard",
-  selection: MarketSelection
+  selection: MarketSelection,
+  applySelectionFilter = true
 ) {
   if (!response.ok) return response;
   const payload = await response.json().catch(() => null);
   const normalized = normalizeJourneyTaxonomyPayload(payload, taxonomyView);
-  const filtered = applySelectionFilterToJourneyPayload(normalized, taxonomyView, selection);
+  const filtered = applySelectionFilter
+    ? applySelectionFilterToJourneyPayload(normalized, taxonomyView, selection)
+    : normalized;
   return NextResponse.json(filtered, { status: response.status });
 }
 
@@ -131,24 +175,23 @@ export async function GET(request: NextRequest) {
   const skipViewerScoping = responseMode === "benchmark_global";
 
   if (skipViewerScoping) {
-    const preScoped = await applyMarketFilterToStudyIds({
-      query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
-      payload: {},
-      allowedStudyIds: null,
-    });
-    const queryString = new URLSearchParams(preScoped.query).toString();
+    const globalInputs = buildGlobalBenchmarkInputs(
+      expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
+      {}
+    );
+    const queryString = new URLSearchParams(globalInputs.query).toString();
     const query = queryString ? `?${queryString}` : "";
     const response = await handleWithDataSource(
       request,
       `/analytics/journey/table_multi${query}`,
       "bbs_journey_table_multi",
       {
-        query: preScoped.query,
-        payload: preScoped.payload,
+        query: globalInputs.query,
+        payload: globalInputs.payload,
       },
       { method: "GET" }
     );
-    return respondWithTaxonomyNormalization(response, taxonomyView, selection);
+    return respondWithTaxonomyNormalization(response, taxonomyView, selection, false);
   }
 
   if (scopeContext.allowedStudyIds && scopeContext.allowedStudyIds.length === 0) {
@@ -201,24 +244,23 @@ export async function POST(request: NextRequest) {
   const skipViewerScoping = responseMode === "benchmark_global";
 
   if (skipViewerScoping) {
-    const preScoped = await applyMarketFilterToStudyIds({
-      query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
-      payload,
-      allowedStudyIds: null,
-    });
-    const queryString = new URLSearchParams(preScoped.query).toString();
+    const globalInputs = buildGlobalBenchmarkInputs(
+      expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
+      payload
+    );
+    const queryString = new URLSearchParams(globalInputs.query).toString();
     const query = queryString ? `?${queryString}` : "";
     const response = await handleWithDataSource(
       request,
       `/analytics/journey/table_multi${query}`,
       "bbs_journey_table_multi",
       {
-        query: preScoped.query,
-        payload: preScoped.payload,
+        query: globalInputs.query,
+        payload: globalInputs.payload,
       },
       { method: "POST" }
     );
-    return respondWithTaxonomyNormalization(response, taxonomyView, selection);
+    return respondWithTaxonomyNormalization(response, taxonomyView, selection, false);
   }
 
   if (scopeContext.allowedStudyIds && scopeContext.allowedStudyIds.length === 0) {

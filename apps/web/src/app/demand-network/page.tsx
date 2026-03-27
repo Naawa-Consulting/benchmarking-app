@@ -14,7 +14,7 @@ import {
   ToolbarGroup,
 } from "../../components/demand-network/ControlsToolbar";
 import { aggregateLinks } from "../../components/demand-network/graphUtils";
-import { useScope } from "../../components/layout/ScopeProvider";
+import { useScope, type StudyOption } from "../../components/layout/ScopeProvider";
 
 type NetworkNode = {
   id: string;
@@ -138,10 +138,44 @@ const taxonomyValueFromNode = (node: NetworkNode | undefined, level: Exclude<Ben
   return typeof fromSources === "string" ? fromSources.trim() : null;
 };
 
+const taxonomyValueFromNodeByStudy = (
+  node: NetworkNode | undefined,
+  level: Exclude<BenchmarkGroupLevel, "selection_benchmark">,
+  studyId: string | null
+) => {
+  if (!node || !studyId) return null;
+  const sources = Array.isArray(node.context_sources) ? node.context_sources : [];
+  const matched = sources.find((item) => {
+    const sourceStudyId = typeof item.study_id === "string" ? item.study_id.trim() : "";
+    return sourceStudyId.length > 0 && sourceStudyId === studyId;
+  });
+  if (!matched) return null;
+  const value =
+    level === "sector"
+      ? matched.sector
+      : level === "subsector"
+      ? matched.subsector
+      : matched.category;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+};
+
+const taxonomyValueFromStudyCatalog = (
+  studiesById: Map<string, StudyOption>,
+  level: Exclude<BenchmarkGroupLevel, "selection_benchmark">,
+  studyId: string | null
+) => {
+  if (!studyId) return null;
+  const study = studiesById.get(studyId);
+  if (!study) return null;
+  const value = level === "sector" ? study.sector : level === "subsector" ? study.subsector : study.category;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+};
+
 const buildBenchmarkViewData = (
   data: NetworkResponse,
   groupLevel: BenchmarkGroupLevel,
-  selectionLabel?: string | null
+  selectionLabel?: string | null,
+  studiesById: Map<string, StudyOption> = new Map()
 ): { nodes: NetworkNode[]; links: NetworkLink[] } => {
   const nodeById = new Map(data.nodes.map((node) => [node.id, node]));
   const groupStats = new Map<
@@ -178,90 +212,129 @@ const buildBenchmarkViewData = (
     }
   >();
 
+  const resolveGroupLabels = (
+    brandNode: NetworkNode,
+    linkStudyId: string | null
+  ): string[] => {
+    if (groupLevel === "selection_benchmark") {
+      return [selectionLabel?.trim() || "Selection Benchmark"];
+    }
+    const level = groupLevel as Exclude<BenchmarkGroupLevel, "selection_benchmark">;
+    if (linkStudyId) {
+      const direct =
+        taxonomyValueFromStudyCatalog(studiesById, level, linkStudyId) ||
+        taxonomyValueFromNodeByStudy(brandNode, level, linkStudyId) ||
+        taxonomyValueFromNode(brandNode, level) ||
+        "Unassigned";
+      return [direct];
+    }
+    const sources = Array.isArray(brandNode.context_sources) ? brandNode.context_sources : [];
+    const fromSources = Array.from(
+      new Set(
+        sources
+          .map((source) => {
+            const value =
+              level === "sector"
+                ? source.sector
+                : level === "subsector"
+                  ? source.subsector
+                  : source.category;
+            return typeof value === "string" ? value.trim() : "";
+          })
+          .filter((value) => value.length > 0)
+      )
+    );
+    if (fromSources.length) return fromSources;
+    return [taxonomyValueFromNode(brandNode, level) || "Unassigned"];
+  };
+
   for (const link of data.links) {
     if (link.type !== "primary_tp_brand") continue;
     const brandNode = nodeById.get(link.target);
     const tpNode = nodeById.get(link.source);
     if (!brandNode || !tpNode) continue;
-    const groupLabel =
-      groupLevel === "selection_benchmark"
-        ? (selectionLabel?.trim() || "Selection Benchmark")
-        : taxonomyValueFromNode(brandNode, groupLevel) || "Unassigned";
-    const groupId = `bench:${groupLevel}:${groupLabel}`;
+    const linkStudyId =
+      typeof link.colorMeta?.study_id === "string" ? link.colorMeta.study_id : null;
     const w = Math.max(1, asFinite(link.n_base) || 0);
     const recall = asFinite(link.w_recall_raw);
     const consideration = asFinite(link.w_consideration_raw);
     const purchase = asFinite(link.w_purchase_raw);
     const metricMass = recall ?? consideration ?? purchase ?? 0;
+    const labels = resolveGroupLabels(brandNode, linkStudyId);
+    const splitFactor = labels.length > 0 ? 1 / labels.length : 1;
 
-    if (!groupStats.has(groupId)) {
-      groupStats.set(groupId, {
-        id: groupId,
-        label: groupLabel,
-        metricMass: 0,
-        awarenessWeighted: 0,
-        awarenessWeight: 0,
-        weightedRecall: 0,
-        weightedConsideration: 0,
-        weightedPurchase: 0,
-        weightRecall: 0,
-        weightConsideration: 0,
-        weightPurchase: 0,
-        baseN: 0,
-      });
-    }
-    const group = groupStats.get(groupId)!;
-    group.metricMass += metricMass * w;
-    group.baseN += w;
-    if (recall !== null) {
-      group.weightedRecall += recall * w;
-      group.weightRecall += w;
-    }
-    if (consideration !== null) {
-      group.weightedConsideration += consideration * w;
-      group.weightConsideration += w;
-    }
-    if (purchase !== null) {
-      group.weightedPurchase += purchase * w;
-      group.weightPurchase += w;
-    }
-    const brandAwarenessPct = asFinite(brandNode.colorMeta?.kpi_awareness);
-    if (brandAwarenessPct !== null) {
-      group.awarenessWeighted += (brandAwarenessPct / 100) * w;
-      group.awarenessWeight += w;
-    }
+    for (const groupLabel of labels) {
+      const groupId = `bench:${groupLevel}:${groupLabel}`;
+      const splitWeight = w * splitFactor;
+      if (!groupStats.has(groupId)) {
+        groupStats.set(groupId, {
+          id: groupId,
+          label: groupLabel,
+          metricMass: 0,
+          awarenessWeighted: 0,
+          awarenessWeight: 0,
+          weightedRecall: 0,
+          weightedConsideration: 0,
+          weightedPurchase: 0,
+          weightRecall: 0,
+          weightConsideration: 0,
+          weightPurchase: 0,
+          baseN: 0,
+        });
+      }
+      const group = groupStats.get(groupId)!;
+      group.metricMass += metricMass * splitWeight;
+      group.baseN += splitWeight;
+      if (recall !== null) {
+        group.weightedRecall += recall * splitWeight;
+        group.weightRecall += splitWeight;
+      }
+      if (consideration !== null) {
+        group.weightedConsideration += consideration * splitWeight;
+        group.weightConsideration += splitWeight;
+      }
+      if (purchase !== null) {
+        group.weightedPurchase += purchase * splitWeight;
+        group.weightPurchase += splitWeight;
+      }
+      const brandAwarenessPct = asFinite(brandNode.colorMeta?.kpi_awareness);
+      if (brandAwarenessPct !== null) {
+        group.awarenessWeighted += (brandAwarenessPct / 100) * splitWeight;
+        group.awarenessWeight += splitWeight;
+      }
 
-    tpStats.set(link.source, (tpStats.get(link.source) || 0) + metricMass * w);
-    const pairKey = `${link.source}||${groupId}`;
-    if (!pairStats.has(pairKey)) {
-      pairStats.set(pairKey, {
-        source: link.source,
-        target: groupId,
-        weightedRecall: 0,
-        weightedConsideration: 0,
-        weightedPurchase: 0,
-        weightRecall: 0,
-        weightConsideration: 0,
-        weightPurchase: 0,
-        baseN: 0,
-        studies: new Set<string>(),
-      });
-    }
-    const pair = pairStats.get(pairKey)!;
-    pair.baseN += w;
-    const studyId = link.colorMeta?.study_id;
-    if (typeof studyId === "string" && studyId) pair.studies.add(studyId);
-    if (recall !== null) {
-      pair.weightedRecall += recall * w;
-      pair.weightRecall += w;
-    }
-    if (consideration !== null) {
-      pair.weightedConsideration += consideration * w;
-      pair.weightConsideration += w;
-    }
-    if (purchase !== null) {
-      pair.weightedPurchase += purchase * w;
-      pair.weightPurchase += w;
+      tpStats.set(link.source, (tpStats.get(link.source) || 0) + metricMass * splitWeight);
+      const pairKey = `${link.source}||${groupId}`;
+      if (!pairStats.has(pairKey)) {
+        pairStats.set(pairKey, {
+          source: link.source,
+          target: groupId,
+          weightedRecall: 0,
+          weightedConsideration: 0,
+          weightedPurchase: 0,
+          weightRecall: 0,
+          weightConsideration: 0,
+          weightPurchase: 0,
+          baseN: 0,
+          studies: new Set<string>(),
+        });
+      }
+      const pair = pairStats.get(pairKey)!;
+      pair.baseN += splitWeight;
+      const studyId = link.colorMeta?.study_id;
+      if (typeof studyId === "string" && studyId) pair.studies.add(studyId);
+      if (recall !== null) {
+        pair.weightedRecall += recall * splitWeight;
+        pair.weightRecall += splitWeight;
+      }
+      if (consideration !== null) {
+        pair.weightedConsideration += consideration * splitWeight;
+        pair.weightConsideration += splitWeight;
+      }
+      if (purchase !== null) {
+        pair.weightedPurchase += purchase * splitWeight;
+        pair.weightPurchase += splitWeight;
+      }
     }
   }
 
@@ -578,13 +651,36 @@ export default function DemandNetworkPage() {
     }
   }, [benchmarkGroupLevel]);
 
+  const studiesById = useMemo(() => {
+    const map = new Map<string, StudyOption>();
+    for (const study of studies) {
+      if (typeof study.study_id !== "string" || !study.study_id.trim()) continue;
+      map.set(study.study_id.trim(), {
+        ...study,
+        sector:
+          scope.taxonomyView === "market"
+            ? study.market_sector ?? study.sector ?? null
+            : study.sector ?? null,
+        subsector:
+          scope.taxonomyView === "market"
+            ? study.market_subsector ?? study.subsector ?? null
+            : study.subsector ?? null,
+        category:
+          scope.taxonomyView === "market"
+            ? study.market_category ?? study.category ?? null
+            : study.category ?? null,
+      });
+    }
+    return map;
+  }, [scope.taxonomyView, studies]);
+
   const viewData = useMemo(() => {
     if (!data) return null;
     if (brandsMode === "enable") {
       return { nodes: data.nodes, links: data.links };
     }
-    return buildBenchmarkViewData(data, benchmarkGroupLevel, scope.category);
-  }, [benchmarkGroupLevel, brandsMode, data, scope.category]);
+    return buildBenchmarkViewData(data, benchmarkGroupLevel, scope.category, studiesById);
+  }, [benchmarkGroupLevel, brandsMode, data, scope.category, studiesById]);
 
   const viewNodeCounts = useMemo(() => {
     if (!viewData) return { brand: 0, touchpoint: 0 };

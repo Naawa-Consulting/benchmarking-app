@@ -2,11 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDataSource, handleWithDataSource } from "../../../_lib/backend";
 import { getScopeContext, parseStudyIdsInput, scopeStudyIds, scopeStudyIdsCsv } from "../../../_lib/access-scope";
 import { resolveMarketLens } from "../../../_lib/market-lens";
-import { applyMarketFilterToStudyIds, resolveStandardFallbackForMarketSelection } from "../../../_lib/market-filter-scope";
+import { applyMarketFilterToStudyIds } from "../../../_lib/market-filter-scope";
 import { expandNseInPayload, expandNseInQuery } from "../../../_lib/demographics";
 
 export const dynamic = "force-dynamic";
-const ENABLE_LEGACY_MARKET_REBUILD = process.env.BBS_ENABLE_LEGACY_MARKET_REBUILD === "1";
 
 function getLegacyBaseUrlForTracking() {
   const base = (
@@ -496,24 +495,6 @@ async function constrainLegacyFallbackToSupabaseStudies(
   };
 }
 
-function topString(values: Array<string | null | undefined>): string | null {
-  const counts = new Map<string, number>();
-  for (const value of values) {
-    if (typeof value !== "string" || !value.trim()) continue;
-    const key = value.trim();
-    counts.set(key, (counts.get(key) || 0) + 1);
-  }
-  let winner: string | null = null;
-  let max = -1;
-  for (const [key, count] of counts.entries()) {
-    if (count > max) {
-      winner = key;
-      max = count;
-    }
-  }
-  return winner;
-}
-
 function mergeTrackingRows(
   rows: TrackingRow[],
   periods: string[],
@@ -577,50 +558,53 @@ async function rebuildSupabaseMarketSeries(
   selection: { sector: string | null; subsector: string | null; category: string | null }
 ): Promise<TrackingPayload | null> {
   if (getDataSource() !== "supabase") return null;
-  if (selection.subsector || selection.category) return null;
-
   const requestedStudyIds = parseStudyIdsInput(payload.study_ids) ?? [];
   const studies = await fetchStudiesForTracking(request);
-  const filteredStudies = studies.filter((row) =>
-    requestedStudyIds.length ? requestedStudyIds.includes(row.study_id) : true
-  );
+  const filteredStudies = studies
+    .filter((row) => (requestedStudyIds.length ? requestedStudyIds.includes(row.study_id) : true))
+    .filter((row) => (selection.sector ? row.market_sector === selection.sector : true))
+    .filter((row) => (selection.subsector ? row.market_subsector === selection.subsector : true))
+    .filter((row) => (selection.category ? row.market_category === selection.category : true));
   if (!filteredStudies.length) return null;
 
-  type Group = { standardSector: string; marketSector: string; studyIds: string[]; marketSubsector: string | null };
-  const byGroup = new Map<string, Group>();
+  const target =
+    selection.subsector || selection.category
+      ? {
+          breakdown: "category" as const,
+          label: "Categoría comercial",
+          key: (row: StudyCatalogItem) => row.market_category || "Unassigned",
+        }
+      : selection.sector
+        ? {
+            breakdown: "subsector" as const,
+            label: "Segmento",
+            key: (row: StudyCatalogItem) => row.market_subsector || "Unassigned",
+          }
+        : {
+            breakdown: "sector" as const,
+            label: "Macrosector",
+            key: (row: StudyCatalogItem) => row.market_sector || "Unassigned",
+          };
+
+  const groupedStudyIds = new Map<string, string[]>();
   for (const row of filteredStudies) {
-    const standardSector = row.sector || "Unassigned";
-    const marketSector = row.market_sector || "Unassigned";
-    const key = `${standardSector}||${marketSector}`;
-    if (!byGroup.has(key)) {
-      byGroup.set(key, {
-        standardSector,
-        marketSector,
-        studyIds: [],
-        marketSubsector: null,
-      });
-    }
-    byGroup.get(key)!.studyIds.push(row.study_id);
-  }
-  for (const group of byGroup.values()) {
-    const subset = filteredStudies.filter(
-      (row) => row.study_id && group.studyIds.includes(row.study_id)
-    );
-    group.marketSubsector = topString(subset.map((row) => row.market_subsector));
+    const key = target.key(row);
+    if (!groupedStudyIds.has(key)) groupedStudyIds.set(key, []);
+    groupedStudyIds.get(key)!.push(row.study_id);
   }
 
-  type TaggedTrackingRow = TrackingRow & { __market_sector?: string; __market_subsector?: string | null };
+  type TaggedTrackingRow = TrackingRow & { __target_entity?: string | null };
   let template: TrackingPayload | null = null;
   const rows: TaggedTrackingRow[] = [];
 
-  for (const group of byGroup.values()) {
+  for (const [entity, studyIds] of groupedStudyIds.entries()) {
     const standardPayload: Record<string, unknown> = {
       ...payload,
       taxonomy_view: "standard",
-      sector: group.standardSector,
+      sector: null,
       subsector: null,
       category: null,
-      study_ids: group.studyIds,
+      study_ids: Array.from(new Set(studyIds)),
     };
     const resp = await handleWithDataSource(
       request,
@@ -635,41 +619,24 @@ async function rebuildSupabaseMarketSeries(
     if (!series || !Array.isArray(series.entity_rows)) continue;
     if (!template) template = series;
     for (const row of series.entity_rows) {
-      const tagged: TaggedTrackingRow = {
+      rows.push({
         entity: row.entity,
         metrics: row.metrics,
-        __market_sector: group.marketSector,
-        __market_subsector: group.marketSubsector || null,
-      };
-      rows.push(tagged);
+        __target_entity: entity,
+      });
     }
   }
 
   if (!template || !rows.length) return null;
   const periods = toPeriodKeys(template);
-
-  if (!selection.sector) {
-    const macroRows = mergeTrackingRows(rows, periods, (row) => {
-      const tagged = row as TaggedTrackingRow;
-      return tagged.__market_sector || null;
-    });
-    return {
-      ...template,
-      resolved_breakdown: "sector",
-      entity_label: "Macrosector",
-      entity_rows: macroRows,
-    };
-  }
-
   const entityRows = mergeTrackingRows(rows, periods, (row) => {
     const tagged = row as TaggedTrackingRow;
-    if (tagged.__market_sector !== selection.sector) return null;
-    return tagged.__market_subsector || resolveMarketLens({ subsector: tagged.entity }).market_subsector || null;
+    return tagged.__target_entity || null;
   });
   return {
     ...template,
-    resolved_breakdown: "subsector",
-    entity_label: "Segmento",
+    resolved_breakdown: target.breakdown,
+    entity_label: target.label,
     entity_rows: entityRows,
   };
 }
@@ -702,48 +669,9 @@ async function applySupabaseMarketFallback(
   selection: { sector: string | null; subsector: string | null; category: string | null },
   allowedStudyIds: string[] | null
 ) {
-  if (getDataSource() !== "supabase") return { query, payload };
-  if (!selection.sector && !selection.subsector && !selection.category) return { query, payload };
-  // When only macro-sector is selected, keep native Market Lens query.
-  // Falling back to standard here can collapse heterogeneous buckets and hide segments (e.g. Fashion).
-  if (selection.sector && !selection.subsector && !selection.category) {
-    return { query, payload };
-  }
-
-  const requestedStudyIds = parseStudyIdsInput(payload.study_ids);
-  const fallback = await resolveStandardFallbackForMarketSelection({
-    selection,
-    allowedStudyIds,
-    requestedStudyIds,
-  });
-  if (!fallback.sector) {
-    return { query, payload };
-  }
-
-  const nextQuery: Record<string, string> = { ...query, taxonomy_view: "standard", sector: fallback.sector };
-  const nextPayload: Record<string, unknown> = {
-    ...payload,
-    taxonomy_view: "standard",
-    sector: fallback.sector,
-  };
-
-  if (selection.subsector && fallback.subsector) {
-    nextQuery.subsector = fallback.subsector;
-    nextPayload.subsector = fallback.subsector;
-  } else {
-    delete nextQuery.subsector;
-    nextPayload.subsector = null;
-  }
-
-  if (selection.category && fallback.category) {
-    nextQuery.category = fallback.category;
-    nextPayload.category = fallback.category;
-  } else {
-    delete nextQuery.category;
-    nextPayload.category = null;
-  }
-
-  return { query: nextQuery, payload: nextPayload };
+  // Keep Market Lens end-to-end. Standard fallback can collapse mixed mappings
+  // (e.g. multiple market categories sharing one standard category).
+  return { query, payload };
 }
 
 export async function GET(request: NextRequest) {
@@ -823,17 +751,15 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(normalized, { status: response.status });
     }
   }
-  if (ENABLE_LEGACY_MARKET_REBUILD) {
-    const rebuiltMarket = await rebuildSupabaseMarketSeries(
-      request,
-      supabaseFallback.payload,
-      selection
-    );
-    if (rebuiltMarket && hasMeaningfulEntities(rebuiltMarket)) {
-      const filteredRebuilt = filterTrackingBySelection(rebuiltMarket, taxonomyView, selection);
-      if (hasMeaningfulEntities(filteredRebuilt)) {
-        return NextResponse.json(filteredRebuilt, { status: response.status });
-      }
+  const rebuiltMarket = await rebuildSupabaseMarketSeries(
+    request,
+    supabaseFallback.payload,
+    selection
+  );
+  if (rebuiltMarket && hasMeaningfulEntities(rebuiltMarket)) {
+    const filteredRebuilt = filterTrackingBySelection(rebuiltMarket, taxonomyView, selection);
+    if (hasMeaningfulEntities(filteredRebuilt)) {
+      return NextResponse.json(filteredRebuilt, { status: response.status });
     }
   }
   return NextResponse.json(filteredNormalized, { status: response.status });
@@ -938,17 +864,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(normalized, { status: response.status });
     }
   }
-  if (ENABLE_LEGACY_MARKET_REBUILD) {
-    const rebuiltMarket = await rebuildSupabaseMarketSeries(
-      request,
-      supabaseFallback.payload,
-      selection
-    );
-    if (rebuiltMarket && hasMeaningfulEntities(rebuiltMarket)) {
-      const filteredRebuilt = filterTrackingBySelection(rebuiltMarket, taxonomyView, selection);
-      if (hasMeaningfulEntities(filteredRebuilt)) {
-        return NextResponse.json(filteredRebuilt, { status: response.status });
-      }
+  const rebuiltMarket = await rebuildSupabaseMarketSeries(
+    request,
+    supabaseFallback.payload,
+    selection
+  );
+  if (rebuiltMarket && hasMeaningfulEntities(rebuiltMarket)) {
+    const filteredRebuilt = filterTrackingBySelection(rebuiltMarket, taxonomyView, selection);
+    if (hasMeaningfulEntities(filteredRebuilt)) {
+      return NextResponse.json(filteredRebuilt, { status: response.status });
     }
   }
   return NextResponse.json(filteredNormalized, { status: response.status });

@@ -64,6 +64,8 @@ type BuildJourneyHeatmapOptions = {
     aggregate: JourneyBenchmarkAggregate;
     journeyIndex: JourneyIndexEntry;
   };
+  selectionBenchmarkSampleN?: number;
+  globalBenchmarkSampleN?: number;
 };
 
 const stageVal = (brand: JourneyBrandAggregate, stage: JourneyStage) =>
@@ -149,6 +151,8 @@ export function buildJourneyHeatmap(
     journeyIndex: model.benchmarkJourneyIndex,
   };
   const globalBenchmark = options?.globalBenchmark ?? selectionBenchmark;
+  const selectionBenchmarkSampleN = options?.selectionBenchmarkSampleN ?? selectionSampleN;
+  const globalBenchmarkSampleN = options?.globalBenchmarkSampleN ?? selectionBenchmarkSampleN;
   const activeBenchmark = (options?.benchmarkMode ?? "selection") === "global" ? globalBenchmark : selectionBenchmark;
 
   const activeBenchmarkStageMap = new Map(
@@ -160,7 +164,8 @@ export function buildJourneyHeatmap(
 
   const createBenchmarkCells = (
     aggregate: JourneyBenchmarkAggregate,
-    journeyIndex: JourneyIndexEntry
+    journeyIndex: JourneyIndexEntry,
+    benchmarkSampleN: number
   ): Record<string, HeatmapCell> => {
     const stageMap = new Map(aggregate.stageAggregates.map((item) => [item.stage, item]));
     const linkMap = new Map(aggregate.links.map((item) => [`${item.fromStage}->${item.toStage}`, item]));
@@ -174,7 +179,7 @@ export function buildJourneyHeatmap(
           delta: 0,
           coverageStudies: stage?.stageCoverageStudies ?? 0,
           totalStudies,
-          coverageSample: selectionSampleN,
+          coverageSample: benchmarkSampleN,
           missing: stage?.value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -189,7 +194,7 @@ export function buildJourneyHeatmap(
           delta: 0,
           coverageStudies: link?.linkCoverageStudies ?? 0,
           totalStudies,
-          coverageSample: selectionSampleN,
+          coverageSample: benchmarkSampleN,
           missing: link?.conversion == null,
           anomalyFlag: link?.anomalyFlag ?? false,
           excludedFromIndex: link?.excludedFromIndex ?? false,
@@ -203,7 +208,7 @@ export function buildJourneyHeatmap(
           delta: 0,
           coverageStudies: journeyIndex.studiesCovered,
           totalStudies,
-          coverageSample: selectionSampleN,
+          coverageSample: benchmarkSampleN,
           missing: journeyIndex.value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -215,7 +220,7 @@ export function buildJourneyHeatmap(
           delta: 0,
           coverageStudies: stageMap.get("Brand Satisfaction")?.stageCoverageStudies ?? 0,
           totalStudies,
-          coverageSample: selectionSampleN,
+          coverageSample: benchmarkSampleN,
           missing: aggregate.csat.value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -227,7 +232,7 @@ export function buildJourneyHeatmap(
           delta: 0,
           coverageStudies: stageMap.get("Brand Recommendation")?.stageCoverageStudies ?? 0,
           totalStudies,
-          coverageSample: selectionSampleN,
+          coverageSample: benchmarkSampleN,
           missing: aggregate.nps.value == null,
           anomalyFlag: false,
           excludedFromIndex: false,
@@ -242,13 +247,17 @@ export function buildJourneyHeatmap(
       key: "benchmark-global",
       brandName: "Global Benchmark",
       isBenchmark: true,
-      cells: createBenchmarkCells(globalBenchmark.aggregate, globalBenchmark.journeyIndex),
+      cells: createBenchmarkCells(globalBenchmark.aggregate, globalBenchmark.journeyIndex, globalBenchmarkSampleN),
     },
     {
       key: "benchmark-selection",
       brandName: "Selection Benchmark",
       isBenchmark: true,
-      cells: createBenchmarkCells(selectionBenchmark.aggregate, selectionBenchmark.journeyIndex),
+      cells: createBenchmarkCells(
+        selectionBenchmark.aggregate,
+        selectionBenchmark.journeyIndex,
+        selectionBenchmarkSampleN
+      ),
     },
   ];
 

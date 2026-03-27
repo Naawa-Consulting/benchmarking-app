@@ -50,7 +50,8 @@ export default function TrackingCharts({
       : (model.metric_meta_touchpoint as unknown as Record<string, TrackingMetricMeta>);
   const metricOptions = entity === "primary" ? BRAND_METRICS : TOUCHPOINT_METRICS;
   const [metric, setMetric] = useState<string>(metricOptions[0]);
-  const effectiveMetric = metric;
+  const showMetricSelector = entity === "primary";
+  const effectiveMetric = showMetricSelector ? metric : metricOptions[0];
 
   const periods = model.periods;
   const labels = rows.map((row) => row.name);
@@ -143,20 +144,22 @@ export default function TrackingCharts({
         <h3 className="text-base font-semibold text-ink">
           {rowLabel} visual comparison
         </h3>
-        <label className="inline-flex items-center gap-2 text-xs text-slate">
-          Metric
-          <select
-            className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink"
-            value={metric}
-            onChange={(event) => setMetric(event.target.value)}
-          >
-            {metricOptions.map((key) => (
-              <option key={key} value={key}>
-                {meta[key as string]?.label || key}
-              </option>
-            ))}
-          </select>
-        </label>
+        {showMetricSelector ? (
+          <label className="inline-flex items-center gap-2 text-xs text-slate">
+            Metric
+            <select
+              className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink"
+              value={metric}
+              onChange={(event) => setMetric(event.target.value)}
+            >
+              {metricOptions.map((key) => (
+                <option key={key} value={key}>
+                  {meta[key as string]?.label || key}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
       </div>
       <div className="space-y-4">
         <article className="rounded-2xl border border-ink/10 bg-white p-3">

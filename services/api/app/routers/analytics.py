@@ -52,7 +52,7 @@ CORE_AWARENESS_BOUNDED_METRICS = (
     "brand_satisfaction",
     "brand_recommendation",
 )
-MIN_EXPERIENCE_BASE_N = 30
+MIN_EXPERIENCE_BASE_N = 10
 
 
 def _discover_curated_studies(root: Path) -> list[str]:
@@ -734,6 +734,28 @@ def _apply_awareness_ceiling(values: dict[str, float | None]) -> bool:
     return adjusted
 
 
+def _has_brand_signal(values: dict[str, float | None]) -> bool:
+    """
+    Keep only rows with at least one meaningful journey signal.
+    This removes synthetic brands that are all-zero/null across journey metrics.
+    """
+    signal_metrics = (
+        "brand_awareness",
+        "ad_awareness",
+        "brand_consideration",
+        "brand_purchase",
+        "brand_satisfaction",
+        "brand_recommendation",
+        "csat",
+        "nps",
+    )
+    for metric in signal_metrics:
+        value = values.get(metric)
+        if isinstance(value, (int, float)) and float(value) > 0:
+            return True
+    return False
+
+
 def _study_matches_taxonomy(filters: dict, classification: dict[str, str | None]) -> bool:
     for key in ("sector", "subsector", "category"):
         value = filters.get(key)
@@ -986,7 +1008,11 @@ def _compute_table_rows_internal(
             > 0
         )
         value_expr = (
-            "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
+            "CASE "
+            "WHEN LOWER(stage) IN ('satisfaction', 'recommendation') "
+            "THEN TRY_CAST(value_raw AS INTEGER) "
+            "ELSE COALESCE(TRY_CAST(value AS INTEGER), TRY_CAST(value_raw AS INTEGER)) "
+            "END"
             if has_value_raw
             else "TRY_CAST(value AS INTEGER)"
         )
@@ -1048,6 +1074,15 @@ def _compute_table_rows_internal(
                             THEN b.respondent_id
                         END
                     ) AS satisfaction_num,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN b.stage = 'satisfaction'
+                                 AND ss.max_v IS NOT NULL
+                                 AND ss.max_v >= 5
+                                 AND b.v_int IN (1, 2)
+                            THEN b.respondent_id
+                        END
+                    ) AS satisfaction_bottom2_num,
                     COUNT(DISTINCT CASE WHEN b.stage = 'satisfaction' THEN b.respondent_id END) AS satisfaction_denom,
                     COUNT(
                         DISTINCT CASE
@@ -1059,6 +1094,16 @@ def _compute_table_rows_internal(
                             THEN b.respondent_id
                         END
                     ) AS recommendation_num,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN b.stage = 'recommendation'
+                                 AND (
+                                    (rs.max_v IS NOT NULL AND rs.max_v >= 9 AND b.v_int BETWEEN 0 AND 6)
+                                    OR (rs.max_v IS NOT NULL AND rs.max_v < 9 AND b.v_int = 0)
+                                 )
+                            THEN b.respondent_id
+                        END
+                    ) AS recommendation_detractors_num,
                     COUNT(DISTINCT CASE WHEN b.stage = 'recommendation' THEN b.respondent_id END) AS recommendation_denom
                 FROM base b
                 LEFT JOIN stage_stats ss ON ss.stage = 'satisfaction'
@@ -1143,8 +1188,10 @@ def _compute_table_rows_internal(
                 s.purchase_num,
                 s.purchase_denom,
                 s.satisfaction_num,
+                s.satisfaction_bottom2_num,
                 s.satisfaction_denom,
                 s.recommendation_num,
+                s.recommendation_detractors_num,
                 s.recommendation_denom,
                 e.sat_scale_max,
                 e.rec_scale_max,
@@ -1178,8 +1225,10 @@ def _compute_table_rows_internal(
             purchase_num,
             purchase_denom,
             satisfaction_num,
+            satisfaction_bottom2_num,
             satisfaction_denom,
             recommendation_num,
+            recommendation_detractors_num,
             recommendation_denom,
             sat_scale_max,
             rec_scale_max,
@@ -1231,8 +1280,34 @@ def _compute_table_rows_internal(
                     values["nps"] = round(
                         ((float(promoters_n or 0) - float(detractors_n or 0)) / float(purchaser_n)) * 100, 1
                     )
+            # Fallback when purchase-conditioned base is unavailable but stage data is present.
+            if (
+                values["csat"] is None
+                and satisfaction_denom
+                and satisfaction_denom >= MIN_EXPERIENCE_BASE_N
+            ):
+                values["csat"] = round(
+                    ((float(satisfaction_num or 0) - float(satisfaction_bottom2_num or 0)) / float(satisfaction_denom))
+                    * 100,
+                    1,
+                )
+            if (
+                values["nps"] is None
+                and recommendation_denom
+                and recommendation_denom >= MIN_EXPERIENCE_BASE_N
+            ):
+                values["nps"] = round(
+                    (
+                        (float(recommendation_num or 0) - float(recommendation_detractors_num or 0))
+                        / float(recommendation_denom)
+                    )
+                    * 100,
+                    1,
+                )
 
             awareness_ceiling_applied = _apply_awareness_ceiling(values)
+            if not _has_brand_signal(values):
+                continue
             result_rows.append(
                 {
                     "brand": brand,
@@ -1310,7 +1385,11 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
             > 0
         )
         value_expr = (
-            "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
+            "CASE "
+            "WHEN LOWER(stage) IN ('satisfaction', 'recommendation') "
+            "THEN TRY_CAST(value_raw AS INTEGER) "
+            "ELSE COALESCE(TRY_CAST(value AS INTEGER), TRY_CAST(value_raw AS INTEGER)) "
+            "END"
             if has_value_raw
             else "TRY_CAST(value AS INTEGER)"
         )
@@ -1364,6 +1443,15 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                             THEN b.respondent_id
                         END
                     ) AS satisfaction_num,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN b.stage = 'satisfaction'
+                                 AND ss.max_v IS NOT NULL
+                                 AND ss.max_v >= 5
+                                 AND b.v_int IN (1, 2)
+                            THEN b.respondent_id
+                        END
+                    ) AS satisfaction_bottom2_num,
                     COUNT(DISTINCT CASE WHEN b.stage = 'satisfaction' THEN b.respondent_id END) AS satisfaction_denom,
                     COUNT(
                         DISTINCT CASE
@@ -1375,6 +1463,16 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                             THEN b.respondent_id
                         END
                     ) AS recommendation_num,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN b.stage = 'recommendation'
+                                 AND (
+                                    (rs.max_v IS NOT NULL AND rs.max_v >= 9 AND b.v_int BETWEEN 0 AND 6)
+                                    OR (rs.max_v IS NOT NULL AND rs.max_v < 9 AND b.v_int = 0)
+                                 )
+                            THEN b.respondent_id
+                        END
+                    ) AS recommendation_detractors_num,
                     COUNT(DISTINCT CASE WHEN b.stage = 'recommendation' THEN b.respondent_id END) AS recommendation_denom
                 FROM base b
                 LEFT JOIN stage_stats ss ON ss.q_key = b.q_key AND ss.stage = 'satisfaction'
@@ -1465,8 +1563,10 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                 s.purchase_num,
                 s.purchase_denom,
                 s.satisfaction_num,
+                s.satisfaction_bottom2_num,
                 s.satisfaction_denom,
                 s.recommendation_num,
+                s.recommendation_detractors_num,
                 s.recommendation_denom,
                 e.sat_scale_max,
                 e.rec_scale_max,
@@ -1499,8 +1599,10 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
         purchase_num,
         purchase_denom,
         satisfaction_num,
+        satisfaction_bottom2_num,
         satisfaction_denom,
         recommendation_num,
+        recommendation_detractors_num,
         recommendation_denom,
         sat_scale_max,
         rec_scale_max,
@@ -1548,8 +1650,34 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
             # Only compute NPS when recommendation scale is NPS-like (0-10 or 1-10).
             if rec_scale_max is not None and rec_scale_max >= 9:
                 values["nps"] = round(((float(promoters_n or 0) - float(detractors_n or 0)) / float(purchaser_n)) * 100, 1)
+        # Fallback when purchase-conditioned base is unavailable but stage data is present.
+        if (
+            values["csat"] is None
+            and satisfaction_denom
+            and satisfaction_denom >= MIN_EXPERIENCE_BASE_N
+        ):
+            values["csat"] = round(
+                ((float(satisfaction_num or 0) - float(satisfaction_bottom2_num or 0)) / float(satisfaction_denom))
+                * 100,
+                1,
+            )
+        if (
+            values["nps"] is None
+            and recommendation_denom
+            and recommendation_denom >= MIN_EXPERIENCE_BASE_N
+        ):
+            values["nps"] = round(
+                (
+                    (float(recommendation_num or 0) - float(recommendation_detractors_num or 0))
+                    / float(recommendation_denom)
+                )
+                * 100,
+                1,
+            )
 
         awareness_ceiling_applied = _apply_awareness_ceiling(values)
+        if not _has_brand_signal(values):
+            continue
         buckets.setdefault(q_key_int, []).append(
             {
                 "brand": brand,
@@ -1696,7 +1824,11 @@ def _compute_touchpoint_rows_filtered(study_id: str, filters: dict) -> list[dict
             > 0
         )
         value_expr = (
-            "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
+            "CASE "
+            "WHEN LOWER(stage) IN ('satisfaction', 'recommendation') "
+            "THEN TRY_CAST(value_raw AS INTEGER) "
+            "ELSE COALESCE(TRY_CAST(value AS INTEGER), TRY_CAST(value_raw AS INTEGER)) "
+            "END"
             if has_value_raw
             else "TRY_CAST(value AS INTEGER)"
         )
@@ -1837,7 +1969,11 @@ def _compute_touchpoint_rows_by_quarter_filtered(study_id: str, filters: dict) -
             > 0
         )
         value_expr = (
-            "COALESCE(TRY_CAST(value_raw AS INTEGER), TRY_CAST(value AS INTEGER))"
+            "CASE "
+            "WHEN LOWER(stage) IN ('satisfaction', 'recommendation') "
+            "THEN TRY_CAST(value_raw AS INTEGER) "
+            "ELSE COALESCE(TRY_CAST(value AS INTEGER), TRY_CAST(value_raw AS INTEGER)) "
+            "END"
             if has_value_raw
             else "TRY_CAST(value AS INTEGER)"
         )

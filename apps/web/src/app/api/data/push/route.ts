@@ -24,6 +24,7 @@ type JourneyRow = {
   market_sector?: string | null;
   market_subsector?: string | null;
   market_category?: string | null;
+  year?: number | null;
 };
 
 type MarketLensRule = {
@@ -139,6 +140,14 @@ function normalizeStudyIds(body: Record<string, unknown> | null) {
     if (typeof value === "string" && value.trim()) items.add(value.trim());
   }
   return Array.from(items);
+}
+
+function deriveYearFromStudyId(studyId: string | null | undefined): number | null {
+  if (!studyId) return null;
+  const match = String(studyId).match(/(19|20)\d{2}/);
+  if (!match) return null;
+  const year = Number(match[0]);
+  return Number.isFinite(year) ? year : null;
 }
 
 function normalizeTaxonomyValue(value: unknown) {
@@ -417,22 +426,27 @@ export async function POST(request: NextRequest) {
     const journeyRowsWithMarket = journeyRows.map((row) => {
       const studyId = typeof row.study_id === "string" ? row.study_id : "";
       const resolved = taxonomyByStudyId.get(studyId);
+      const derivedYear = deriveYearFromStudyId(studyId);
       return {
         ...row,
         market_sector: row.market_sector || resolved?.market_sector || null,
         market_subsector: row.market_subsector || resolved?.market_subsector || null,
         market_category: row.market_category || resolved?.market_category || null,
+        year: typeof row.year === "number" && Number.isFinite(row.year) ? row.year : derivedYear,
       };
     });
 
     const touchpointRowsWithMarket = touchpointRows.map((row) => {
       const studyId = typeof row.study_id === "string" ? String(row.study_id) : "";
       const resolved = taxonomyByStudyId.get(studyId);
+      const rawYear = (row as Record<string, unknown>).year;
+      const derivedYear = deriveYearFromStudyId(studyId);
       return {
         ...row,
         market_sector: row.market_sector || resolved?.market_sector || null,
         market_subsector: row.market_subsector || resolved?.market_subsector || null,
         market_category: row.market_category || resolved?.market_category || null,
+        year: typeof rawYear === "number" && Number.isFinite(rawYear) ? rawYear : derivedYear,
       };
     });
 

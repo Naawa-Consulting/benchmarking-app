@@ -108,6 +108,47 @@ const resolveHierarchyFocusLabel = (
   return null;
 };
 
+const computeRowsSampleN = (
+  rows: Array<{
+    studyId?: string | null;
+    study_id?: string | null;
+    basePopulationN?: number | null;
+    base_population_n?: number | null;
+    base_n_population?: number | string | null;
+    baseN?: number | null;
+    base_n?: number | string | null;
+    sample_n?: number | string | null;
+  }>
+): number => {
+  const asPositiveNumber = (value: unknown): number | null => {
+    if (typeof value === "number") return Number.isFinite(value) && value > 0 ? value : null;
+    if (typeof value === "string") {
+      const n = Number(value);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }
+    return null;
+  };
+
+  const byStudy = new Map<string, number>();
+  for (const row of rows) {
+    const studyId = row.studyId ?? row.study_id ?? null;
+    if (!studyId) continue;
+    const sample =
+      asPositiveNumber(row.basePopulationN) ??
+      asPositiveNumber(row.base_population_n) ??
+      asPositiveNumber(row.base_n_population) ??
+      asPositiveNumber(row.baseN) ??
+      asPositiveNumber(row.base_n) ??
+      asPositiveNumber(row.sample_n);
+    if (!sample) continue;
+    const prev = byStudy.get(studyId) ?? 0;
+    if (sample > prev) byStudy.set(studyId, sample);
+  }
+  return Array.from(byStudy.values()).reduce((sum, n) => sum + n, 0);
+};
+
+const computeModelSampleN = (model: JourneyModel): number => computeRowsSampleN(model.rows);
+
 function aggregateJourneyRowsByLevel(rows: TableRow[], level: JourneyHierarchyLevel): TableRow[] {
   const levelField = hierarchyFieldByLevel[level];
   return rows.flatMap((row) => {
@@ -673,15 +714,17 @@ export default function JourneyPage() {
       heatmapNames,
       maxHeatmapRows,
       {
-      benchmarkMode,
-      selectionBenchmark: {
-        aggregate: selectionJourneyModel.benchmarkStageAggregates,
-        journeyIndex: selectionJourneyModel.benchmarkJourneyIndex,
-      },
-      globalBenchmark: {
-        aggregate: globalBenchmarkJourneyModel.benchmarkStageAggregates,
-        journeyIndex: globalBenchmarkJourneyModel.benchmarkJourneyIndex,
-      },
+        benchmarkMode,
+        selectionBenchmark: {
+          aggregate: selectionJourneyModel.benchmarkStageAggregates,
+          journeyIndex: selectionJourneyModel.benchmarkJourneyIndex,
+        },
+        globalBenchmark: {
+          aggregate: globalBenchmarkJourneyModel.benchmarkStageAggregates,
+          journeyIndex: globalBenchmarkJourneyModel.benchmarkJourneyIndex,
+        },
+        selectionBenchmarkSampleN: computeModelSampleN(selectionJourneyModel),
+        globalBenchmarkSampleN: computeRowsSampleN(globalBenchmarkRows),
       }
     );
     if (process.env.NODE_ENV !== "production") {

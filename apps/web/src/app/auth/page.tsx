@@ -60,7 +60,7 @@ export default function AuthPage() {
     setError(null);
     setMessage(null);
     if (!email.trim()) {
-      setError("Enter your email to send setup/recovery link.");
+      setError("Enter your email to send password recovery link.");
       return;
     }
     setLoadingRecovery(true);
@@ -73,7 +73,7 @@ export default function AuthPage() {
       if (recoveryError) {
         setError(recoveryError.message);
       } else {
-        setMessage("Setup/recovery link sent. Check your email.");
+        setMessage("Recovery link sent. Check your email.");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to send recovery link.");
@@ -120,10 +120,10 @@ export default function AuthPage() {
             onClick={handleSendRecovery}
             className="w-full rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm font-medium text-ink disabled:opacity-60"
           >
-            {loadingRecovery ? "Sending..." : "Create / recover password"}
+            {loadingRecovery ? "Sending..." : "Recover password"}
           </button>
           <p className="text-xs text-slate">
-            Use "Create / recover password" for first-time setup and password reset.
+            First-time users should use the invitation email. Use this only for password recovery.
           </p>
           {message ? <p className="text-sm text-emerald-700">{message}</p> : null}
           {error ? <p className="text-sm text-rose-600">{error}</p> : null}

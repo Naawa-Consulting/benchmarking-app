@@ -22,6 +22,11 @@ const pts = (value: number | null) => {
   if (typeof value !== "number") return "--";
   return `${value >= 0 ? "+" : ""}${(value * 100).toFixed(1)} pts`;
 };
+const pctMetric = (value: number | null) => {
+  if (typeof value !== "number") return "--";
+  const scaled = Math.abs(value) <= 1 ? value * 100 : value;
+  return `${scaled.toFixed(1)}%`;
+};
 
 const levelCellColor = (value: number | null) => {
   if (value == null) return "rgba(248,250,252,1)";
@@ -51,7 +56,7 @@ const conversionCellColor = (value: number | null) => {
 const formatValue = (col: HeatmapColumn, value: number | null) => {
   if (value == null) return "--";
   if (col.key === "journey_index") return `${Math.round(value * 100)}`;
-  if (col.key === "nps" || col.key === "csat") return `${(value * 100).toFixed(1)}%`;
+  if (col.key === "nps" || col.key === "csat") return pctMetric(value);
   return pct(value);
 };
 const formatSample = (value: number) => Math.round(value).toLocaleString();

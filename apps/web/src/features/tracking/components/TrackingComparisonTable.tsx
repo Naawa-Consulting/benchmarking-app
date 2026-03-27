@@ -84,7 +84,8 @@ export default function TrackingComparisonTable({ model, entity, rowLabel }: Tra
       ? (model.metric_meta_brand as unknown as Record<string, TrackingMetricMeta>)
       : (model.metric_meta_touchpoint as unknown as Record<string, TrackingMetricMeta>);
   const [metric, setMetric] = useState<string>(metricOptions[0]);
-  const effectiveMetric = metric;
+  const showMetricSelector = entity === "primary";
+  const effectiveMetric = showMetricSelector ? metric : metricOptions[0];
 
   const deltaValues = useMemo(
     () =>
@@ -103,20 +104,22 @@ export default function TrackingComparisonTable({ model, entity, rowLabel }: Tra
     <section className="main-surface rounded-3xl p-5">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-base font-semibold text-ink">{title}</h3>
-        <label className="inline-flex items-center gap-2 text-xs text-slate">
-          Metric
-          <select
-            className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink"
-            value={metric}
-            onChange={(event) => setMetric(event.target.value)}
-          >
-            {metricOptions.map((key) => (
-              <option key={key} value={key}>
-                {meta[key as string]?.label || key}
-              </option>
-            ))}
-          </select>
-        </label>
+        {showMetricSelector ? (
+          <label className="inline-flex items-center gap-2 text-xs text-slate">
+            Metric
+            <select
+              className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink"
+              value={metric}
+              onChange={(event) => setMetric(event.target.value)}
+            >
+              {metricOptions.map((key) => (
+                <option key={key} value={key}>
+                  {meta[key as string]?.label || key}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
       </div>
       <div className="overflow-auto rounded-2xl border border-ink/10">
         <table className="min-w-[980px] border-collapse text-xs">

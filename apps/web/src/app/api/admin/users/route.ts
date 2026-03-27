@@ -160,26 +160,62 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ detail: "Email is required." }, { status: 400 });
   }
 
-  const createResult = await supabaseAuthAdmin("users", {
+  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000").replace(/\/+$/, "");
+  const redirectTo = `${siteUrl}/auth/reset`;
+
+  const inviteResult = await supabaseAuthRequest("invite", {
     method: "POST",
     body: {
       email,
-      email_confirm: true,
-      user_metadata: { invited_by_bbs_admin: true },
+      data: { invited_by_bbs_admin: true },
+      redirect_to: redirectTo,
     },
   });
 
-  if (!createResult.response.ok) {
+  if (!inviteResult.response.ok) {
+    const detail =
+      (inviteResult.data as { message?: string; error_description?: string } | null)?.message ||
+      (inviteResult.data as { message?: string; error_description?: string } | null)?.error_description ||
+      "Failed to invite user.";
+    const normalized = detail.toLowerCase();
+    const status = normalized.includes("already") || normalized.includes("exists") ? 409 : 500;
     return NextResponse.json(
-      { detail: "Failed to create user.", error: createResult.data },
-      { status: createResult.response.status || 500 }
+      {
+        detail:
+          status === 409
+            ? "User already exists. Use password recovery for this email."
+            : "Failed to create user invitation.",
+        error: inviteResult.data,
+      },
+      { status }
     );
   }
 
-  const created = createResult.data as AuthAdminUser;
-  const userId = typeof created?.id === "string" ? created.id : "";
+  const invitePayload = (inviteResult.data || {}) as {
+    id?: string;
+    user?: { id?: string };
+  };
+  let userId = "";
+  if (typeof invitePayload.id === "string" && invitePayload.id) {
+    userId = invitePayload.id;
+  } else if (invitePayload.user && typeof invitePayload.user.id === "string" && invitePayload.user.id) {
+    userId = invitePayload.user.id;
+  } else {
+    const usersResult = await supabaseAuthAdmin("users?per_page=1000&page=1");
+    const usersPayload = usersResult.data as { users?: AuthAdminUser[] } | null;
+    const users = Array.isArray(usersPayload?.users) ? usersPayload!.users! : [];
+    const matched = users.find((user) => (user.email || "").toLowerCase() === email);
+    if (matched?.id) userId = matched.id;
+  }
+
   if (!userId) {
-    return NextResponse.json({ detail: "User created without id." }, { status: 500 });
+    return NextResponse.json(
+      {
+        detail: "Invitation sent, but user id could not be resolved for role assignment.",
+        invite: { sent: true, method: "invite" },
+      },
+      { status: 202 }
+    );
   }
 
   await supabaseAdminPostgrest("user_roles?on_conflict=user_id", {
@@ -187,50 +223,6 @@ export async function POST(request: NextRequest) {
     headers: { Prefer: "resolution=merge-duplicates,return=representation" },
     body: [{ user_id: userId, role }],
   });
-
-  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000").replace(/\/+$/, "");
-  const redirectTo = `${siteUrl}/auth/reset`;
-
-  let inviteMethod: "invite" | "recover" | "generate_link" = "invite";
-  let inviteSent = false;
-  let inviteError: unknown = null;
-  let manualLink: string | null = null;
-
-  const inviteResult = await supabaseAuthRequest("invite", {
-    method: "POST",
-    body: { email, data: { invited_by_bbs_admin: true }, redirect_to: redirectTo },
-  });
-  if (inviteResult.response.ok) {
-    inviteSent = true;
-  } else {
-    inviteMethod = "recover";
-    const recoverResult = await supabaseAuthRequest("recover", {
-      method: "POST",
-      body: { email, redirect_to: redirectTo },
-    });
-    if (recoverResult.response.ok) {
-      inviteSent = true;
-    } else {
-      inviteMethod = "generate_link";
-      const recoveryResult = await supabaseAuthAdmin("generate_link", {
-        method: "POST",
-        body: {
-          type: "recovery",
-          email,
-          options: { redirectTo, redirect_to: redirectTo },
-        },
-      });
-      if (recoveryResult.response.ok) {
-        const payload = recoveryResult.data as { properties?: { action_link?: string | null } } | null;
-        manualLink = payload?.properties?.action_link || null;
-      } else {
-        inviteError = recoveryResult.data;
-      }
-      if (!inviteError) {
-        inviteError = { invite: inviteResult.data, recover: recoverResult.data };
-      }
-    }
-  }
 
   return NextResponse.json({
     ok: true,
@@ -240,10 +232,10 @@ export async function POST(request: NextRequest) {
       role,
     },
     invite: {
-      sent: inviteSent,
-      method: inviteMethod,
-      manual_link: manualLink,
-      error: inviteSent ? null : inviteError,
+      sent: true,
+      method: "invite",
+      manual_link: null,
+      error: null,
     },
   });
 }
