@@ -72,6 +72,129 @@ type TrackingPayload = {
   resolved_granularity?: string;
 };
 
+function isValidPeriodKey(value: string): boolean {
+  const key = value.trim();
+  return /^\d{4}$/.test(key) || /^\d{4}-Q[1-4]$/i.test(key);
+}
+
+function sanitizeMetricSeries(
+  series: MetricSeries | undefined,
+  validPeriods: Set<string>,
+  validDeltaKeys: Set<string>
+): MetricSeries {
+  const values: Record<string, number | null> = {};
+  const deltas: Record<string, number | null> = {};
+  for (const [periodKey, value] of Object.entries(series?.values || {})) {
+    if (!validPeriods.has(periodKey)) continue;
+    values[periodKey] = typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  for (const [deltaKey, value] of Object.entries(series?.deltas || {})) {
+    if (!validDeltaKeys.has(deltaKey)) continue;
+    deltas[deltaKey] = typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  return { values, deltas };
+}
+
+function sanitizeSeriesObject(series: TrackingPayload): TrackingPayload {
+  const rawPeriods = Array.isArray(series.periods) ? series.periods : [];
+  const periods = rawPeriods
+    .filter((period) => typeof period?.key === "string" && isValidPeriodKey(period.key))
+    .map((period) => ({
+      key: String(period.key),
+      label: typeof period.label === "string" && period.label.trim() ? period.label : String(period.key),
+      order:
+        typeof (period as { order?: unknown }).order === "number"
+          ? ((period as { order?: number }).order as number)
+          : Number(String(period.key).replace(/-Q/i, ".")),
+    }))
+    .sort((a, b) => a.order - b.order);
+  const dedupedPeriods: Array<{ key: string; label: string; order: number }> = [];
+  const seen = new Set<string>();
+  for (const period of periods) {
+    if (seen.has(period.key)) continue;
+    seen.add(period.key);
+    dedupedPeriods.push(period);
+  }
+
+  const validPeriods = new Set(dedupedPeriods.map((period) => period.key));
+  const deltaColumns = dedupedPeriods.slice(1).map((period, index) => {
+    const from = dedupedPeriods[index].key;
+    const to = period.key;
+    return {
+      key: `d_${from}_${to}`,
+      from,
+      to,
+      label: `${from} -> ${to}`,
+    };
+  });
+  const validDeltaKeys = new Set(deltaColumns.map((column) => column.key));
+
+  const sanitizeRows = (rows: TrackingRow[] | undefined) =>
+    (Array.isArray(rows) ? rows : []).map((row) => {
+      const metrics: Record<string, MetricSeries> = {};
+      for (const [metricKey, metricSeries] of Object.entries(row.metrics || {})) {
+        metrics[metricKey] = sanitizeMetricSeries(metricSeries, validPeriods, validDeltaKeys);
+      }
+      return { ...row, metrics };
+    });
+
+  return {
+    ...series,
+    periods: dedupedPeriods,
+    delta_columns: deltaColumns,
+    entity_rows: sanitizeRows(series.entity_rows),
+    secondary_rows: sanitizeRows(series.secondary_rows as unknown as TrackingRow[]) as unknown as TrackingPayload["secondary_rows"],
+    brand_rows: Array.isArray(series.brand_rows)
+      ? series.brand_rows.map((row) => ({
+          ...row,
+          metrics: Object.fromEntries(
+            Object.entries((row as { metrics?: Record<string, MetricSeries> }).metrics || {}).map(([metricKey, metricSeries]) => [
+              metricKey,
+              sanitizeMetricSeries(metricSeries, validPeriods, validDeltaKeys),
+            ])
+          ),
+        }))
+      : series.brand_rows,
+    touchpoint_rows: Array.isArray(series.touchpoint_rows)
+      ? series.touchpoint_rows.map((row) => ({
+          ...row,
+          metrics: Object.fromEntries(
+            Object.entries((row as { metrics?: Record<string, MetricSeries> }).metrics || {}).map(([metricKey, metricSeries]) => [
+              metricKey,
+              sanitizeMetricSeries(metricSeries, validPeriods, validDeltaKeys),
+            ])
+          ),
+        }))
+      : series.touchpoint_rows,
+  };
+}
+
+function sanitizeTrackingPayload(payload: unknown): unknown {
+  if (!payload) return payload;
+  if (Array.isArray(payload)) {
+    return payload.map((item) => {
+      if (!item || typeof item !== "object") return item;
+      const record = item as Record<string, unknown>;
+      if (record.bbs_tracking_series && typeof record.bbs_tracking_series === "object") {
+        return {
+          ...record,
+          bbs_tracking_series: sanitizeSeriesObject(record.bbs_tracking_series as TrackingPayload),
+        };
+      }
+      return sanitizeSeriesObject(record as TrackingPayload);
+    });
+  }
+  if (typeof payload !== "object") return payload;
+  const record = payload as Record<string, unknown>;
+  if (record.bbs_tracking_series && typeof record.bbs_tracking_series === "object") {
+    return {
+      ...record,
+      bbs_tracking_series: sanitizeSeriesObject(record.bbs_tracking_series as TrackingPayload),
+    };
+  }
+  return sanitizeSeriesObject(record as TrackingPayload);
+}
+
 function parseYearsInput(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value
@@ -726,7 +849,7 @@ export async function GET(request: NextRequest) {
       );
       const legacyPayload = await tryLegacyTrackingSeries("GET", constrained.query, constrained.payload);
       if (legacyPayload) {
-        const normalizedLegacy = normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView);
+        const normalizedLegacy = sanitizeTrackingPayload(normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView));
         const filteredLegacy = filterTrackingBySelection(normalizedLegacy, taxonomyView, selection);
         return NextResponse.json(filteredLegacy);
       }
@@ -744,7 +867,7 @@ export async function GET(request: NextRequest) {
   if (taxonomyView !== "market") {
     return NextResponse.json(preferred, { status: response.status });
   }
-  const normalized = normalizeTrackingPayloadTaxonomy(preferred, taxonomyView);
+  const normalized = sanitizeTrackingPayload(normalizeTrackingPayloadTaxonomy(preferred, taxonomyView));
   const filteredNormalized = filterTrackingBySelection(normalized, taxonomyView, selection);
   if (selection.sector && !selection.subsector && !selection.category) {
     if (countEntities(filteredNormalized) <= 1 && countEntities(normalized) > 1) {
@@ -759,7 +882,7 @@ export async function GET(request: NextRequest) {
   if (rebuiltMarket && hasMeaningfulEntities(rebuiltMarket)) {
     const filteredRebuilt = filterTrackingBySelection(rebuiltMarket, taxonomyView, selection);
     if (hasMeaningfulEntities(filteredRebuilt)) {
-      return NextResponse.json(filteredRebuilt, { status: response.status });
+      return NextResponse.json(sanitizeTrackingPayload(filteredRebuilt), { status: response.status });
     }
   }
   return NextResponse.json(filteredNormalized, { status: response.status });
@@ -839,7 +962,7 @@ export async function POST(request: NextRequest) {
       );
       const legacyPayload = await tryLegacyTrackingSeries("POST", constrained.query, constrained.payload);
       if (legacyPayload) {
-        const normalizedLegacy = normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView);
+        const normalizedLegacy = sanitizeTrackingPayload(normalizeTrackingPayloadTaxonomy(legacyPayload, taxonomyView));
         const filteredLegacy = filterTrackingBySelection(normalizedLegacy, taxonomyView, selection);
         return NextResponse.json(filteredLegacy);
       }
@@ -857,7 +980,7 @@ export async function POST(request: NextRequest) {
   if (taxonomyView !== "market") {
     return NextResponse.json(preferred, { status: response.status });
   }
-  const normalized = normalizeTrackingPayloadTaxonomy(preferred, taxonomyView);
+  const normalized = sanitizeTrackingPayload(normalizeTrackingPayloadTaxonomy(preferred, taxonomyView));
   const filteredNormalized = filterTrackingBySelection(normalized, taxonomyView, selection);
   if (selection.sector && !selection.subsector && !selection.category) {
     if (countEntities(filteredNormalized) <= 1 && countEntities(normalized) > 1) {
@@ -872,7 +995,7 @@ export async function POST(request: NextRequest) {
   if (rebuiltMarket && hasMeaningfulEntities(rebuiltMarket)) {
     const filteredRebuilt = filterTrackingBySelection(rebuiltMarket, taxonomyView, selection);
     if (hasMeaningfulEntities(filteredRebuilt)) {
-      return NextResponse.json(filteredRebuilt, { status: response.status });
+      return NextResponse.json(sanitizeTrackingPayload(filteredRebuilt), { status: response.status });
     }
   }
   return NextResponse.json(filteredNormalized, { status: response.status });
