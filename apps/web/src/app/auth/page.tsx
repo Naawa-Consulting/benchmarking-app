@@ -24,6 +24,26 @@ export default function AuthPage() {
   useEffect(() => {
     if (!enabled) return;
     const supabase = createSupabaseBrowserClient();
+    const hash = typeof window !== "undefined" ? window.location.hash.replace(/^#/, "") : "";
+    const hashParams = new URLSearchParams(hash);
+    const accessToken = hashParams.get("access_token");
+    const refreshToken = hashParams.get("refresh_token");
+    const tokenType = hashParams.get("type");
+
+    if (accessToken && refreshToken) {
+      supabase.auth
+        .setSession({ access_token: accessToken, refresh_token: refreshToken })
+        .then(() => {
+          const isPasswordSetupFlow = tokenType === "invite" || tokenType === "recovery";
+          if (isPasswordSetupFlow) {
+            router.replace(`/auth/reset?next=${encodeURIComponent(nextPath)}`);
+            return;
+          }
+          router.replace(nextPath);
+        });
+      return;
+    }
+
     supabase.auth.getUser().then(({ data }) => {
       if (data.user) router.replace(nextPath);
     });

@@ -161,7 +161,7 @@ export async function POST(request: NextRequest) {
   }
 
   const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000").replace(/\/+$/, "");
-  const redirectTo = `${siteUrl}/auth/reset`;
+  const redirectTo = `${siteUrl}/auth/callback?next=${encodeURIComponent("/auth/reset")}`;
 
   const inviteResult = await supabaseAuthRequest("invite", {
     method: "POST",
