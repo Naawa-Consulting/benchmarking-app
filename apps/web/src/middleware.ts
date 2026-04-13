@@ -33,6 +33,7 @@ function isProtectedPath(pathname: string) {
     pathname.startsWith("/journey") ||
     pathname.startsWith("/demand-network") ||
     pathname.startsWith("/tracking") ||
+    pathname.startsWith("/agent") ||
     pathname.startsWith("/data") ||
     pathname.startsWith("/admin") ||
     pathname.startsWith("/api/")
@@ -47,6 +48,7 @@ export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   const isDataPath = pathname.startsWith("/data");
   const isAdminPath = pathname.startsWith("/admin");
+  const isAgentPath = pathname.startsWith("/agent");
   const isAuthPath = pathname.startsWith("/auth");
   const isAuthResetPath = pathname.startsWith("/auth/reset");
   const needsAuth = isProtectedPath(pathname);
@@ -86,10 +88,18 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL(target, request.url));
   }
 
-  if (user && (isDataPath || isAdminPath)) {
+  if (user && (isDataPath || isAdminPath || isAgentPath)) {
     const roleFromService = await resolveRoleWithServiceKey(user.id);
     const role = roleFromService ?? "viewer";
-    if (role === "viewer" || (isAdminPath && role === "analyst")) {
+    const agentEnabledRaw = (process.env.BBS_AGENT_ENABLED || process.env.NEXT_PUBLIC_BBS_AGENT_ENABLED || "on")
+      .trim()
+      .toLowerCase();
+    const agentEnabled = agentEnabledRaw !== "off" && agentEnabledRaw !== "false" && agentEnabledRaw !== "0";
+    const ownerOnlyRaw = (process.env.BBS_AGENT_OWNER_ONLY || "true").trim().toLowerCase();
+    const agentOwnerOnly = ownerOnlyRaw !== "off" && ownerOnlyRaw !== "false" && ownerOnlyRaw !== "0";
+    const agentDenied = !agentEnabled || (agentOwnerOnly ? role !== "owner" : role === "viewer");
+
+    if (role === "viewer" || (isAdminPath && role === "analyst") || (isAgentPath && agentDenied)) {
       const target = request.nextUrl.clone();
       target.pathname = "/journey";
       target.search = "";

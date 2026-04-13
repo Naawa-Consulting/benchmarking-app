@@ -13,12 +13,14 @@ type NavItem = {
 type AuthzMe = {
   role?: "owner" | "admin" | "analyst" | "viewer";
   is_admin_module_allowed?: boolean;
+  is_agent_module_allowed?: boolean;
 };
 
 const NAV_ITEMS: NavItem[] = [
   { label: "Journey", href: "/journey" },
   { label: "Network", href: "/demand-network" },
   { label: "Trends", href: "/tracking" },
+  { label: "Agent", href: "/agent" },
   { label: "Data", href: "/data" },
   { label: "Admin", href: "/admin" },
 ];
@@ -76,11 +78,24 @@ export default function TopNav() {
   }, [authEnabled]);
 
   const navItems = useMemo(() => {
-    if (!authEnabled) return NAV_ITEMS;
-    if (!role) return NAV_ITEMS.filter((item) => item.href !== "/data" && item.href !== "/admin");
-    if (role === "viewer") return NAV_ITEMS.filter((item) => item.href !== "/data" && item.href !== "/admin");
-    if (role === "analyst") return NAV_ITEMS.filter((item) => item.href !== "/admin");
-    return NAV_ITEMS;
+    const agentEnabledRaw = (process.env.NEXT_PUBLIC_BBS_AGENT_ENABLED || "on").trim().toLowerCase();
+    const agentEnabled = agentEnabledRaw !== "off" && agentEnabledRaw !== "false" && agentEnabledRaw !== "0";
+    const ownerOnlyRaw = (process.env.NEXT_PUBLIC_BBS_AGENT_OWNER_ONLY || "true").trim().toLowerCase();
+    const ownerOnly = ownerOnlyRaw !== "off" && ownerOnlyRaw !== "false" && ownerOnlyRaw !== "0";
+
+    const filteredByAgent = NAV_ITEMS.filter((item) => {
+      if (item.href !== "/agent") return true;
+      if (!agentEnabled) return false;
+      if (!authEnabled) return true;
+      if (ownerOnly) return role === "owner";
+      return role !== "viewer";
+    });
+
+    if (!authEnabled) return filteredByAgent;
+    if (!role) return filteredByAgent.filter((item) => item.href !== "/data" && item.href !== "/admin");
+    if (role === "viewer") return filteredByAgent.filter((item) => item.href !== "/data" && item.href !== "/admin");
+    if (role === "analyst") return filteredByAgent.filter((item) => item.href !== "/admin");
+    return filteredByAgent;
   }, [authEnabled, role]);
 
   async function handleLogout() {
@@ -112,6 +127,8 @@ export default function TopNav() {
                 ? pathname?.startsWith("/data")
                 : item.href === "/admin"
                   ? pathname?.startsWith("/admin")
+                : item.href === "/agent"
+                  ? pathname?.startsWith("/agent")
                 : pathname?.startsWith(item.href);
             return <NavTab key={item.href} item={item} active={Boolean(active)} />;
           })}

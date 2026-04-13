@@ -203,3 +203,37 @@ export interface UserAccessPayload {
   };
 }
 
+export type AgentChartType = "bar" | "line" | "table";
+
+export interface AgentChartSpec {
+  type: AgentChartType;
+  title?: string;
+  x?: string[];
+  series?: Array<{ name: string; data: number[] }>;
+  columns?: string[];
+  rows?: Array<Array<string | number | null>>;
+  y_label?: string;
+}
+
+export interface AgentConversation {
+  id: string;
+  user_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  last_message_at: string;
+  archived: boolean;
+}
+
+export type AgentMessageRole = "user" | "assistant" | "system";
+
+export interface AgentMessage {
+  id: string;
+  conversation_id: string;
+  role: AgentMessageRole;
+  content: string;
+  chart_spec?: AgentChartSpec | null;
+  meta?: Record<string, unknown> | null;
+  created_at: string;
+}
+

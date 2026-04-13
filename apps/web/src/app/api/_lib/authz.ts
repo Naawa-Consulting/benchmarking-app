@@ -18,6 +18,7 @@ export type RequestAuthz = {
   permissions: string[];
   can_toggle_brands: boolean;
   is_admin_module_allowed: boolean;
+  is_agent_module_allowed: boolean;
   effective_scopes: EffectiveScopes;
   can_mutate: boolean;
   is_viewer: boolean;
@@ -48,6 +49,24 @@ function canAccessAdminModule(role: BbsRole) {
 
 function hasRoleBasedBrandToggle(role: BbsRole) {
   return BRAND_TOGGLE_ROLES.has(role);
+}
+
+function isAgentFeatureEnabled() {
+  const raw = (process.env.BBS_AGENT_ENABLED || process.env.NEXT_PUBLIC_BBS_AGENT_ENABLED || "on")
+    .trim()
+    .toLowerCase();
+  return raw !== "off" && raw !== "false" && raw !== "0";
+}
+
+function isAgentOwnerOnly() {
+  const raw = (process.env.BBS_AGENT_OWNER_ONLY || "true").trim().toLowerCase();
+  return raw !== "off" && raw !== "false" && raw !== "0";
+}
+
+function canAccessAgentModule(role: BbsRole) {
+  if (!isAgentFeatureEnabled()) return false;
+  if (isAgentOwnerOnly()) return role === "owner";
+  return role === "owner" || role === "admin" || role === "analyst" || role === "viewer";
 }
 
 async function fetchRoleWithServiceKey(userId: string): Promise<BbsRole | null> {
@@ -190,6 +209,7 @@ export async function getRequestAuthz(request: NextRequest): Promise<RequestAuth
       permissions: ["*"],
       can_toggle_brands: true,
       is_admin_module_allowed: true,
+      is_agent_module_allowed: true,
       effective_scopes: { market_sector: [], market_subsector: [], market_category: [] },
       can_mutate: true,
       is_viewer: false,
@@ -210,6 +230,7 @@ export async function getRequestAuthz(request: NextRequest): Promise<RequestAuth
       permissions: [],
       can_toggle_brands: false,
       is_admin_module_allowed: false,
+      is_agent_module_allowed: false,
       effective_scopes: { market_sector: [], market_subsector: [], market_category: [] },
       can_mutate: false,
       is_viewer: true,
@@ -239,6 +260,7 @@ export async function getRequestAuthz(request: NextRequest): Promise<RequestAuth
       permissions: [],
       can_toggle_brands: false,
       is_admin_module_allowed: false,
+      is_agent_module_allowed: false,
       effective_scopes: { market_sector: [], market_subsector: [], market_category: [] },
       can_mutate: false,
       is_viewer: true,
@@ -302,6 +324,7 @@ export async function getRequestAuthz(request: NextRequest): Promise<RequestAuth
     permissions: mergedPermissions,
     can_toggle_brands: canToggleBrands,
     is_admin_module_allowed: canAccessAdminModule(resolvedRole),
+    is_agent_module_allowed: canAccessAgentModule(resolvedRole),
     effective_scopes: effectiveScopes,
     can_mutate: canMutate(resolvedRole),
     is_viewer: resolvedRole === "viewer",

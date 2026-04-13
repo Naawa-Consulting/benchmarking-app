@@ -530,3 +530,48 @@ export function patchAdminUserAccessDetailed(
     body: JSON.stringify(payload),
   });
 }
+
+export function getAgentConversationsDetailed() {
+  return requestDetailedLocal("/api/agent/conversations");
+}
+
+export function createAgentConversationDetailed(payload?: { title?: string }) {
+  return requestDetailedLocal("/api/agent/conversations", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+export function deleteAgentConversationDetailed(conversationId: string) {
+  return requestDetailedLocal(`/api/agent/conversations/${encodeURIComponent(conversationId)}`, {
+    method: "DELETE",
+  });
+}
+
+export function getAgentMessagesDetailed(conversationId: string) {
+  return requestDetailedLocal(`/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`);
+}
+
+export function postAgentMessageDetailed(
+  conversationId: string,
+  payload: {
+    message: string;
+    context?: {
+      taxonomy_view?: "market" | "standard";
+      sector?: string | null;
+      subsector?: string | null;
+      category?: string | null;
+      years?: string[] | null;
+      gender?: string[] | null;
+      nse?: string[] | null;
+      age_min?: number | null;
+      age_max?: number | null;
+      brands?: string[] | null;
+    };
+  }
+) {
+  return requestDetailedLocal(`/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}

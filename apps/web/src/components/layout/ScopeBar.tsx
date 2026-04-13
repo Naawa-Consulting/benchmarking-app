@@ -40,6 +40,7 @@ export default function ScopeBar() {
   const timeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const isPresentationMode = pathname === "/demand-network" && searchParams.get("presentation") === "1";
+  const isAgentPage = pathname?.startsWith("/agent");
   const sharedBrandsMode = searchParams.get("brands_mode");
   const legacyJourneyBrandsEnabled = searchParams.get("journey_brands") === "1";
   const legacyNetworkBrandsEnabled = searchParams.get("network_brands") === "enable";
@@ -249,7 +250,7 @@ export default function ScopeBar() {
     setScope,
   ]);
 
-  if (isPresentationMode) {
+  if (isPresentationMode || isAgentPage) {
     return null;
   }
 
