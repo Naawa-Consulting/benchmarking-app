@@ -401,6 +401,7 @@ def _build_csat_gap_model(root: Path) -> dict:
         if bucket is None:
             bucket = {
                 "sat_minus_csat": [],
+                "csat_minus_rec": [],
                 "comparisons_total": 0,
                 "comparisons_csat_gt_sat": 0,
             }
@@ -430,6 +431,7 @@ def _build_csat_gap_model(root: Path) -> dict:
         for row in rows:
             satisfaction = row.get("brand_satisfaction")
             csat = row.get("csat")
+            recommendation = row.get("brand_recommendation")
             if not isinstance(satisfaction, (int, float)) or not isinstance(csat, (int, float)):
                 continue
             delta = float(satisfaction) - float(csat)
@@ -441,6 +443,8 @@ def _build_csat_gap_model(root: Path) -> dict:
             ):
                 bucket = _get_bucket(key)
                 bucket["sat_minus_csat"].append(delta)
+                if isinstance(recommendation, (int, float)):
+                    bucket["csat_minus_rec"].append(float(csat) - float(recommendation))
                 bucket["comparisons_total"] = int(bucket["comparisons_total"]) + 1
                 if float(csat) > float(satisfaction):
                     bucket["comparisons_csat_gt_sat"] = int(bucket["comparisons_csat_gt_sat"]) + 1
@@ -449,6 +453,7 @@ def _build_csat_gap_model(root: Path) -> dict:
     warnings: list[dict[str, object]] = []
     for key, bucket in buckets.items():
         deltas = [float(value) for value in bucket["sat_minus_csat"] if isinstance(value, (int, float))]
+        csat_rec_deltas = [float(value) for value in bucket["csat_minus_rec"] if isinstance(value, (int, float))]
         comparisons_total = int(bucket["comparisons_total"])
         comparisons_csat_gt_sat = int(bucket["comparisons_csat_gt_sat"])
         anomaly_pct = (
@@ -457,8 +462,10 @@ def _build_csat_gap_model(root: Path) -> dict:
             else None
         )
         rates[key] = {
-            "n_delta": len(deltas),
-            "delta": _winsorized_median(deltas),
+            "n_delta_sc": len(deltas),
+            "delta_sc": _winsorized_median(deltas),
+            "n_delta_cr": len(csat_rec_deltas),
+            "delta_cr": _winsorized_median(csat_rec_deltas),
             "comparisons_total": comparisons_total,
             "comparisons_csat_gt_sat": comparisons_csat_gt_sat,
             "csat_gt_sat_pct": anomaly_pct,
@@ -557,6 +564,7 @@ def _resolve_satisfaction_rate_for_level(
 
 def _resolve_csat_gap_for_level(
     model: dict,
+    metric: str,
     market_sector: str,
     market_subsector: str,
     market_category: str,
@@ -572,8 +580,10 @@ def _resolve_csat_gap_for_level(
         payload = rates.get(key)
         if not isinstance(payload, dict):
             continue
-        n_value = payload.get("n_delta")
-        delta = payload.get("delta")
+        n_key = "n_delta_sc" if metric == "sc" else "n_delta_cr"
+        d_key = "delta_sc" if metric == "sc" else "delta_cr"
+        n_value = payload.get(n_key)
+        delta = payload.get(d_key)
         if not isinstance(n_value, int) or n_value < CSAT_IMPUTE_MIN_N:
             continue
         if not isinstance(delta, (int, float)):
@@ -680,21 +690,50 @@ def _estimate_csat_from_satisfaction(
     market_subsector: str,
     market_category: str,
     satisfaction: float | None,
+    recommendation: float | None,
 ) -> tuple[float | None, str]:
-    if not isinstance(satisfaction, (int, float)):
+    candidates: list[float] = []
+    levels: list[str] = []
+
+    if isinstance(satisfaction, (int, float)):
+        gap_sc, level_sc = _resolve_csat_gap_for_level(
+            model=model,
+            metric="sc",
+            market_sector=market_sector,
+            market_subsector=market_subsector,
+            market_category=market_category,
+        )
+        if isinstance(gap_sc, (int, float)):
+            candidates.append(float(satisfaction) - float(gap_sc))
+            levels.append(level_sc)
+
+    if isinstance(recommendation, (int, float)):
+        delta_cr, level_cr = _resolve_csat_gap_for_level(
+            model=model,
+            metric="cr",
+            market_sector=market_sector,
+            market_subsector=market_subsector,
+            market_category=market_category,
+        )
+        if isinstance(delta_cr, (int, float)):
+            candidates.append(float(recommendation) + float(delta_cr))
+            levels.append(level_cr)
+
+    if not candidates:
         return None, "none"
-    gap, level = _resolve_csat_gap_for_level(
-        model=model,
-        market_sector=market_sector,
-        market_subsector=market_subsector,
-        market_category=market_category,
-    )
-    if not isinstance(gap, (int, float)):
+
+    estimate = _median(candidates)
+    if estimate is None:
         return None, "none"
-    # Guardrail: CSAT derived from satisfaction should not systematically exceed satisfaction.
-    effective_gap = max(float(gap), 0.0)
-    estimate = float(satisfaction) - effective_gap
-    estimate = min(100.0, max(-100.0, estimate))
+    level = "global"
+    if "category" in levels:
+        level = "category"
+    elif "subsector" in levels:
+        level = "subsector"
+    elif "sector" in levels:
+        level = "sector"
+
+    estimate = min(100.0, max(-100.0, float(estimate)))
     return round(estimate, 1), level
 
 
@@ -928,21 +967,26 @@ def _apply_csat_imputation_to_rows(
     for row in rows:
         csat = row.get("csat")
         satisfaction = row.get("brand_satisfaction")
-        satisfaction_source = str(row.get("brand_satisfaction_source") or "none").strip().lower()
 
         if isinstance(csat, (int, float)):
             row["csat_source"] = "observed"
             row["csat_imputed"] = None
             row["csat_impute_level"] = "none"
             row["csat_impute_version"] = None
-        elif satisfaction_source == "imputed" and isinstance(satisfaction, (int, float)):
+        elif (
+            isinstance(satisfaction, (int, float))
+            or isinstance(row.get("brand_recommendation"), (int, float))
+        ):
             metrics["eligible_rows"] = int(metrics["eligible_rows"]) + 1
             estimated, level = _estimate_csat_from_satisfaction(
                 model=model,
                 market_sector=market_sector,
                 market_subsector=market_subsector,
                 market_category=market_category,
-                satisfaction=float(satisfaction),
+                satisfaction=float(satisfaction) if isinstance(satisfaction, (int, float)) else None,
+                recommendation=float(row.get("brand_recommendation"))
+                if isinstance(row.get("brand_recommendation"), (int, float))
+                else None,
             )
             if isinstance(estimated, (int, float)):
                 row["csat"] = estimated
