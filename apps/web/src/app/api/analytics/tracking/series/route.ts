@@ -569,9 +569,8 @@ function parseStudyIdsFromInputs(query: Record<string, string>, payload: Record<
 }
 
 function normalizeTaxonomyViewFromInputs(query: Record<string, string>, payload: Record<string, unknown>) {
-  const payloadView = typeof payload.taxonomy_view === "string" ? payload.taxonomy_view.toLowerCase() : null;
-  if (payloadView === "standard") return "standard" as const;
-  if (query.taxonomy_view === "standard") return "standard" as const;
+  void query;
+  void payload;
   return "market" as const;
 }
 
@@ -600,13 +599,7 @@ async function constrainLegacyFallbackToSupabaseStudies(
   const ids = studies
     .filter((row) => (requestedIds.length ? requestedIds.includes(row.study_id) : true))
     .filter((row) => {
-      if (taxonomyView === "standard") {
-        return (
-          (sector ? row.sector === sector : true) &&
-          (subsector ? row.subsector === subsector : true) &&
-          (category ? row.category === category : true)
-        );
-      }
+      void taxonomyView;
       return (
         (sector ? row.market_sector === sector : true) &&
         (subsector ? row.market_subsector === subsector : true) &&
@@ -810,7 +803,10 @@ async function applySupabaseMarketFallback(
 
 export async function GET(request: NextRequest) {
   const scopeContext = await getScopeContext(request);
-  const taxonomyView = request.nextUrl.searchParams.get("taxonomy_view") === "standard" ? "standard" : "market";
+  if (request.nextUrl.searchParams.get("taxonomy_view") === "standard") {
+    console.warn("[tracking/series] Ignoring legacy taxonomy_view=standard and forcing market.");
+  }
+  const taxonomyView = "market" as const;
   const selection = {
     sector: request.nextUrl.searchParams.get("sector"),
     subsector: request.nextUrl.searchParams.get("subsector"),
@@ -820,7 +816,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(emptyTrackingSeries());
   }
   const marketScoped = await applyMarketFilterToStudyIds({
-    query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
+    query: { ...expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())), taxonomy_view: "market" },
     payload: {},
     allowedStudyIds: scopeContext.allowedStudyIds,
     preserveTaxonomyFilters: true,
@@ -904,13 +900,18 @@ export async function POST(request: NextRequest) {
   if (scopeContext.allowedStudyIds && scopeContext.allowedStudyIds.length === 0) {
     return NextResponse.json(emptyTrackingSeries());
   }
-  const payload = expandNseInPayload((await request.json().catch(() => ({}))) as Record<string, unknown>);
-  const taxonomyView =
-    typeof payload.taxonomy_view === "string" && payload.taxonomy_view.toLowerCase() === "standard"
-      ? "standard"
-      : request.nextUrl.searchParams.get("taxonomy_view") === "standard"
-        ? "standard"
-        : "market";
+  const rawPayload = expandNseInPayload((await request.json().catch(() => ({}))) as Record<string, unknown>);
+  if (
+    request.nextUrl.searchParams.get("taxonomy_view") === "standard" ||
+    (typeof rawPayload.taxonomy_view === "string" && rawPayload.taxonomy_view.toLowerCase() === "standard")
+  ) {
+    console.warn("[tracking/series] Ignoring legacy taxonomy_view=standard and forcing market.");
+  }
+  const payload: Record<string, unknown> = {
+    ...rawPayload,
+    taxonomy_view: "market",
+  };
+  const taxonomyView = "market" as const;
   const selection = {
     sector: (typeof payload.sector === "string" ? payload.sector : null) ?? request.nextUrl.searchParams.get("sector"),
     subsector:
@@ -920,7 +921,7 @@ export async function POST(request: NextRequest) {
       (typeof payload.category === "string" ? payload.category : null) ?? request.nextUrl.searchParams.get("category"),
   };
   const marketScoped = await applyMarketFilterToStudyIds({
-    query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
+    query: { ...expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())), taxonomy_view: "market" },
     payload,
     allowedStudyIds: scopeContext.allowedStudyIds,
     preserveTaxonomyFilters: true,

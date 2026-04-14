@@ -18,6 +18,7 @@ from app.data.warehouse import get_repo_root
 from app.storage.question_map import question_map_path
 
 router = APIRouter()
+IMPUTE_WARN_THRESHOLD = 0.40
 
 
 def _mapping_csv_path() -> Path:
@@ -215,6 +216,200 @@ def _load_mapping_df_from_question_map(study_id: str, rules: dict) -> pd.DataFra
     return df[expected_cols]
 
 
+def _build_consideration_imputation_report(study_id: str) -> dict:
+    try:
+        from app.routers.analytics import _compute_table_rows
+    except Exception:
+        return {
+            "version": "v1.0",
+            "total_rows": 0,
+            "imputed_rows": 0,
+            "imputed_pct": 0.0,
+            "levels": {"category": 0, "subsector": 0, "sector": 0, "global": 0, "none": 0},
+            "post_purchase_gt_consideration_rows": 0,
+            "post_comparable_rows": 0,
+            "post_purchase_gt_consideration_pct": None,
+            "warnings": [],
+        }
+
+    rows = _compute_table_rows(study_id)
+    levels = {"category": 0, "subsector": 0, "sector": 0, "global": 0, "none": 0}
+    imputed_rows = 0
+    comparable = 0
+    purchase_gt_consideration = 0
+    for row in rows:
+        source = str(row.get("brand_consideration_source") or "none").strip().lower()
+        level = str(row.get("brand_consideration_impute_level") or "none").strip().lower()
+        if level not in levels:
+            level = "none"
+        if source == "imputed":
+            imputed_rows += 1
+            levels[level] += 1
+        consideration = row.get("brand_consideration")
+        purchase = row.get("brand_purchase")
+        if isinstance(consideration, (int, float)) and isinstance(purchase, (int, float)):
+            comparable += 1
+            if float(purchase) > float(consideration):
+                purchase_gt_consideration += 1
+
+    total_rows = len(rows)
+    imputed_pct = round((imputed_rows / total_rows) * 100, 1) if total_rows else 0.0
+    post_pct = round((purchase_gt_consideration / comparable) * 100, 1) if comparable else None
+    warnings: list[dict] = []
+    if comparable and (purchase_gt_consideration / comparable) > IMPUTE_WARN_THRESHOLD:
+        warnings.append(
+            {
+                "level": "study",
+                "warning": "High purchase>consideration rate after imputation.",
+                "purchase_gt_consideration_pct": post_pct,
+                "post_n": comparable,
+            }
+        )
+
+    return {
+        "version": "v1.0",
+        "total_rows": total_rows,
+        "imputed_rows": imputed_rows,
+        "imputed_pct": imputed_pct,
+        "levels": levels,
+        "post_purchase_gt_consideration_rows": purchase_gt_consideration,
+        "post_comparable_rows": comparable,
+        "post_purchase_gt_consideration_pct": post_pct,
+        "warnings": warnings,
+    }
+
+
+def _build_satisfaction_imputation_report(study_id: str) -> dict:
+    try:
+        from app.routers.analytics import _compute_table_rows
+    except Exception:
+        return {
+            "version": "v1.0",
+            "total_rows": 0,
+            "imputed_rows": 0,
+            "imputed_pct": 0.0,
+            "levels": {"category": 0, "subsector": 0, "sector": 0, "global": 0, "none": 0},
+            "post_recommendation_gt_satisfaction_rows": 0,
+            "post_comparable_rows": 0,
+            "post_recommendation_gt_satisfaction_pct": None,
+            "warnings": [],
+        }
+
+    rows = _compute_table_rows(study_id)
+    levels = {"category": 0, "subsector": 0, "sector": 0, "global": 0, "none": 0}
+    imputed_rows = 0
+    comparable = 0
+    recommendation_gt_satisfaction = 0
+    for row in rows:
+        source = str(row.get("brand_satisfaction_source") or "none").strip().lower()
+        level = str(row.get("brand_satisfaction_impute_level") or "none").strip().lower()
+        if level not in levels:
+            level = "none"
+        if source == "imputed":
+            imputed_rows += 1
+            levels[level] += 1
+        satisfaction = row.get("brand_satisfaction")
+        recommendation = row.get("brand_recommendation")
+        if isinstance(satisfaction, (int, float)) and isinstance(recommendation, (int, float)):
+            comparable += 1
+            if float(recommendation) > float(satisfaction):
+                recommendation_gt_satisfaction += 1
+
+    total_rows = len(rows)
+    imputed_pct = round((imputed_rows / total_rows) * 100, 1) if total_rows else 0.0
+    post_pct = round((recommendation_gt_satisfaction / comparable) * 100, 1) if comparable else None
+    warnings: list[dict] = []
+    if comparable and (recommendation_gt_satisfaction / comparable) > IMPUTE_WARN_THRESHOLD:
+        warnings.append(
+            {
+                "level": "study",
+                "warning": "High recommendation>satisfaction rate after imputation.",
+                "recommendation_gt_satisfaction_pct": post_pct,
+                "post_n": comparable,
+            }
+        )
+
+    return {
+        "version": "v1.0",
+        "total_rows": total_rows,
+        "imputed_rows": imputed_rows,
+        "imputed_pct": imputed_pct,
+        "levels": levels,
+        "post_recommendation_gt_satisfaction_rows": recommendation_gt_satisfaction,
+        "post_comparable_rows": comparable,
+        "post_recommendation_gt_satisfaction_pct": post_pct,
+        "warnings": warnings,
+    }
+
+
+def _build_csat_imputation_report(study_id: str) -> dict:
+    try:
+        from app.routers.analytics import _compute_table_rows
+    except Exception:
+        return {
+            "version": "v1.0",
+            "total_rows": 0,
+            "eligible_rows": 0,
+            "imputed_rows": 0,
+            "imputed_pct": 0.0,
+            "levels": {"category": 0, "subsector": 0, "sector": 0, "global": 0, "none": 0},
+            "post_csat_gt_satisfaction_rows": 0,
+            "post_comparable_rows": 0,
+            "post_csat_gt_satisfaction_pct": None,
+            "warnings": [],
+        }
+
+    rows = _compute_table_rows(study_id)
+    levels = {"category": 0, "subsector": 0, "sector": 0, "global": 0, "none": 0}
+    imputed_rows = 0
+    eligible_rows = 0
+    comparable = 0
+    csat_gt_satisfaction = 0
+    for row in rows:
+        source = str(row.get("csat_source") or "none").strip().lower()
+        level = str(row.get("csat_impute_level") or "none").strip().lower()
+        if level not in levels:
+            level = "none"
+        if str(row.get("brand_satisfaction_source") or "none").strip().lower() == "imputed":
+            eligible_rows += 1
+        if source == "imputed":
+            imputed_rows += 1
+            levels[level] += 1
+        csat = row.get("csat")
+        satisfaction = row.get("brand_satisfaction")
+        if isinstance(csat, (int, float)) and isinstance(satisfaction, (int, float)):
+            comparable += 1
+            if float(csat) > float(satisfaction):
+                csat_gt_satisfaction += 1
+
+    total_rows = len(rows)
+    imputed_pct = round((imputed_rows / eligible_rows) * 100, 1) if eligible_rows else 0.0
+    post_pct = round((csat_gt_satisfaction / comparable) * 100, 1) if comparable else None
+    warnings: list[dict] = []
+    if comparable and (csat_gt_satisfaction / comparable) > IMPUTE_WARN_THRESHOLD:
+        warnings.append(
+            {
+                "level": "study",
+                "warning": "High csat>satisfaction rate after imputation.",
+                "csat_gt_satisfaction_pct": post_pct,
+                "post_n": comparable,
+            }
+        )
+
+    return {
+        "version": "v1.0",
+        "total_rows": total_rows,
+        "eligible_rows": eligible_rows,
+        "imputed_rows": imputed_rows,
+        "imputed_pct": imputed_pct,
+        "levels": levels,
+        "post_csat_gt_satisfaction_rows": csat_gt_satisfaction,
+        "post_comparable_rows": comparable,
+        "post_csat_gt_satisfaction_pct": post_pct,
+        "warnings": warnings,
+    }
+
+
 @router.post("/pipeline/journey/ensure")
 def ensure_journey_pipeline(
     study_id: str = Query(..., description="Study id"),
@@ -408,6 +603,15 @@ def journey_pipeline_status(study_id: str = Query(..., description="Study id")) 
         base_data_dir / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
     )
     curated_ready = curated_path.exists()
+    consideration_imputation = (
+        _build_consideration_imputation_report(study_id) if curated_ready else None
+    )
+    satisfaction_imputation = (
+        _build_satisfaction_imputation_report(study_id) if curated_ready else None
+    )
+    csat_imputation = (
+        _build_csat_imputation_report(study_id) if curated_ready else None
+    )
 
     return {
         "study_id": study_id,
@@ -415,6 +619,9 @@ def journey_pipeline_status(study_id: str = Query(..., description="Study id")) 
         "mapping_ready": mapping_ready,
         "curated_ready": curated_ready,
         "demographics_ready": demographics_ready,
+        "consideration_imputation": consideration_imputation,
+        "satisfaction_imputation": satisfaction_imputation,
+        "csat_imputation": csat_imputation,
         "paths": {
             "raw_dir": str(raw_dir),
             "mapping_csv": str(_mapping_csv_path()),

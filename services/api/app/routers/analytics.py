@@ -1,6 +1,7 @@
 ﻿import json
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -53,6 +54,24 @@ CORE_AWARENESS_BOUNDED_METRICS = (
     "brand_recommendation",
 )
 MIN_EXPERIENCE_BASE_N = 10
+CONSIDERATION_IMPUTE_VERSION = "v1.0"
+CONSIDERATION_IMPUTE_MIN_N = 15
+CONSIDERATION_IMPUTE_CACHE_TTL_SECONDS = 120
+CONSIDERATION_IMPUTE_WARN_THRESHOLD = 0.40
+CONSIDERATION_INVALID_YEAR = 20
+CONSIDERATION_TRAIN_MIN_YEAR = 1900
+CONSIDERATION_EXCLUDED_MARKET_CATEGORIES = {"specialty stores", "speciality stores"}
+_CONSIDERATION_IMPUTE_CACHE: dict[str, tuple[float, dict]] = {}
+SATISFACTION_IMPUTE_VERSION = "v1.0"
+SATISFACTION_IMPUTE_MIN_N = 15
+SATISFACTION_IMPUTE_CACHE_TTL_SECONDS = 120
+SATISFACTION_IMPUTE_WARN_THRESHOLD = 0.40
+_SATISFACTION_IMPUTE_CACHE: dict[str, tuple[float, dict]] = {}
+CSAT_IMPUTE_VERSION = "v1.0"
+CSAT_IMPUTE_MIN_N = 15
+CSAT_IMPUTE_CACHE_TTL_SECONDS = 120
+CSAT_IMPUTE_WARN_THRESHOLD = 0.40
+_CSAT_IMPUTE_CACHE: dict[str, tuple[float, dict]] = {}
 
 
 def _discover_curated_studies(root: Path) -> list[str]:
@@ -63,6 +82,923 @@ def _discover_curated_studies(root: Path) -> list[str]:
             if (path / "fact_journey.parquet").exists():
                 discovered.append(path.name.replace("study_id=", "", 1))
     return discovered
+
+
+def _study_year_from_id(study_id: str) -> int | None:
+    match = re.search(r"(19|20)\d{2}", study_id or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except ValueError:
+        return None
+
+
+def _is_training_year_valid(year: int | None) -> bool:
+    if year is None:
+        return False
+    if year == CONSIDERATION_INVALID_YEAR:
+        return False
+    max_allowed = datetime.utcnow().year + 1
+    return CONSIDERATION_TRAIN_MIN_YEAR <= year <= max_allowed
+
+
+def _as_non_empty_text(value: object) -> str:
+    if not isinstance(value, str):
+        return "Unassigned"
+    trimmed = value.strip()
+    return trimmed or "Unassigned"
+
+
+def _normalize_for_match(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def _normalize_market_category(value: object) -> str:
+    text = _as_non_empty_text(value)
+    normalized = _normalize_for_match(text)
+    if normalized == "speciality stores":
+        return "Specialty Stores"
+    return text
+
+
+def _quantile(sorted_values: list[float], q: float) -> float:
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    q = max(0.0, min(1.0, q))
+    pos = (len(sorted_values) - 1) * q
+    low = int(pos)
+    high = min(low + 1, len(sorted_values) - 1)
+    if low == high:
+        return sorted_values[low]
+    frac = pos - low
+    return sorted_values[low] * (1.0 - frac) + sorted_values[high] * frac
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    size = len(ordered)
+    mid = size // 2
+    if size % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _winsorized_median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    p5 = _quantile(ordered, 0.05)
+    p95 = _quantile(ordered, 0.95)
+    clipped = [min(max(value, p5), p95) for value in ordered]
+    return _median(clipped)
+
+
+def _consideration_cache_key(root: Path, study_ids: list[str]) -> str:
+    return f"consideration:{root}:{','.join(sorted(study_ids))}"
+
+
+def _satisfaction_cache_key(root: Path, study_ids: list[str]) -> str:
+    return f"satisfaction:{root}:{','.join(sorted(study_ids))}"
+
+
+def _csat_cache_key(root: Path, study_ids: list[str]) -> str:
+    return f"csat:{root}:{','.join(sorted(study_ids))}"
+
+
+def _build_consideration_rate_model(root: Path) -> dict:
+    study_ids = _discover_curated_studies(root)
+    buckets: dict[tuple[str, ...], dict[str, object]] = {}
+
+    def _get_bucket(level_key: tuple[str, ...]) -> dict[str, object]:
+        bucket = buckets.get(level_key)
+        if bucket is None:
+            bucket = {
+                "c_over_a": [],
+                "p_over_c": [],
+                "comparisons_total": 0,
+                "comparisons_p_gt_c": 0,
+            }
+            buckets[level_key] = bucket
+        return bucket
+
+    for study_id in study_ids:
+        year = _study_year_from_id(study_id)
+        if not _is_training_year_valid(year):
+            continue
+        classification = _classification_for_study(root, study_id)
+        market_sector = _as_non_empty_text(classification.get("market_sector"))
+        market_subsector = _as_non_empty_text(classification.get("market_subsector"))
+        market_category = _normalize_market_category(classification.get("market_category"))
+        if _normalize_for_match(market_category) in CONSIDERATION_EXCLUDED_MARKET_CATEGORIES:
+            continue
+
+        rows = _compute_table_rows_internal(
+            study_id=study_id,
+            respondent_cte=None,
+            respondent_params=[],
+            strict_missing=False,
+            apply_consideration_imputation=False,
+            apply_satisfaction_imputation=False,
+            apply_csat_imputation=False,
+        )
+        for row in rows:
+            awareness = row.get("brand_awareness")
+            consideration = row.get("brand_consideration")
+            purchase = row.get("brand_purchase")
+            for key in (
+                ("category", market_sector, market_subsector, market_category),
+                ("subsector", market_sector, market_subsector),
+                ("sector", market_sector),
+                ("global",),
+            ):
+                bucket = _get_bucket(key)
+                if isinstance(consideration, (int, float)) and isinstance(purchase, (int, float)):
+                    bucket["comparisons_total"] = int(bucket["comparisons_total"]) + 1
+                    if float(purchase) > float(consideration):
+                        bucket["comparisons_p_gt_c"] = int(bucket["comparisons_p_gt_c"]) + 1
+                if isinstance(awareness, (int, float)) and float(awareness) > 0 and isinstance(consideration, (int, float)):
+                    bucket["c_over_a"].append(float(consideration) / float(awareness))
+                if isinstance(consideration, (int, float)) and float(consideration) > 0 and isinstance(purchase, (int, float)):
+                    bucket["p_over_c"].append(float(purchase) / float(consideration))
+
+    rates: dict[tuple[str, ...], dict[str, float | int | None]] = {}
+    warnings: list[dict[str, object]] = []
+    for key, bucket in buckets.items():
+        c_over_a = [float(value) for value in bucket["c_over_a"] if isinstance(value, (int, float))]
+        p_over_c = [float(value) for value in bucket["p_over_c"] if isinstance(value, (int, float))]
+        comparisons_total = int(bucket["comparisons_total"])
+        comparisons_p_gt_c = int(bucket["comparisons_p_gt_c"])
+        anomaly_pct = (
+            (comparisons_p_gt_c / comparisons_total)
+            if comparisons_total > 0
+            else None
+        )
+        rates[key] = {
+            "n_ca": len(c_over_a),
+            "r_ca": _winsorized_median(c_over_a),
+            "n_pc": len(p_over_c),
+            "r_pc": _winsorized_median(p_over_c),
+            "comparisons_total": comparisons_total,
+            "comparisons_p_gt_c": comparisons_p_gt_c,
+            "p_gt_c_pct": anomaly_pct,
+        }
+        if key and key[0] == "category" and anomaly_pct is not None and anomaly_pct > CONSIDERATION_IMPUTE_WARN_THRESHOLD:
+            warnings.append(
+                {
+                    "level": "category",
+                    "market_sector": key[1] if len(key) > 1 else None,
+                    "market_subsector": key[2] if len(key) > 2 else None,
+                    "market_category": key[3] if len(key) > 3 else None,
+                    "purchase_gt_consideration_pct": round(anomaly_pct * 100, 1),
+                    "training_n": comparisons_total,
+                }
+            )
+
+    return {
+        "version": CONSIDERATION_IMPUTE_VERSION,
+        "study_ids": study_ids,
+        "rates": rates,
+        "warnings": warnings,
+    }
+
+
+def _get_consideration_rate_model(root: Path) -> dict:
+    studies = _discover_curated_studies(root)
+    cache_key = _consideration_cache_key(root, studies)
+    entry = _CONSIDERATION_IMPUTE_CACHE.get(cache_key)
+    if entry and time.time() - entry[0] <= CONSIDERATION_IMPUTE_CACHE_TTL_SECONDS:
+        return entry[1]
+    model = _build_consideration_rate_model(root)
+    _CONSIDERATION_IMPUTE_CACHE.clear()
+    _CONSIDERATION_IMPUTE_CACHE[cache_key] = (time.time(), model)
+    return model
+
+
+def _build_satisfaction_rate_model(root: Path) -> dict:
+    study_ids = _discover_curated_studies(root)
+    buckets: dict[tuple[str, ...], dict[str, object]] = {}
+
+    def _get_bucket(level_key: tuple[str, ...]) -> dict[str, object]:
+        bucket = buckets.get(level_key)
+        if bucket is None:
+            bucket = {
+                "s_over_p": [],
+                "s_over_r": [],
+                "comparisons_total": 0,
+                "comparisons_r_gt_s": 0,
+            }
+            buckets[level_key] = bucket
+        return bucket
+
+    for study_id in study_ids:
+        year = _study_year_from_id(study_id)
+        if not _is_training_year_valid(year):
+            continue
+        classification = _classification_for_study(root, study_id)
+        market_sector = _as_non_empty_text(classification.get("market_sector"))
+        market_subsector = _as_non_empty_text(classification.get("market_subsector"))
+        market_category = _normalize_market_category(classification.get("market_category"))
+        if _normalize_for_match(market_category) in CONSIDERATION_EXCLUDED_MARKET_CATEGORIES:
+            continue
+
+        rows = _compute_table_rows_internal(
+            study_id=study_id,
+            respondent_cte=None,
+            respondent_params=[],
+            strict_missing=False,
+            apply_consideration_imputation=False,
+            apply_satisfaction_imputation=False,
+            apply_csat_imputation=False,
+        )
+        for row in rows:
+            purchase = row.get("brand_purchase")
+            recommendation = row.get("brand_recommendation")
+            satisfaction = row.get("brand_satisfaction")
+            for key in (
+                ("category", market_sector, market_subsector, market_category),
+                ("subsector", market_sector, market_subsector),
+                ("sector", market_sector),
+                ("global",),
+            ):
+                bucket = _get_bucket(key)
+                if isinstance(recommendation, (int, float)) and isinstance(satisfaction, (int, float)):
+                    bucket["comparisons_total"] = int(bucket["comparisons_total"]) + 1
+                    if float(recommendation) > float(satisfaction):
+                        bucket["comparisons_r_gt_s"] = int(bucket["comparisons_r_gt_s"]) + 1
+                if isinstance(purchase, (int, float)) and float(purchase) > 0 and isinstance(satisfaction, (int, float)):
+                    bucket["s_over_p"].append(float(satisfaction) / float(purchase))
+                if (
+                    isinstance(recommendation, (int, float))
+                    and float(recommendation) > 0
+                    and isinstance(satisfaction, (int, float))
+                ):
+                    bucket["s_over_r"].append(float(satisfaction) / float(recommendation))
+
+    rates: dict[tuple[str, ...], dict[str, float | int | None]] = {}
+    warnings: list[dict[str, object]] = []
+    for key, bucket in buckets.items():
+        s_over_p = [float(value) for value in bucket["s_over_p"] if isinstance(value, (int, float))]
+        s_over_r = [float(value) for value in bucket["s_over_r"] if isinstance(value, (int, float))]
+        comparisons_total = int(bucket["comparisons_total"])
+        comparisons_r_gt_s = int(bucket["comparisons_r_gt_s"])
+        anomaly_pct = (
+            (comparisons_r_gt_s / comparisons_total)
+            if comparisons_total > 0
+            else None
+        )
+        rates[key] = {
+            "n_sp": len(s_over_p),
+            "r_sp": _winsorized_median(s_over_p),
+            "n_sr": len(s_over_r),
+            "r_sr": _winsorized_median(s_over_r),
+            "comparisons_total": comparisons_total,
+            "comparisons_r_gt_s": comparisons_r_gt_s,
+            "r_gt_s_pct": anomaly_pct,
+        }
+        if key and key[0] == "category" and anomaly_pct is not None and anomaly_pct > SATISFACTION_IMPUTE_WARN_THRESHOLD:
+            warnings.append(
+                {
+                    "level": "category",
+                    "market_sector": key[1] if len(key) > 1 else None,
+                    "market_subsector": key[2] if len(key) > 2 else None,
+                    "market_category": key[3] if len(key) > 3 else None,
+                    "recommendation_gt_satisfaction_pct": round(anomaly_pct * 100, 1),
+                    "training_n": comparisons_total,
+                }
+            )
+
+    return {
+        "version": SATISFACTION_IMPUTE_VERSION,
+        "study_ids": study_ids,
+        "rates": rates,
+        "warnings": warnings,
+    }
+
+
+def _get_satisfaction_rate_model(root: Path) -> dict:
+    studies = _discover_curated_studies(root)
+    cache_key = _satisfaction_cache_key(root, studies)
+    entry = _SATISFACTION_IMPUTE_CACHE.get(cache_key)
+    if entry and time.time() - entry[0] <= SATISFACTION_IMPUTE_CACHE_TTL_SECONDS:
+        return entry[1]
+    model = _build_satisfaction_rate_model(root)
+    _SATISFACTION_IMPUTE_CACHE.clear()
+    _SATISFACTION_IMPUTE_CACHE[cache_key] = (time.time(), model)
+    return model
+
+
+def _build_csat_gap_model(root: Path) -> dict:
+    study_ids = _discover_curated_studies(root)
+    buckets: dict[tuple[str, ...], dict[str, object]] = {}
+
+    def _get_bucket(level_key: tuple[str, ...]) -> dict[str, object]:
+        bucket = buckets.get(level_key)
+        if bucket is None:
+            bucket = {
+                "sat_minus_csat": [],
+                "comparisons_total": 0,
+                "comparisons_csat_gt_sat": 0,
+            }
+            buckets[level_key] = bucket
+        return bucket
+
+    for study_id in study_ids:
+        year = _study_year_from_id(study_id)
+        if not _is_training_year_valid(year):
+            continue
+        classification = _classification_for_study(root, study_id)
+        market_sector = _as_non_empty_text(classification.get("market_sector"))
+        market_subsector = _as_non_empty_text(classification.get("market_subsector"))
+        market_category = _normalize_market_category(classification.get("market_category"))
+        if _normalize_for_match(market_category) in CONSIDERATION_EXCLUDED_MARKET_CATEGORIES:
+            continue
+
+        rows = _compute_table_rows_internal(
+            study_id=study_id,
+            respondent_cte=None,
+            respondent_params=[],
+            strict_missing=False,
+            apply_consideration_imputation=False,
+            apply_satisfaction_imputation=False,
+            apply_csat_imputation=False,
+        )
+        for row in rows:
+            satisfaction = row.get("brand_satisfaction")
+            csat = row.get("csat")
+            if not isinstance(satisfaction, (int, float)) or not isinstance(csat, (int, float)):
+                continue
+            delta = float(satisfaction) - float(csat)
+            for key in (
+                ("category", market_sector, market_subsector, market_category),
+                ("subsector", market_sector, market_subsector),
+                ("sector", market_sector),
+                ("global",),
+            ):
+                bucket = _get_bucket(key)
+                bucket["sat_minus_csat"].append(delta)
+                bucket["comparisons_total"] = int(bucket["comparisons_total"]) + 1
+                if float(csat) > float(satisfaction):
+                    bucket["comparisons_csat_gt_sat"] = int(bucket["comparisons_csat_gt_sat"]) + 1
+
+    rates: dict[tuple[str, ...], dict[str, float | int | None]] = {}
+    warnings: list[dict[str, object]] = []
+    for key, bucket in buckets.items():
+        deltas = [float(value) for value in bucket["sat_minus_csat"] if isinstance(value, (int, float))]
+        comparisons_total = int(bucket["comparisons_total"])
+        comparisons_csat_gt_sat = int(bucket["comparisons_csat_gt_sat"])
+        anomaly_pct = (
+            (comparisons_csat_gt_sat / comparisons_total)
+            if comparisons_total > 0
+            else None
+        )
+        rates[key] = {
+            "n_delta": len(deltas),
+            "delta": _winsorized_median(deltas),
+            "comparisons_total": comparisons_total,
+            "comparisons_csat_gt_sat": comparisons_csat_gt_sat,
+            "csat_gt_sat_pct": anomaly_pct,
+        }
+        if key and key[0] == "category" and anomaly_pct is not None and anomaly_pct > CSAT_IMPUTE_WARN_THRESHOLD:
+            warnings.append(
+                {
+                    "level": "category",
+                    "market_sector": key[1] if len(key) > 1 else None,
+                    "market_subsector": key[2] if len(key) > 2 else None,
+                    "market_category": key[3] if len(key) > 3 else None,
+                    "csat_gt_satisfaction_pct": round(anomaly_pct * 100, 1),
+                    "training_n": comparisons_total,
+                }
+            )
+
+    return {
+        "version": CSAT_IMPUTE_VERSION,
+        "study_ids": study_ids,
+        "rates": rates,
+        "warnings": warnings,
+    }
+
+
+def _get_csat_gap_model(root: Path) -> dict:
+    studies = _discover_curated_studies(root)
+    cache_key = _csat_cache_key(root, studies)
+    entry = _CSAT_IMPUTE_CACHE.get(cache_key)
+    if entry and time.time() - entry[0] <= CSAT_IMPUTE_CACHE_TTL_SECONDS:
+        return entry[1]
+    model = _build_csat_gap_model(root)
+    _CSAT_IMPUTE_CACHE.clear()
+    _CSAT_IMPUTE_CACHE[cache_key] = (time.time(), model)
+    return model
+
+
+def _resolve_rate_for_level(
+    model: dict,
+    metric: str,
+    market_sector: str,
+    market_subsector: str,
+    market_category: str,
+) -> tuple[float | None, str]:
+    rates = model.get("rates") or {}
+    lookup = [
+        ("category", ("category", market_sector, market_subsector, market_category)),
+        ("subsector", ("subsector", market_sector, market_subsector)),
+        ("sector", ("sector", market_sector)),
+        ("global", ("global",)),
+    ]
+    n_key = "n_ca" if metric == "ca" else "n_pc"
+    r_key = "r_ca" if metric == "ca" else "r_pc"
+    for level, key in lookup:
+        payload = rates.get(key)
+        if not isinstance(payload, dict):
+            continue
+        n_value = payload.get(n_key)
+        rate_value = payload.get(r_key)
+        if not isinstance(n_value, int) or n_value < CONSIDERATION_IMPUTE_MIN_N:
+            continue
+        if not isinstance(rate_value, (int, float)) or float(rate_value) <= 0:
+            continue
+        return float(rate_value), level
+    return None, "none"
+
+
+def _resolve_satisfaction_rate_for_level(
+    model: dict,
+    metric: str,
+    market_sector: str,
+    market_subsector: str,
+    market_category: str,
+) -> tuple[float | None, str]:
+    rates = model.get("rates") or {}
+    lookup = [
+        ("category", ("category", market_sector, market_subsector, market_category)),
+        ("subsector", ("subsector", market_sector, market_subsector)),
+        ("sector", ("sector", market_sector)),
+        ("global", ("global",)),
+    ]
+    n_key = "n_sp" if metric == "sp" else "n_sr"
+    r_key = "r_sp" if metric == "sp" else "r_sr"
+    for level, key in lookup:
+        payload = rates.get(key)
+        if not isinstance(payload, dict):
+            continue
+        n_value = payload.get(n_key)
+        rate_value = payload.get(r_key)
+        if not isinstance(n_value, int) or n_value < SATISFACTION_IMPUTE_MIN_N:
+            continue
+        if not isinstance(rate_value, (int, float)) or float(rate_value) <= 0:
+            continue
+        return float(rate_value), level
+    return None, "none"
+
+
+def _resolve_csat_gap_for_level(
+    model: dict,
+    market_sector: str,
+    market_subsector: str,
+    market_category: str,
+) -> tuple[float | None, str]:
+    rates = model.get("rates") or {}
+    lookup = [
+        ("category", ("category", market_sector, market_subsector, market_category)),
+        ("subsector", ("subsector", market_sector, market_subsector)),
+        ("sector", ("sector", market_sector)),
+        ("global", ("global",)),
+    ]
+    for level, key in lookup:
+        payload = rates.get(key)
+        if not isinstance(payload, dict):
+            continue
+        n_value = payload.get("n_delta")
+        delta = payload.get("delta")
+        if not isinstance(n_value, int) or n_value < CSAT_IMPUTE_MIN_N:
+            continue
+        if not isinstance(delta, (int, float)):
+            continue
+        return float(delta), level
+    return None, "none"
+
+
+def _estimate_brand_consideration(
+    model: dict,
+    market_sector: str,
+    market_subsector: str,
+    market_category: str,
+    awareness: float | None,
+    purchase: float | None,
+) -> tuple[float | None, str]:
+    candidates: list[float] = []
+    levels: list[str] = []
+
+    r_ca, level_ca = _resolve_rate_for_level(model, "ca", market_sector, market_subsector, market_category)
+    if isinstance(awareness, (int, float)) and float(awareness) > 0 and isinstance(r_ca, (int, float)):
+        candidates.append(float(awareness) * float(r_ca))
+        levels.append(level_ca)
+
+    r_pc, level_pc = _resolve_rate_for_level(model, "pc", market_sector, market_subsector, market_category)
+    if isinstance(purchase, (int, float)) and float(purchase) > 0 and isinstance(r_pc, (int, float)) and float(r_pc) > 0:
+        candidates.append(float(purchase) / float(r_pc))
+        levels.append(level_pc)
+
+    if not candidates:
+        return None, "none"
+
+    estimate = _median(candidates)
+    if estimate is None:
+        return None, "none"
+
+    if isinstance(awareness, (int, float)):
+        estimate = min(max(estimate, 0.0), float(awareness))
+    if isinstance(purchase, (int, float)):
+        estimate = max(estimate, float(purchase))
+
+    selected_level = "global"
+    if "category" in levels:
+        selected_level = "category"
+    elif "subsector" in levels:
+        selected_level = "subsector"
+    elif "sector" in levels:
+        selected_level = "sector"
+
+    return round(float(estimate), 1), selected_level
+
+
+def _estimate_brand_satisfaction(
+    model: dict,
+    market_sector: str,
+    market_subsector: str,
+    market_category: str,
+    purchase: float | None,
+    recommendation: float | None,
+    awareness: float | None,
+) -> tuple[float | None, str]:
+    candidates: list[float] = []
+    levels: list[str] = []
+
+    r_sp, level_sp = _resolve_satisfaction_rate_for_level(model, "sp", market_sector, market_subsector, market_category)
+    if isinstance(purchase, (int, float)) and float(purchase) > 0 and isinstance(r_sp, (int, float)):
+        candidates.append(float(purchase) * float(r_sp))
+        levels.append(level_sp)
+
+    r_sr, level_sr = _resolve_satisfaction_rate_for_level(model, "sr", market_sector, market_subsector, market_category)
+    if isinstance(recommendation, (int, float)) and float(recommendation) > 0 and isinstance(r_sr, (int, float)):
+        candidates.append(float(recommendation) * float(r_sr))
+        levels.append(level_sr)
+
+    if not candidates:
+        return None, "none"
+
+    estimate = _median(candidates)
+    if estimate is None:
+        return None, "none"
+
+    estimate = min(max(estimate, 0.0), 100.0)
+    if isinstance(purchase, (int, float)):
+        estimate = min(estimate, float(purchase))
+    if isinstance(recommendation, (int, float)):
+        estimate = max(estimate, float(recommendation))
+    if isinstance(awareness, (int, float)):
+        estimate = min(estimate, float(awareness))
+
+    selected_level = "global"
+    if "category" in levels:
+        selected_level = "category"
+    elif "subsector" in levels:
+        selected_level = "subsector"
+    elif "sector" in levels:
+        selected_level = "sector"
+
+    return round(float(estimate), 1), selected_level
+
+
+def _estimate_csat_from_satisfaction(
+    model: dict,
+    market_sector: str,
+    market_subsector: str,
+    market_category: str,
+    satisfaction: float | None,
+) -> tuple[float | None, str]:
+    if not isinstance(satisfaction, (int, float)):
+        return None, "none"
+    gap, level = _resolve_csat_gap_for_level(
+        model=model,
+        market_sector=market_sector,
+        market_subsector=market_subsector,
+        market_category=market_category,
+    )
+    if not isinstance(gap, (int, float)):
+        return None, "none"
+    # Guardrail: CSAT derived from satisfaction should not systematically exceed satisfaction.
+    effective_gap = max(float(gap), 0.0)
+    estimate = float(satisfaction) - effective_gap
+    estimate = min(100.0, max(-100.0, estimate))
+    return round(estimate, 1), level
+
+
+def _apply_consideration_imputation_to_rows(
+    rows: list[dict],
+    market_sector: str,
+    market_subsector: str,
+    market_category: str,
+) -> dict[str, object]:
+    model = _get_consideration_rate_model(get_repo_root())
+    metrics = {
+        "total_rows": len(rows),
+        "imputed_rows": 0,
+        "levels": {"category": 0, "subsector": 0, "sector": 0, "global": 0, "none": 0},
+        "post_purchase_gt_consideration_rows": 0,
+        "post_comparable_rows": 0,
+        "warnings": [],
+        "version": CONSIDERATION_IMPUTE_VERSION,
+    }
+
+    training_warnings = model.get("warnings")
+    if isinstance(training_warnings, list):
+        target_norm = _normalize_for_match(market_category)
+        scoped = [
+            warning
+            for warning in training_warnings
+            if isinstance(warning, dict)
+            and _normalize_for_match(warning.get("market_category")) == target_norm
+        ]
+        metrics["warnings"] = scoped[:3]
+
+    for row in rows:
+        consideration = row.get("brand_consideration")
+        purchase = row.get("brand_purchase")
+        awareness = row.get("brand_awareness")
+        if isinstance(consideration, (int, float)):
+            row["brand_consideration_source"] = "observed"
+            row["brand_consideration_imputed"] = None
+            row["brand_consideration_impute_level"] = "none"
+            row["brand_consideration_impute_version"] = None
+        else:
+            estimated, level = _estimate_brand_consideration(
+                model=model,
+                market_sector=market_sector,
+                market_subsector=market_subsector,
+                market_category=market_category,
+                awareness=float(awareness) if isinstance(awareness, (int, float)) else None,
+                purchase=float(purchase) if isinstance(purchase, (int, float)) else None,
+            )
+            if isinstance(estimated, (int, float)):
+                row["brand_consideration"] = estimated
+                row["brand_consideration_imputed"] = estimated
+                row["brand_consideration_source"] = "imputed"
+                row["brand_consideration_impute_level"] = level
+                row["brand_consideration_impute_version"] = CONSIDERATION_IMPUTE_VERSION
+                metrics["imputed_rows"] = int(metrics["imputed_rows"]) + 1
+                levels_map = metrics["levels"]
+                if isinstance(levels_map, dict):
+                    levels_map[level] = int(levels_map.get(level, 0)) + 1
+            else:
+                row["brand_consideration_imputed"] = None
+                row["brand_consideration_source"] = "observed"
+                row["brand_consideration_impute_level"] = "none"
+                row["brand_consideration_impute_version"] = None
+
+        final_consideration = row.get("brand_consideration")
+        if isinstance(final_consideration, (int, float)) and isinstance(purchase, (int, float)):
+            metrics["post_comparable_rows"] = int(metrics["post_comparable_rows"]) + 1
+            if float(purchase) > float(final_consideration):
+                metrics["post_purchase_gt_consideration_rows"] = int(metrics["post_purchase_gt_consideration_rows"]) + 1
+
+    if metrics["total_rows"]:
+        metrics["imputed_pct"] = round((int(metrics["imputed_rows"]) / int(metrics["total_rows"])) * 100, 1)
+    else:
+        metrics["imputed_pct"] = 0.0
+
+    comparable = int(metrics["post_comparable_rows"])
+    if comparable > 0:
+        anomaly_pct = int(metrics["post_purchase_gt_consideration_rows"]) / comparable
+        metrics["post_purchase_gt_consideration_pct"] = round(anomaly_pct * 100, 1)
+        if anomaly_pct > CONSIDERATION_IMPUTE_WARN_THRESHOLD:
+            warning = {
+                "level": "category",
+                "market_sector": market_sector,
+                "market_subsector": market_subsector,
+                "market_category": market_category,
+                "purchase_gt_consideration_pct": round(anomaly_pct * 100, 1),
+                "post_n": comparable,
+            }
+            warnings = metrics["warnings"]
+            if isinstance(warnings, list):
+                warnings.append(warning)
+            else:
+                metrics["warnings"] = [warning]
+    else:
+        metrics["post_purchase_gt_consideration_pct"] = None
+
+    return metrics
+
+
+def _apply_satisfaction_imputation_to_rows(
+    rows: list[dict],
+    market_sector: str,
+    market_subsector: str,
+    market_category: str,
+) -> dict[str, object]:
+    model = _get_satisfaction_rate_model(get_repo_root())
+    metrics = {
+        "total_rows": len(rows),
+        "imputed_rows": 0,
+        "levels": {"category": 0, "subsector": 0, "sector": 0, "global": 0, "none": 0},
+        "post_recommendation_gt_satisfaction_rows": 0,
+        "post_comparable_rows": 0,
+        "warnings": [],
+        "version": SATISFACTION_IMPUTE_VERSION,
+    }
+
+    training_warnings = model.get("warnings")
+    if isinstance(training_warnings, list):
+        target_norm = _normalize_for_match(market_category)
+        scoped = [
+            warning
+            for warning in training_warnings
+            if isinstance(warning, dict)
+            and _normalize_for_match(warning.get("market_category")) == target_norm
+        ]
+        metrics["warnings"] = scoped[:3]
+
+    for row in rows:
+        satisfaction = row.get("brand_satisfaction")
+        purchase = row.get("brand_purchase")
+        recommendation = row.get("brand_recommendation")
+        awareness = row.get("brand_awareness")
+        if isinstance(satisfaction, (int, float)):
+            row["brand_satisfaction_source"] = "observed"
+            row["brand_satisfaction_imputed"] = None
+            row["brand_satisfaction_impute_level"] = "none"
+            row["brand_satisfaction_impute_version"] = None
+        else:
+            estimated, level = _estimate_brand_satisfaction(
+                model=model,
+                market_sector=market_sector,
+                market_subsector=market_subsector,
+                market_category=market_category,
+                purchase=float(purchase) if isinstance(purchase, (int, float)) else None,
+                recommendation=float(recommendation) if isinstance(recommendation, (int, float)) else None,
+                awareness=float(awareness) if isinstance(awareness, (int, float)) else None,
+            )
+            if isinstance(estimated, (int, float)):
+                row["brand_satisfaction"] = estimated
+                row["brand_satisfaction_imputed"] = estimated
+                row["brand_satisfaction_source"] = "imputed"
+                row["brand_satisfaction_impute_level"] = level
+                row["brand_satisfaction_impute_version"] = SATISFACTION_IMPUTE_VERSION
+                metrics["imputed_rows"] = int(metrics["imputed_rows"]) + 1
+                levels_map = metrics["levels"]
+                if isinstance(levels_map, dict):
+                    levels_map[level] = int(levels_map.get(level, 0)) + 1
+            else:
+                row["brand_satisfaction_imputed"] = None
+                row["brand_satisfaction_source"] = "none"
+                row["brand_satisfaction_impute_level"] = "none"
+                row["brand_satisfaction_impute_version"] = None
+
+        final_satisfaction = row.get("brand_satisfaction")
+        if isinstance(final_satisfaction, (int, float)) and isinstance(recommendation, (int, float)):
+            metrics["post_comparable_rows"] = int(metrics["post_comparable_rows"]) + 1
+            if float(recommendation) > float(final_satisfaction):
+                metrics["post_recommendation_gt_satisfaction_rows"] = int(
+                    metrics["post_recommendation_gt_satisfaction_rows"]
+                ) + 1
+
+    if metrics["total_rows"]:
+        metrics["imputed_pct"] = round((int(metrics["imputed_rows"]) / int(metrics["total_rows"])) * 100, 1)
+    else:
+        metrics["imputed_pct"] = 0.0
+
+    comparable = int(metrics["post_comparable_rows"])
+    if comparable > 0:
+        anomaly_pct = int(metrics["post_recommendation_gt_satisfaction_rows"]) / comparable
+        metrics["post_recommendation_gt_satisfaction_pct"] = round(anomaly_pct * 100, 1)
+        if anomaly_pct > SATISFACTION_IMPUTE_WARN_THRESHOLD:
+            warning = {
+                "level": "category",
+                "market_sector": market_sector,
+                "market_subsector": market_subsector,
+                "market_category": market_category,
+                "recommendation_gt_satisfaction_pct": round(anomaly_pct * 100, 1),
+                "post_n": comparable,
+            }
+            warnings = metrics["warnings"]
+            if isinstance(warnings, list):
+                warnings.append(warning)
+            else:
+                metrics["warnings"] = [warning]
+    else:
+        metrics["post_recommendation_gt_satisfaction_pct"] = None
+
+    return metrics
+
+
+def _apply_csat_imputation_to_rows(
+    rows: list[dict],
+    market_sector: str,
+    market_subsector: str,
+    market_category: str,
+) -> dict[str, object]:
+    model = _get_csat_gap_model(get_repo_root())
+    metrics = {
+        "total_rows": len(rows),
+        "eligible_rows": 0,
+        "imputed_rows": 0,
+        "levels": {"category": 0, "subsector": 0, "sector": 0, "global": 0, "none": 0},
+        "post_csat_gt_satisfaction_rows": 0,
+        "post_comparable_rows": 0,
+        "warnings": [],
+        "version": CSAT_IMPUTE_VERSION,
+    }
+
+    training_warnings = model.get("warnings")
+    if isinstance(training_warnings, list):
+        target_norm = _normalize_for_match(market_category)
+        scoped = [
+            warning
+            for warning in training_warnings
+            if isinstance(warning, dict)
+            and _normalize_for_match(warning.get("market_category")) == target_norm
+        ]
+        metrics["warnings"] = scoped[:3]
+
+    for row in rows:
+        csat = row.get("csat")
+        satisfaction = row.get("brand_satisfaction")
+        satisfaction_source = str(row.get("brand_satisfaction_source") or "none").strip().lower()
+
+        if isinstance(csat, (int, float)):
+            row["csat_source"] = "observed"
+            row["csat_imputed"] = None
+            row["csat_impute_level"] = "none"
+            row["csat_impute_version"] = None
+        elif satisfaction_source == "imputed" and isinstance(satisfaction, (int, float)):
+            metrics["eligible_rows"] = int(metrics["eligible_rows"]) + 1
+            estimated, level = _estimate_csat_from_satisfaction(
+                model=model,
+                market_sector=market_sector,
+                market_subsector=market_subsector,
+                market_category=market_category,
+                satisfaction=float(satisfaction),
+            )
+            if isinstance(estimated, (int, float)):
+                row["csat"] = estimated
+                row["csat_imputed"] = estimated
+                row["csat_source"] = "imputed"
+                row["csat_impute_level"] = level
+                row["csat_impute_version"] = CSAT_IMPUTE_VERSION
+                metrics["imputed_rows"] = int(metrics["imputed_rows"]) + 1
+                levels_map = metrics["levels"]
+                if isinstance(levels_map, dict):
+                    levels_map[level] = int(levels_map.get(level, 0)) + 1
+            else:
+                row["csat_imputed"] = None
+                row["csat_source"] = "none"
+                row["csat_impute_level"] = "none"
+                row["csat_impute_version"] = None
+        else:
+            row["csat_imputed"] = None
+            row["csat_source"] = "none"
+            row["csat_impute_level"] = "none"
+            row["csat_impute_version"] = None
+
+        final_csat = row.get("csat")
+        final_satisfaction = row.get("brand_satisfaction")
+        if isinstance(final_csat, (int, float)) and isinstance(final_satisfaction, (int, float)):
+            metrics["post_comparable_rows"] = int(metrics["post_comparable_rows"]) + 1
+            if float(final_csat) > float(final_satisfaction):
+                metrics["post_csat_gt_satisfaction_rows"] = int(metrics["post_csat_gt_satisfaction_rows"]) + 1
+
+    if metrics["eligible_rows"]:
+        metrics["imputed_pct"] = round((int(metrics["imputed_rows"]) / int(metrics["eligible_rows"])) * 100, 1)
+    else:
+        metrics["imputed_pct"] = 0.0
+
+    comparable = int(metrics["post_comparable_rows"])
+    if comparable > 0:
+        anomaly_pct = int(metrics["post_csat_gt_satisfaction_rows"]) / comparable
+        metrics["post_csat_gt_satisfaction_pct"] = round(anomaly_pct * 100, 1)
+        if anomaly_pct > CSAT_IMPUTE_WARN_THRESHOLD:
+            warning = {
+                "level": "category",
+                "market_sector": market_sector,
+                "market_subsector": market_subsector,
+                "market_category": market_category,
+                "csat_gt_satisfaction_pct": round(anomaly_pct * 100, 1),
+                "post_n": comparable,
+            }
+            warnings = metrics["warnings"]
+            if isinstance(warnings, list):
+                warnings.append(warning)
+            else:
+                metrics["warnings"] = [warning]
+    else:
+        metrics["post_csat_gt_satisfaction_pct"] = None
+
+    return metrics
 
 
 def _sql_literal(value: str) -> str:
@@ -987,8 +1923,15 @@ def _compute_table_rows_internal(
     respondent_cte: str | None,
     respondent_params: list,
     strict_missing: bool,
+    apply_consideration_imputation: bool = True,
+    apply_satisfaction_imputation: bool = True,
+    apply_csat_imputation: bool = True,
 ) -> list[dict]:
     root = get_repo_root()
+    classification = _classification_for_study(root, study_id)
+    market_sector = _as_non_empty_text(classification.get("market_sector"))
+    market_subsector = _as_non_empty_text(classification.get("market_subsector"))
+    market_category = _normalize_market_category(classification.get("market_category"))
     curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
     if not curated_path.exists():
         if strict_missing:
@@ -1322,7 +2265,41 @@ def _compute_table_rows_internal(
                     "base_n_population": values.get("base_n_population"),
                     "aggregation_weight_n": values.get("aggregation_weight_n"),
                     "awareness_ceiling_applied": awareness_ceiling_applied,
+                    "brand_consideration_imputed": None,
+                    "brand_consideration_source": "observed" if values.get("brand_consideration") is not None else "none",
+                    "brand_consideration_impute_level": "none",
+                    "brand_consideration_impute_version": None,
+                    "brand_satisfaction_imputed": None,
+                    "brand_satisfaction_source": "observed" if values.get("brand_satisfaction") is not None else "none",
+                    "brand_satisfaction_impute_level": "none",
+                    "brand_satisfaction_impute_version": None,
+                    "csat_imputed": None,
+                    "csat_source": "observed" if values.get("csat") is not None else "none",
+                    "csat_impute_level": "none",
+                    "csat_impute_version": None,
                 }
+            )
+
+        if apply_consideration_imputation and result_rows:
+            _apply_consideration_imputation_to_rows(
+                result_rows,
+                market_sector=market_sector,
+                market_subsector=market_subsector,
+                market_category=market_category,
+            )
+        if apply_satisfaction_imputation and result_rows:
+            _apply_satisfaction_imputation_to_rows(
+                result_rows,
+                market_sector=market_sector,
+                market_subsector=market_subsector,
+                market_category=market_category,
+            )
+        if apply_csat_imputation and result_rows:
+            _apply_csat_imputation_to_rows(
+                result_rows,
+                market_sector=market_sector,
+                market_subsector=market_subsector,
+                market_category=market_category,
             )
 
         return result_rows
@@ -1347,6 +2324,10 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
         return {}
 
     root = get_repo_root()
+    classification = _classification_for_study(root, study_id)
+    market_sector = _as_non_empty_text(classification.get("market_sector"))
+    market_subsector = _as_non_empty_text(classification.get("market_subsector"))
+    market_category = _normalize_market_category(classification.get("market_category"))
     curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
     if not curated_path.exists():
         return {}
@@ -1692,8 +2673,41 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
                 "base_n_population": values.get("base_n_population"),
                 "aggregation_weight_n": values.get("aggregation_weight_n"),
                 "awareness_ceiling_applied": awareness_ceiling_applied,
+                "brand_consideration_imputed": None,
+                "brand_consideration_source": "observed" if values.get("brand_consideration") is not None else "none",
+                "brand_consideration_impute_level": "none",
+                "brand_consideration_impute_version": None,
+                "brand_satisfaction_imputed": None,
+                "brand_satisfaction_source": "observed" if values.get("brand_satisfaction") is not None else "none",
+                "brand_satisfaction_impute_level": "none",
+                "brand_satisfaction_impute_version": None,
+                "csat_imputed": None,
+                "csat_source": "observed" if values.get("csat") is not None else "none",
+                "csat_impute_level": "none",
+                "csat_impute_version": None,
             }
         )
+
+    if buckets:
+        for quarter_rows in buckets.values():
+            _apply_consideration_imputation_to_rows(
+                quarter_rows,
+                market_sector=market_sector,
+                market_subsector=market_subsector,
+                market_category=market_category,
+            )
+            _apply_satisfaction_imputation_to_rows(
+                quarter_rows,
+                market_sector=market_sector,
+                market_subsector=market_subsector,
+                market_category=market_category,
+            )
+            _apply_csat_imputation_to_rows(
+                quarter_rows,
+                market_sector=market_sector,
+                market_subsector=market_subsector,
+                market_category=market_category,
+            )
     return buckets
 
 

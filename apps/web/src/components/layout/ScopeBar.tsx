@@ -23,10 +23,7 @@ export default function ScopeBar() {
   const searchParams = useSearchParams();
   const { scope, setScope, resetScope, studies, taxonomyItems, demographics, dateOptions, optionsLoading, brands } =
     useScope();
-  const taxonomyLabels =
-    scope.taxonomyView === "market"
-      ? { sector: "Macrosector", subsector: "Segmento", category: "Categoría comercial" }
-      : { sector: "Sector", subsector: "Subsector", category: "Categoría" };
+  const taxonomyLabels = { sector: "Macrosector", subsector: "Segmento", category: "Categoría comercial" };
 
   const advancedOpen = searchParams.get("scope_advanced") === "1";
   const [brandsOpen, setBrandsOpen] = useState(false);
@@ -102,17 +99,11 @@ export default function ScopeBar() {
       new Set(
         scopedStudies
           .map((study) =>
-            scope.taxonomyView === "market"
-              ? typeof study.market_sector === "string"
-                ? study.market_sector.trim()
-                : ""
-              : typeof study.sector === "string"
-                ? study.sector.trim()
-                : ""
+            typeof study.market_sector === "string" ? study.market_sector.trim() : ""
           )
           .filter(Boolean)
       ),
-    [scope.taxonomyView, scopedStudies]
+    [scopedStudies]
   );
 
   const enabledSubsectors = useMemo(() => {
@@ -120,42 +111,28 @@ export default function ScopeBar() {
     return new Set(
       scopedStudies
         .filter((study) =>
-          scope.taxonomyView === "market" ? study.market_sector === scope.sector : study.sector === scope.sector
+          study.market_sector === scope.sector
         )
         .map((study) =>
-          scope.taxonomyView === "market"
-            ? typeof study.market_subsector === "string"
-              ? study.market_subsector.trim()
-              : ""
-            : typeof study.subsector === "string"
-              ? study.subsector.trim()
-              : ""
+          typeof study.market_subsector === "string" ? study.market_subsector.trim() : ""
         )
         .filter(Boolean)
     );
-  }, [scope.sector, scope.taxonomyView, scopedStudies]);
+  }, [scope.sector, scopedStudies]);
 
   const enabledCategories = useMemo(() => {
     if (!scope.sector || !scope.subsector) return new Set<string>();
     return new Set(
       scopedStudies
         .filter((study) =>
-          scope.taxonomyView === "market"
-            ? study.market_sector === scope.sector && study.market_subsector === scope.subsector
-            : study.sector === scope.sector && study.subsector === scope.subsector
+          study.market_sector === scope.sector && study.market_subsector === scope.subsector
         )
         .map((study) =>
-          scope.taxonomyView === "market"
-            ? typeof study.market_category === "string"
-              ? study.market_category.trim()
-              : ""
-            : typeof study.category === "string"
-              ? study.category.trim()
-              : ""
+          typeof study.market_category === "string" ? study.market_category.trim() : ""
         )
         .filter(Boolean)
     );
-  }, [scope.sector, scope.subsector, scope.taxonomyView, scopedStudies]);
+  }, [scope.sector, scope.subsector, scopedStudies]);
 
   const filteredBrands = useMemo(() => {
     const needle = brandSearch.trim().toLowerCase();
@@ -394,15 +371,7 @@ export default function ScopeBar() {
             </Popover.Root>
           )}
 
-          <button
-            type="button"
-            className="rounded-full border border-ink/10 bg-white px-3 py-2 text-xs font-medium text-ink shadow-sm transition hover:bg-slate-50"
-            onClick={() => setScope({ taxonomyView: scope.taxonomyView === "market" ? "standard" : "market" })}
-          >
-            View: {scope.taxonomyView === "market" ? "Market Lens" : "Taxonomía Estándar"}
-          </button>
-
-          <Popover.Root
+                    <Popover.Root
             open={demographicsOpen}
             onOpenChange={(nextOpen) => {
               setDemographicsOpen(nextOpen);

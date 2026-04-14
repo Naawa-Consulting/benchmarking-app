@@ -133,7 +133,7 @@ function parseScopeFromQuery(searchParams: URLSearchParams): Partial<ScopeState>
   return {
     studyIds: parseCsv(searchParams.get("studies")),
     brands: parseCsv(searchParams.get("brands")),
-    taxonomyView: searchParams.get("taxonomy_view") === "standard" ? "standard" : "market",
+    taxonomyView: "market",
     sector: searchParams.get("sector"),
     subsector: searchParams.get("subsector"),
     category: searchParams.get("category"),
@@ -151,7 +151,6 @@ function createManagedQuery(scope: ScopeState): URLSearchParams {
   const params = new URLSearchParams();
   if (scope.studyIds.length) params.set("studies", scope.studyIds.join(","));
   if (scope.brands.length) params.set("brands", scope.brands.join(","));
-  if (scope.taxonomyView !== "market") params.set("taxonomy_view", scope.taxonomyView);
   if (scope.sector) params.set("sector", scope.sector);
   if (scope.subsector) params.set("subsector", scope.subsector);
   if (scope.category) params.set("category", scope.category);
@@ -343,7 +342,7 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
 
   const setScope = useCallback((partial: Partial<ScopeState>) => {
     setScopeState((prev) => {
-      const merged: ScopeState = { ...prev, ...partial };
+      const merged: ScopeState = { ...prev, ...partial, taxonomyView: "market" };
 
       const hasSector = Object.prototype.hasOwnProperty.call(partial, "sector");
       const hasSubsector = Object.prototype.hasOwnProperty.call(partial, "subsector");
@@ -356,21 +355,9 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
       if (hasSubsector && partial.subsector !== prev.subsector) {
         if (!hasCategory) merged.category = null;
       }
-      if (
-        Object.prototype.hasOwnProperty.call(partial, "taxonomyView") &&
-        partial.taxonomyView &&
-        partial.taxonomyView !== prev.taxonomyView
-      ) {
-        merged.sector = null;
-        merged.subsector = null;
-        merged.category = null;
-        merged.brands = [];
-      }
-
       const changed =
         merged.studyIds.join("|") !== prev.studyIds.join("|") ||
         merged.brands.join("|") !== prev.brands.join("|") ||
-        merged.taxonomyView !== prev.taxonomyView ||
         merged.sector !== prev.sector ||
         merged.subsector !== prev.subsector ||
         merged.category !== prev.category ||

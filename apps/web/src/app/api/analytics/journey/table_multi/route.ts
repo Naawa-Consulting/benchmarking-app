@@ -165,7 +165,10 @@ function withStudyScope(
 
 export async function GET(request: NextRequest) {
   const scopeContext = await getScopeContext(request);
-  const taxonomyView = request.nextUrl.searchParams.get("taxonomy_view") === "standard" ? "standard" : "market";
+  if (request.nextUrl.searchParams.get("taxonomy_view") === "standard") {
+    console.warn("[journey/table_multi] Ignoring legacy taxonomy_view=standard and forcing market.");
+  }
+  const taxonomyView = "market" as const;
   const selection: MarketSelection = {
     sector: request.nextUrl.searchParams.get("sector"),
     subsector: request.nextUrl.searchParams.get("subsector"),
@@ -198,7 +201,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ rows: [], selection_rows: [], global_rows: [] });
   }
   const marketScoped = await applyMarketFilterToStudyIds({
-    query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
+    query: { ...expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())), taxonomy_view: "market" },
     payload: {},
     allowedStudyIds: scopeContext.allowedStudyIds,
   });
@@ -224,13 +227,18 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   const scopeContext = await getScopeContext(request);
-  const payload = expandNseInPayload((await request.json().catch(() => ({}))) as Record<string, unknown>);
-  const taxonomyView =
-    typeof payload.taxonomy_view === "string" && payload.taxonomy_view.toLowerCase() === "standard"
-      ? "standard"
-      : request.nextUrl.searchParams.get("taxonomy_view") === "standard"
-        ? "standard"
-        : "market";
+  const rawPayload = expandNseInPayload((await request.json().catch(() => ({}))) as Record<string, unknown>);
+  if (
+    request.nextUrl.searchParams.get("taxonomy_view") === "standard" ||
+    (typeof rawPayload.taxonomy_view === "string" && rawPayload.taxonomy_view.toLowerCase() === "standard")
+  ) {
+    console.warn("[journey/table_multi] Ignoring legacy taxonomy_view=standard and forcing market.");
+  }
+  const payload: Record<string, unknown> = {
+    ...rawPayload,
+    taxonomy_view: "market",
+  };
+  const taxonomyView = "market" as const;
   const selection: MarketSelection = {
     sector:
       (typeof payload.sector === "string" ? payload.sector : null) ?? request.nextUrl.searchParams.get("sector"),
@@ -267,7 +275,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ rows: [], selection_rows: [], global_rows: [] });
   }
   const marketScoped = await applyMarketFilterToStudyIds({
-    query: expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())),
+    query: { ...expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries())), taxonomy_view: "market" },
     payload,
     allowedStudyIds: scopeContext.allowedStudyIds,
   });

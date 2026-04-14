@@ -232,12 +232,16 @@ export async function GET(request: NextRequest) {
   }
 
   const initialQuery = expandNseInQuery(Object.fromEntries(request.nextUrl.searchParams.entries()));
+  if (initialQuery.taxonomy_view === "standard") {
+    console.warn("[network] Ignoring legacy taxonomy_view=standard and forcing market.");
+  }
   const marketScoped = await applyMarketFilterToStudyIds({
     query: initialQuery,
     payload: {},
     allowedStudyIds: scopeContext.allowedStudyIds,
   });
   const queryObj = marketScoped.query;
+  queryObj.taxonomy_view = "market";
   if (scopeContext.allowedStudyIds !== null) {
     const scopedCsv = scopeStudyIdsCsv(queryObj.studies || queryObj.study_ids, scopeContext.allowedStudyIds);
     queryObj.studies = scopedCsv || "";
@@ -261,7 +265,7 @@ export async function GET(request: NextRequest) {
     { method: "GET" }
   );
 
-  const taxonomyView = queryObj.taxonomy_view === "standard" ? "standard" : "market";
+  const taxonomyView = "market" as const;
   if (!response.ok || taxonomyView !== "market") {
     return response;
   }

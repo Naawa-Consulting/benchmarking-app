@@ -106,6 +106,16 @@ type AuthzMe = {
   can_mutate: boolean;
 };
 
+type ConsiderationImputationStatus = {
+  version?: string;
+  total_rows?: number;
+  imputed_rows?: number;
+  imputed_pct?: number;
+  levels?: Partial<Record<"category" | "subsector" | "sector" | "global" | "none", number>>;
+  post_purchase_gt_consideration_pct?: number | null;
+  warnings?: Array<Record<string, unknown>>;
+};
+
 const STAGES = [
   { value: "awareness", label: "Brand Awareness" },
   { value: "ad_awareness", label: "Ad Awareness" },
@@ -234,7 +244,12 @@ export default function RulesStudioPage() {
   const [coverageState, setCoverageState] = useState<ActionState>("idle");
   const [publishState, setPublishState] = useState<ActionState>("idle");
   const [publishDetails, setPublishDetails] = useState<ApiResult | null>(null);
-  const [publishStatus, setPublishStatus] = useState<{ raw_ready: boolean; mapping_ready: boolean; curated_ready: boolean } | null>(null);
+  const [publishStatus, setPublishStatus] = useState<{
+    raw_ready: boolean;
+    mapping_ready: boolean;
+    curated_ready: boolean;
+    consideration_imputation?: ConsiderationImputationStatus | null;
+  } | null>(null);
   const [showPublishDetails, setShowPublishDetails] = useState(false);
   const [authz, setAuthz] = useState<AuthzMe | null>(null);
 
@@ -1368,11 +1383,20 @@ export default function RulesStudioPage() {
     if (!selectedStudyId) return;
     const result = await getJourneyStatusDetailed(selectedStudyId);
     if (result.ok && result.data && typeof result.data === "object") {
-      const data = result.data as { raw_ready?: boolean; mapping_ready?: boolean; curated_ready?: boolean };
+      const data = result.data as {
+        raw_ready?: boolean;
+        mapping_ready?: boolean;
+        curated_ready?: boolean;
+        consideration_imputation?: ConsiderationImputationStatus | null;
+      };
       setPublishStatus({
         raw_ready: Boolean(data.raw_ready),
         mapping_ready: Boolean(data.mapping_ready),
         curated_ready: Boolean(data.curated_ready),
+        consideration_imputation:
+          data.consideration_imputation && typeof data.consideration_imputation === "object"
+            ? data.consideration_imputation
+            : null,
       });
     }
   };
@@ -2144,6 +2168,44 @@ export default function RulesStudioPage() {
                 Curated: {publishStatus?.curated_ready ? "ready" : "missing"}
               </span>
             </div>
+            {publishStatus?.consideration_imputation && (
+              <div className="rounded-2xl border border-ink/10 bg-white p-3 text-[11px] text-slate space-y-2">
+                <p className="font-medium text-ink">Data Quality / Imputation</p>
+                <p>
+                  Brand Consideration imputed:{" "}
+                  <span className="font-semibold text-ink">
+                    {publishStatus.consideration_imputation.imputed_rows ?? 0}/
+                    {publishStatus.consideration_imputation.total_rows ?? 0}
+                  </span>{" "}
+                  ({publishStatus.consideration_imputation.imputed_pct ?? 0}%)
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <span className="rounded-full border px-2 py-0.5">
+                    category: {publishStatus.consideration_imputation.levels?.category ?? 0}
+                  </span>
+                  <span className="rounded-full border px-2 py-0.5">
+                    subsector: {publishStatus.consideration_imputation.levels?.subsector ?? 0}
+                  </span>
+                  <span className="rounded-full border px-2 py-0.5">
+                    sector: {publishStatus.consideration_imputation.levels?.sector ?? 0}
+                  </span>
+                  <span className="rounded-full border px-2 py-0.5">
+                    global: {publishStatus.consideration_imputation.levels?.global ?? 0}
+                  </span>
+                </div>
+                <p>
+                  purchase &gt; consideration (post):{" "}
+                  <span className="font-semibold text-ink">
+                    {publishStatus.consideration_imputation.post_purchase_gt_consideration_pct ?? "n/a"}%
+                  </span>
+                </p>
+                {(publishStatus.consideration_imputation.warnings || []).length > 0 && (
+                  <p className="text-amber-700">
+                    Warning: detected category/study anomalies in purchase vs consideration.
+                  </p>
+                )}
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
               <button
                 className="rounded-full bg-emerald-600 px-4 py-2 text-xs font-medium text-white"

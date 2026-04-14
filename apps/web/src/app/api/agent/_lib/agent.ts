@@ -275,7 +275,7 @@ function normalizeContext(context: AgentContext | null | undefined, authz: Reque
       : null
     : null;
   return {
-    taxonomy_view: context?.taxonomy_view === "standard" ? "standard" : "market",
+    taxonomy_view: "market",
     sector: typeof context?.sector === "string" ? context.sector : null,
     subsector: typeof context?.subsector === "string" ? context.subsector : null,
     category: typeof context?.category === "string" ? context.category : null,
@@ -344,7 +344,7 @@ function inferToolFromMessage(message: string): NonNullable<AgentClassifierResul
 function buildAnalyticsPayload(context: AgentContext, classifier: AgentClassifierResult) {
   const filters = classifier.filters || {};
   return {
-    taxonomy_view: context.taxonomy_view || "market",
+    taxonomy_view: "market",
     sector: filters.sector ?? context.sector ?? null,
     subsector: filters.subsector ?? context.subsector ?? null,
     category: filters.category ?? context.category ?? null,

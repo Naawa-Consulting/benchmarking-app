@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import {
   createAgentConversationDetailed,
@@ -77,6 +77,45 @@ export default function AgentPage() {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingLabelIndex, setPendingLabelIndex] = useState(0);
+  const [typedContentById, setTypedContentById] = useState<Record<string, string>>({});
+  const typingTimersRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  const pendingLabels = useMemo(() => ["Thinking...", "Analyzing...", "Preparing response..."], []);
+
+  function scrollMessagesToBottom(behavior: ScrollBehavior = "smooth") {
+    messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+    }
+  }
+
+  function clearTypingTimer(messageId: string) {
+    const timer = typingTimersRef.current[messageId];
+    if (timer) {
+      clearInterval(timer);
+      delete typingTimersRef.current[messageId];
+    }
+  }
+
+  function animateAssistantMessage(messageId: string, fullContent: string) {
+    clearTypingTimer(messageId);
+    setTypedContentById((prev) => ({ ...prev, [messageId]: "" }));
+
+    let index = 0;
+    const step = Math.max(1, Math.ceil(fullContent.length / 120));
+    typingTimersRef.current[messageId] = setInterval(() => {
+      index += step;
+      if (index >= fullContent.length) {
+        clearTypingTimer(messageId);
+        setTypedContentById((prev) => ({ ...prev, [messageId]: fullContent }));
+        return;
+      }
+      setTypedContentById((prev) => ({ ...prev, [messageId]: fullContent.slice(0, index) }));
+    }, 18);
+  }
 
   async function loadConversations(selectLatest = false) {
     setLoadingConversations(true);
@@ -109,10 +148,33 @@ export default function AgentPage() {
       ? ((result.data as { items: AgentMessage[] }).items || [])
       : [];
     setMessages(items);
+    setTypedContentById(
+      items.reduce<Record<string, string>>((acc, item) => {
+        if (item.role === "assistant") acc[item.id] = item.content || "";
+        return acc;
+      }, {})
+    );
   }
 
   useEffect(() => {
     loadConversations(true);
+  }, []);
+
+  useEffect(() => {
+    if (!sending) return;
+    const timer = setInterval(() => {
+      setPendingLabelIndex((prev) => (prev + 1) % pendingLabels.length);
+    }, 900);
+    return () => clearInterval(timer);
+  }, [sending, pendingLabels.length]);
+
+  useEffect(() => {
+    return () => {
+      for (const timer of Object.values(typingTimersRef.current)) {
+        clearInterval(timer);
+      }
+      typingTimersRef.current = {};
+    };
   }, []);
 
   useEffect(() => {
@@ -122,6 +184,13 @@ export default function AgentPage() {
     }
     loadMessages(activeConversationId);
   }, [activeConversationId]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      scrollMessagesToBottom(messages.length <= 1 ? "auto" : "smooth");
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeConversationId, messages, sending, typedContentById]);
 
   async function handleNewConversation() {
     const result = await createAgentConversationDetailed({});
@@ -195,6 +264,7 @@ export default function AgentPage() {
     const assistant = ((result.data as { assistant?: AgentMessage } | null)?.assistant || null) as AgentMessage | null;
     if (assistant) {
       setMessages((prev) => [...prev.filter((msg) => msg.id !== optimisticUserMessage.id), optimisticUserMessage, assistant]);
+      animateAssistantMessage(assistant.id, assistant.content || "");
     }
     loadConversations(false);
   }
@@ -262,8 +332,15 @@ export default function AgentPage() {
           <p className="mt-1 text-xs text-slate">
             Ask about benchmark data. The assistant answers only from BBS datasets and your access scope.
           </p>
+          <p className="mt-1 text-[11px] text-slate">
+            Disclaimer: Agent is an AI assistant and may make mistakes. Please verify important outputs.
+          </p>
         </div>
-        <div className="space-y-3 overflow-y-auto px-4 py-4" style={{ maxHeight: "calc(100vh - 330px)" }}>
+        <div
+          ref={messagesContainerRef}
+          className="space-y-3 overflow-y-auto px-4 py-4"
+          style={{ maxHeight: "calc(100vh - 330px)" }}
+        >
           {!activeConversationId ? (
             <div className="rounded-xl border border-dashed border-ink/20 p-4 text-sm text-slate">
               Create a new conversation to start.
@@ -284,13 +361,30 @@ export default function AgentPage() {
                     isUser ? "bg-ink text-white" : "border border-ink/10 bg-slate-50 text-ink"
                   }`}
                 >
-                  <p className="whitespace-pre-wrap">{msg.content}</p>
+                  <p className="whitespace-pre-wrap">
+                    {isUser ? msg.content : typedContentById[msg.id] ?? msg.content}
+                  </p>
                   {!isUser && msg.chart_spec ? <div className="mt-3">{renderChartSpec(msg.chart_spec)}</div> : null}
                 </div>
               </div>
             );
           })}
+          {sending ? (
+            <div className="flex justify-start">
+              <div className="max-w-[88%] rounded-2xl border border-ink/10 bg-slate-50 px-4 py-3 text-sm text-ink">
+                <div className="flex items-center gap-2">
+                  <span>{pendingLabels[pendingLabelIndex]}</span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-slate-500" />
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-slate-500 [animation-delay:180ms]" />
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-slate-500 [animation-delay:360ms]" />
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : null}
           {error ? <p className="text-xs text-rose-600">{error}</p> : null}
+          <div ref={messagesEndRef} />
         </div>
         <div className="border-t border-ink/10 p-3">
           <div className="flex gap-2">

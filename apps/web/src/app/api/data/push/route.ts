@@ -9,6 +9,9 @@ export const dynamic = "force-dynamic";
 type PushSummary = {
   study_ids: string[];
   journey_rows: number;
+  journey_imputed_rows: number;
+  journey_satisfaction_imputed_rows: number;
+  journey_csat_imputed_rows: number;
   touchpoint_rows: number;
   study_catalog_rows: number;
   taxonomy_rows: number;
@@ -25,6 +28,21 @@ type JourneyRow = {
   market_subsector?: string | null;
   market_category?: string | null;
   year?: number | null;
+  brand_consideration?: number | null;
+  brand_consideration_imputed?: number | null;
+  brand_consideration_source?: "observed" | "imputed" | "none" | null;
+  brand_consideration_impute_level?: "category" | "subsector" | "sector" | "global" | "none" | null;
+  brand_consideration_impute_version?: string | null;
+  brand_satisfaction?: number | null;
+  brand_satisfaction_imputed?: number | null;
+  brand_satisfaction_source?: "observed" | "imputed" | "none" | null;
+  brand_satisfaction_impute_level?: "category" | "subsector" | "sector" | "global" | "none" | null;
+  brand_satisfaction_impute_version?: string | null;
+  csat?: number | null;
+  csat_imputed?: number | null;
+  csat_source?: "observed" | "imputed" | "none" | null;
+  csat_impute_level?: "category" | "subsector" | "sector" | "global" | "none" | null;
+  csat_impute_version?: string | null;
 };
 
 type MarketLensRule = {
@@ -501,6 +519,15 @@ export async function POST(request: NextRequest) {
     const summary: PushSummary = {
       study_ids: studyIds,
       journey_rows: journeyRowsWithMarket.length,
+      journey_imputed_rows: journeyRowsWithMarket.filter(
+        (row) => row.brand_consideration_source === "imputed"
+      ).length,
+      journey_satisfaction_imputed_rows: journeyRowsWithMarket.filter(
+        (row) => row.brand_satisfaction_source === "imputed"
+      ).length,
+      journey_csat_imputed_rows: journeyRowsWithMarket.filter(
+        (row) => row.csat_source === "imputed"
+      ).length,
       touchpoint_rows: touchpointRowsWithMarket.length,
       study_catalog_rows: studyRows.length,
       taxonomy_rows: taxonomyRows.length,
