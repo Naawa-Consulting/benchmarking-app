@@ -7,6 +7,7 @@ import {
   getFilterDemographicsOptionsDetailed,
   getFilterStudyOptionsDetailed,
   getFilterTaxonomyOptionsByViewDetailed,
+  postJourneyTableMultiDetailed,
   postTouchpointsTableMultiDetailed,
 } from "../../lib/api";
 
@@ -265,13 +266,36 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
         rows?: Array<{ brand?: string }>;
       };
       const rows = Array.isArray(responsePayload.rows) ? responsePayload.rows : [];
-      const nextBrands = Array.from(
+      let nextBrands = Array.from(
         new Set(
           rows
             .map((row) => (typeof row.brand === "string" ? row.brand.trim() : ""))
             .filter(Boolean)
         )
       ).sort((a, b) => a.localeCompare(b));
+
+      // Fallback: when touchpoints response is empty, use Journey rows so Brand filter does not stay disabled.
+      if (!nextBrands.length) {
+        const journeyResult = await postJourneyTableMultiDetailed(
+          payload,
+          "all",
+          "brand_awareness",
+          "desc",
+          { signal: controller.signal, responseMode: "full" }
+        );
+        if (!(seq !== brandsReqSeqRef.current || controller.signal.aborted) && journeyResult.ok && journeyResult.data) {
+          const journeyPayload = journeyResult.data as { rows?: Array<{ brand?: string }> };
+          const journeyRows = Array.isArray(journeyPayload.rows) ? journeyPayload.rows : [];
+          nextBrands = Array.from(
+            new Set(
+              journeyRows
+                .map((row) => (typeof row.brand === "string" ? row.brand.trim() : ""))
+                .filter(Boolean)
+            )
+          ).sort((a, b) => a.localeCompare(b));
+        }
+      }
+
       brandsCacheRef.current.set(cacheKey, nextBrands);
       setBrands(nextBrands);
     };

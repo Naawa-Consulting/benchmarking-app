@@ -106,7 +106,7 @@ const SUBSECTOR_RULES: Record<string, MarketLens> = {
   autoservicios: {
     market_sector: "Retail & Commerce",
     market_subsector: "Mass Retail",
-    market_category: "Mass Retail",
+    market_category: "Discount Retail",
   },
   salud: {
     market_sector: "Health & Wellness",

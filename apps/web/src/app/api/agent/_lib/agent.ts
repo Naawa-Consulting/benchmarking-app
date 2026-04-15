@@ -29,6 +29,8 @@ type AgentClassifierResult = {
   };
 };
 
+type AgentResolvedFilters = NonNullable<AgentClassifierResult["filters"]>;
+
 type ToolSummary =
   | {
       type: "tracking_series";
@@ -276,15 +278,145 @@ function normalizeContext(context: AgentContext | null | undefined, authz: Reque
     : null;
   return {
     taxonomy_view: "market",
-    sector: typeof context?.sector === "string" ? context.sector : null,
-    subsector: typeof context?.subsector === "string" ? context.subsector : null,
-    category: typeof context?.category === "string" ? context.category : null,
-    years,
+    // Agent should not inherit screen taxonomy filters by default.
+    // Filters are only applied when explicitly requested in the user message.
+    sector: null,
+    subsector: null,
+    category: null,
+    years: null,
     gender,
     nse,
     age_min: typeof context?.age_min === "number" ? context.age_min : null,
     age_max: typeof context?.age_max === "number" ? context.age_max : null,
     brands,
+  };
+}
+
+const SECTOR_ALIASES: Array<{ canonical: string; aliases: string[] }> = [
+  { canonical: "Retail & Commerce", aliases: ["retail & commerce", "retail", "comercio", "commerce"] },
+  { canonical: "Health & Wellness", aliases: ["health & wellness", "health", "wellness", "salud"] },
+  { canonical: "Financial Services", aliases: ["financial services", "financial", "finance", "servicios financieros"] },
+  { canonical: "Industry & Manufacturing", aliases: ["industry", "manufacturing", "industria", "industrial"] },
+  { canonical: "Media & Entertainment", aliases: ["media", "entertainment", "entretenimiento"] },
+  { canonical: "Food & Beverage", aliases: ["food", "beverage", "alimentos", "bebidas"] },
+  { canonical: "Services", aliases: ["services", "servicios"] },
+];
+
+const SUBSECTOR_ALIASES: Array<{ canonical: string; aliases: string[] }> = [
+  { canonical: "Mass Retail", aliases: ["mass retail", "autoservicios", "autoservicio", "discount stores"] },
+  { canonical: "Fashion", aliases: ["fashion", "moda"] },
+  { canonical: "Specialty Retail", aliases: ["specialty retail", "speciality retail", "retail especializado"] },
+  { canonical: "Digital Commerce", aliases: ["digital commerce", "ecommerce", "e commerce", "comercio digital"] },
+  { canonical: "Consumer Health", aliases: ["consumer health", "otc"] },
+  { canonical: "Pharma Retail", aliases: ["pharma retail", "farmacias", "pharmacies"] },
+  { canonical: "Healthcare Services", aliases: ["healthcare services", "servicios de salud"] },
+  { canonical: "Banking & Insurance", aliases: ["banking", "insurance", "seguros", "banca"] },
+  { canonical: "Experiences", aliases: ["experiences", "experiencia", "experiencias"] },
+  { canonical: "Beverage", aliases: ["beverage", "bebidas"] },
+  { canonical: "Home Improvement", aliases: ["home improvement", "construccion", "mejoras del hogar"] },
+  { canonical: "Manufacturing", aliases: ["manufacturing", "manufactura"] },
+  { canonical: "Consumer Services", aliases: ["consumer services", "servicios al consumidor"] },
+];
+
+const CATEGORY_ALIASES: Array<{ canonical: string; aliases: string[] }> = [
+  { canonical: "Discount Retail", aliases: ["discount retail", "tiendas de descuento"] },
+  { canonical: "Apparel Stores", aliases: ["apparel stores", "tiendas de ropa"] },
+  { canonical: "Swimwear Brands", aliases: ["swimwear brands", "trajes de bano", "trajes de baño"] },
+  { canonical: "Pharmacies", aliases: ["pharmacies", "farmacias"] },
+  { canonical: "OTC Brands", aliases: ["otc brands", "marcas otc"] },
+  { canonical: "Cinemas", aliases: ["cinemas", "cines", "cinema"] },
+  { canonical: "Theme Parks", aliases: ["theme parks", "parques tematicos", "parques temáticos"] },
+  { canonical: "Alcoholic Drinks", aliases: ["alcoholic drinks", "bebidas alcoholicas", "bebidas alcohólicas"] },
+  { canonical: "Materials & Supplies", aliases: ["materials & supplies", "materiales"] },
+  { canonical: "Auto Insurance", aliases: ["auto insurance", "seguro de auto"] },
+  { canonical: "Home Insurance", aliases: ["home insurance", "seguro de hogar"] },
+  { canonical: "Life Insurance", aliases: ["life insurance", "seguro de vida"] },
+  { canonical: "Health Insurance", aliases: ["health insurance", "seguro de salud"] },
+];
+
+function containsAlias(normalizedMessage: string, alias: string) {
+  const compactMessage = normalizeCompact(normalizedMessage);
+  const normalizedAlias = normalizeText(alias);
+  if (!normalizedAlias) return false;
+  const compactAlias = normalizeCompact(alias);
+  return normalizedMessage.includes(normalizedAlias) || compactMessage.includes(compactAlias);
+}
+
+function resolveCanonicalFromAliases(
+  message: string,
+  candidate: string | null | undefined,
+  aliasMap: Array<{ canonical: string; aliases: string[] }>
+) {
+  const normalizedMessage = normalizeText(message);
+  if (!normalizedMessage) return null;
+  const normalizedCandidate = typeof candidate === "string" && candidate.trim() ? normalizeText(candidate) : null;
+
+  for (const item of aliasMap) {
+    const aliases = [item.canonical, ...item.aliases];
+    const candidateMatches =
+      normalizedCandidate &&
+      aliases.some((alias) => normalizeText(alias) === normalizedCandidate || normalizeCompact(alias) === normalizeCompact(normalizedCandidate));
+    const messageMatches = aliases.some((alias) => containsAlias(normalizedMessage, alias));
+    if ((candidateMatches && messageMatches) || (!normalizedCandidate && messageMatches)) {
+      return item.canonical;
+    }
+  }
+
+  if (!normalizedCandidate) return null;
+  // If message explicitly includes the exact candidate text, allow it.
+  if (containsAlias(normalizedMessage, normalizedCandidate)) {
+    return candidate?.trim() || null;
+  }
+  return null;
+}
+
+function hasExplicitTaxonomyIntent(message: string) {
+  const text = normalizeText(message);
+  if (!text) return false;
+  const cues = [
+    "en ",
+    "para ",
+    "dentro de",
+    "de ",
+    "for ",
+    "in ",
+    "segmento",
+    "subsector",
+    "categoria",
+    "categoria comercial",
+    "macrosector",
+    "sector",
+    "category",
+    "segment",
+    "macrosector",
+  ];
+  return cues.some((cue) => text.includes(cue));
+}
+
+function resolveExplicitFilters(message: string, classifier: AgentClassifierResult): AgentResolvedFilters | undefined {
+  const explicit = hasExplicitTaxonomyIntent(message);
+  const fromClassifier = classifier.filters || {};
+  const resolvedSector = resolveCanonicalFromAliases(message, fromClassifier.sector, SECTOR_ALIASES);
+  const resolvedSubsector = resolveCanonicalFromAliases(message, fromClassifier.subsector, SUBSECTOR_ALIASES);
+  const resolvedCategory = resolveCanonicalFromAliases(message, fromClassifier.category, CATEGORY_ALIASES);
+
+  // Extract direct year mentions if present.
+  const yearMatches = Array.from(message.matchAll(/\b(19|20)\d{2}\b/g)).map((m) => m[0]);
+  const uniqueYears = Array.from(new Set(yearMatches)).slice(0, 6);
+  const classifierYears = Array.isArray(fromClassifier.years)
+    ? fromClassifier.years.filter((item): item is string => typeof item === "string" && /\b(19|20)\d{2}\b/.test(item))
+    : [];
+  const years = uniqueYears.length > 0 ? uniqueYears : classifierYears;
+
+  const hasAny = Boolean(resolvedSector || resolvedSubsector || resolvedCategory || years.length);
+  if (!hasAny || !explicit) {
+    return undefined;
+  }
+  return {
+    sector: resolvedSector,
+    subsector: resolvedSubsector,
+    category: resolvedCategory,
+    years: years.length ? years : null,
   };
 }
 
@@ -381,6 +513,11 @@ async function runTool(
     );
   }
   return callInternalApi(request, "/api/analytics/tracking/series", "POST", payload);
+}
+
+function fallbackSequenceForTool(tool: NonNullable<AgentClassifierResult["tool"]>) {
+  const sequence: Array<NonNullable<AgentClassifierResult["tool"]>> = [tool, "journey_overview", "tracking_series"];
+  return Array.from(new Set(sequence));
 }
 
 function hasEvolutionIntent(message: string) {
@@ -635,6 +772,7 @@ export async function generateAgentResponse(params: {
   ]);
 
   const classifier = classifierRaw as AgentClassifierResult;
+  classifier.filters = resolveExplicitFilters(intentContext, classifier);
   if (classifier.in_scope === false && looksLikeBbsIntent(intentContext, context)) {
     classifier.in_scope = true;
     if (!classifier.tool) {
@@ -674,18 +812,18 @@ export async function generateAgentResponse(params: {
   }
 
   const tool = classifier.tool || "tracking_series";
-  const toolResult = await runTool(request, tool, context, classifier);
-  if (!toolResult.ok) {
-    return {
-      text: "No pude consultar la base BBS en este momento. Intenta nuevamente en unos segundos.",
-      chart_spec: null as AgentChartSpec | null,
-      meta: { tool, tool_status: toolResult.status, tool_error: toolResult.data },
-    };
+  let usedTool = tool;
+  let fallbackUsed = false;
+  let summary: ToolSummary = { type: tool, rows: [] };
+  const toolErrors: Array<Record<string, unknown>> = [];
+
+  const primaryResult = await runTool(request, tool, context, classifier);
+  if (primaryResult.ok) {
+    summary = summarizeToolData(tool, primaryResult.data, intentContext) as ToolSummary;
+  } else {
+    toolErrors.push({ tool, status: primaryResult.status, error: primaryResult.data });
   }
 
-  let summary = summarizeToolData(tool, toolResult.data, intentContext) as ToolSummary;
-  // Fallback robusto: si el clasificador introdujo filtros erróneos y devolvió vacío,
-  // se reintenta con el mismo contexto base pero sin filtros inferidos por LLM.
   if (getSummaryRowCount(summary) === 0 && classifier.filters) {
     const fallbackClassifier: AgentClassifierResult = { ...classifier, filters: undefined };
     const fallbackResult = await runTool(request, tool, context, fallbackClassifier);
@@ -693,8 +831,43 @@ export async function generateAgentResponse(params: {
       const fallbackSummary = summarizeToolData(tool, fallbackResult.data, intentContext) as ToolSummary;
       if (getSummaryRowCount(fallbackSummary) > 0) {
         summary = fallbackSummary;
+        usedTool = tool;
+        fallbackUsed = true;
+      }
+    } else {
+      toolErrors.push({ tool, status: fallbackResult.status, error: fallbackResult.data, stage: "same_tool_unfiltered" });
+    }
+  }
+
+  if (getSummaryRowCount(summary) === 0) {
+    for (const candidateTool of fallbackSequenceForTool(tool)) {
+      if (candidateTool === tool) continue;
+      const fallbackClassifier: AgentClassifierResult = {
+        ...classifier,
+        tool: candidateTool,
+        filters: undefined,
+      };
+      const candidateResult = await runTool(request, candidateTool, context, fallbackClassifier);
+      if (!candidateResult.ok) {
+        toolErrors.push({ tool: candidateTool, status: candidateResult.status, error: candidateResult.data });
+        continue;
+      }
+      const candidateSummary = summarizeToolData(candidateTool, candidateResult.data, intentContext) as ToolSummary;
+      if (getSummaryRowCount(candidateSummary) > 0) {
+        summary = candidateSummary;
+        usedTool = candidateTool;
+        fallbackUsed = true;
+        break;
       }
     }
+  }
+
+  if (getSummaryRowCount(summary) === 0 && toolErrors.length > 0) {
+    return {
+      text: "No pude consultar la base BBS en este momento. Intenta nuevamente en unos segundos.",
+      chart_spec: null as AgentChartSpec | null,
+      meta: { tool_used: usedTool, fallback_used: fallbackUsed, row_count: 0, tool_errors: toolErrors },
+    };
   }
 
   const deterministicEvolution = buildEvolutionResponseFromSummary(summary, intentContext);
@@ -702,7 +875,14 @@ export async function generateAgentResponse(params: {
     return {
       text: deterministicEvolution.text,
       chart_spec: deterministicEvolution.chart_spec,
-      meta: { tool, classifier, used_context: context, deterministic: "evolution" },
+      meta: {
+        tool_used: usedTool,
+        fallback_used: fallbackUsed,
+        row_count: getSummaryRowCount(summary),
+        classifier,
+        used_context: context,
+        deterministic: "evolution",
+      },
     };
   }
 
@@ -739,7 +919,14 @@ export async function generateAgentResponse(params: {
   return {
     text: safeText,
     chart_spec: chartSpec,
-    meta: { tool, classifier, used_context: context },
+    meta: {
+      tool_used: usedTool,
+      fallback_used: fallbackUsed,
+      row_count: getSummaryRowCount(summary),
+      classifier,
+      used_context: context,
+      tool_errors: toolErrors.length ? toolErrors : undefined,
+    },
   };
 }
 
