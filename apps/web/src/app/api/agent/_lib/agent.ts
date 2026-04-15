@@ -1,4 +1,6 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { getRequestAuthz, type RequestAuthz } from "../../_lib/authz";
 import { supabaseAdminPostgrest } from "../../_lib/supabase-admin";
 
@@ -52,6 +54,9 @@ type AgentChartSpec = {
   rows?: Array<Array<string | number | null>>;
   y_label?: string;
 };
+
+const DEFAULT_AGENT_GUIDE = `You are BBS Agent. Use only BBS data and respect user scope/permissions. Do not use external sources. Default to concise executive text with finding, implication, recommendation. Use chart/table only if explicitly requested. If out of scope, return a polite BBS-only message.`;
+let agentGuideCache: string | null = null;
 
 export function isAgentFeatureEnabled() {
   const raw = (process.env.BBS_AGENT_ENABLED || process.env.NEXT_PUBLIC_BBS_AGENT_ENABLED || "on")
@@ -189,6 +194,20 @@ async function callOpenAIJson(messages: Array<{ role: "system" | "user" | "assis
   }
 }
 
+async function loadAgentGuide() {
+  if (agentGuideCache) return agentGuideCache;
+  try {
+    const filePath = path.join(process.cwd(), "src", "app", "api", "agent", "AGENTE.md");
+    const content = await readFile(filePath, "utf8");
+    const trimmed = content.trim();
+    agentGuideCache = trimmed || DEFAULT_AGENT_GUIDE;
+    return agentGuideCache;
+  } catch {
+    agentGuideCache = DEFAULT_AGENT_GUIDE;
+    return agentGuideCache;
+  }
+}
+
 async function callInternalApi(
   request: NextRequest,
   path: string,
@@ -289,6 +308,38 @@ function normalizeContext(context: AgentContext | null | undefined, authz: Reque
     age_min: typeof context?.age_min === "number" ? context.age_min : null,
     age_max: typeof context?.age_max === "number" ? context.age_max : null,
     brands,
+  };
+}
+
+function hasExplicitChartIntent(message: string) {
+  const text = normalizeText(message);
+  if (!text) return false;
+  return (
+    text.includes("grafica") ||
+    text.includes("grafico") ||
+    text.includes("chart") ||
+    text.includes("plot") ||
+    text.includes("tabla") ||
+    text.includes("table")
+  );
+}
+
+function isGreetingOnly(message: string) {
+  const text = normalizeText(message);
+  if (!text) return true;
+  const greetings = ["hola", "hello", "hi", "buenas", "quien eres", "quien eres tu", "who are you"];
+  return greetings.includes(text.replace(/\s+/g, " ").trim());
+}
+
+function getScopeAppliedMeta(authz: RequestAuthz, filters: AgentResolvedFilters | undefined) {
+  return {
+    has_scope_restrictions: authz.is_viewer,
+    market_scope_counts: {
+      sector: authz.effective_scopes.market_sector.length,
+      subsector: authz.effective_scopes.market_subsector.length,
+      category: authz.effective_scopes.market_category.length,
+    },
+    explicit_filters: filters || null,
   };
 }
 
@@ -735,6 +786,7 @@ export async function generateAgentResponse(params: {
   history: Array<{ role: "user" | "assistant"; content: string }>;
 }) {
   const { request, authz, userMessage } = params;
+  const agentGuide = await loadAgentGuide();
   const context = normalizeContext(params.context, authz);
   const recentUserContext = params.history
     .filter((item) => item.role === "user")
@@ -742,12 +794,33 @@ export async function generateAgentResponse(params: {
     .map((item) => item.content)
     .join(" ");
   const intentContext = `${recentUserContext} ${userMessage}`.trim();
+  const explicitChartRequested = hasExplicitChartIntent(intentContext);
+
+  if (isGreetingOnly(userMessage)) {
+    return {
+      text: "Hola! Mucho gusto soy BBS Agent, tu asistente de Inteligencia Artificial. Preguntame lo que necesites sobre Brand Benchmark Score o sobre los datos.",
+      chart_spec: null as AgentChartSpec | null,
+      meta: {
+        tool_used: null,
+        fallback_used: false,
+        row_count: 0,
+        denial_reason: null,
+        scope_applied: getScopeAppliedMeta(authz, undefined),
+      },
+    };
+  }
 
   if (!authz.can_toggle_brands && hasBrandDisclosureIntent(intentContext)) {
     return {
-      text: "No puedo revelar marcas especificas con tu nivel de acceso actual.",
+      text: "Lo siento, no tienes acceso a este tipo de informacion. Contacta a contacto@naawaconsulting.com si necesitas acceso adicional. Puedo ayudarte con un analisis agregado por macrosector, segmento o categoria.",
       chart_spec: null as AgentChartSpec | null,
-      meta: { denied: "brands_toggle_disabled" },
+      meta: {
+        tool_used: null,
+        fallback_used: false,
+        row_count: 0,
+        denial_reason: "brands_toggle_disabled",
+        scope_applied: getScopeAppliedMeta(authz, undefined),
+      },
     };
   }
 
@@ -756,10 +829,12 @@ export async function generateAgentResponse(params: {
     {
       role: "system",
       content:
-        "Eres un router de consultas para BBS. Responde SOLO JSON con: in_scope(boolean), needs_brand_level(boolean), tool(journey_overview|network_overview|tracking_series), metric(string|null), chart_type(bar|line|table|null), filters{sector,subsector,category,years[]}." +
-        " Una consulta está in_scope si usa o interpreta datos de BBS (incluye recomendaciones estratégicas basadas en resultados BBS)." +
-        " Solo marca out_of_scope para temas totalmente externos sin relacion a los datos benchmark." +
-        " Evita inferir filtros de taxonomia si el usuario no los pidio explicitamente.",
+        `${agentGuide}\n\n` +
+        "Task: classify request for tool routing. Respond ONLY JSON with fields: in_scope(boolean), needs_brand_level(boolean), tool(journey_overview|network_overview|tracking_series), metric(string|null), chart_type(bar|line|table|null), filters{sector,subsector,category,years[]}.\n" +
+        "A request is in_scope when it asks analysis/recommendation based on BBS data.\n" +
+        "Mark out_of_scope only for fully external topics.\n" +
+        "Do not infer taxonomy filters unless explicitly requested by user text.\n" +
+        "If user did not explicitly request chart/table, set chart_type to null.",
     },
     {
       role: "user",
@@ -773,6 +848,7 @@ export async function generateAgentResponse(params: {
 
   const classifier = classifierRaw as AgentClassifierResult;
   classifier.filters = resolveExplicitFilters(intentContext, classifier);
+  if (!explicitChartRequested) classifier.chart_type = null;
   if (classifier.in_scope === false && looksLikeBbsIntent(intentContext, context)) {
     classifier.in_scope = true;
     if (!classifier.tool) {
@@ -800,14 +876,26 @@ export async function generateAgentResponse(params: {
     return {
       text: "Esta consulta esta fuera del alcance de la base de datos de BBS. Para temas externos, usa la IA de tu preferencia.",
       chart_spec: null as AgentChartSpec | null,
-      meta: { out_of_scope: true },
+      meta: {
+        tool_used: null,
+        fallback_used: false,
+        row_count: 0,
+        denial_reason: "out_of_scope",
+        scope_applied: getScopeAppliedMeta(authz, classifier.filters),
+      },
     };
   }
   if (classifier.needs_brand_level && !authz.can_toggle_brands) {
     return {
-      text: "No cuento con permisos para responder a nivel de marca con tu perfil actual.",
+      text: "Lo siento, no tienes acceso a este tipo de informacion. Contacta a contacto@naawaconsulting.com si necesitas acceso adicional. Puedo darte recomendaciones a nivel categoria/segmento.",
       chart_spec: null as AgentChartSpec | null,
-      meta: { denied: "brands_toggle_disabled" },
+      meta: {
+        tool_used: null,
+        fallback_used: false,
+        row_count: 0,
+        denial_reason: "brands_toggle_disabled",
+        scope_applied: getScopeAppliedMeta(authz, classifier.filters),
+      },
     };
   }
 
@@ -866,7 +954,14 @@ export async function generateAgentResponse(params: {
     return {
       text: "No pude consultar la base BBS en este momento. Intenta nuevamente en unos segundos.",
       chart_spec: null as AgentChartSpec | null,
-      meta: { tool_used: usedTool, fallback_used: fallbackUsed, row_count: 0, tool_errors: toolErrors },
+      meta: {
+        tool_used: usedTool,
+        fallback_used: fallbackUsed,
+        row_count: 0,
+        denial_reason: "tool_error",
+        scope_applied: getScopeAppliedMeta(authz, classifier.filters),
+        tool_errors: toolErrors,
+      },
     };
   }
 
@@ -879,6 +974,8 @@ export async function generateAgentResponse(params: {
         tool_used: usedTool,
         fallback_used: fallbackUsed,
         row_count: getSummaryRowCount(summary),
+        denial_reason: null,
+        scope_applied: getScopeAppliedMeta(authz, classifier.filters),
         classifier,
         used_context: context,
         deterministic: "evolution",
@@ -890,19 +987,22 @@ export async function generateAgentResponse(params: {
     {
       role: "system",
       content:
-        "Eres analista de BBS. Responde SOLO JSON con: text(string) y chart_spec(object|null)." +
-        " El texto debe ser breve, accionable y basado solo en los datos entregados." +
-        " Si hay pocas filas, aun asi responde con hallazgos puntuales y recomendacion tactica." +
-        " Solo di que no hay datos cuando rows sea 0." +
-        " chart_spec permitido: type(bar|line|table), title, x, series[{name,data}], columns, rows, y_label.",
+        `${agentGuide}\n\n` +
+        "You are a BBS analyst synthesizer. Respond ONLY JSON: text(string), chart_spec(object|null).\n" +
+        "Text must be concise, actionable, and based only on provided BBS data.\n" +
+        "Default style: key finding, implication, tactical recommendation.\n" +
+        "Only say no-data if rows is 0.\n" +
+        "Only return chart_spec when user explicitly asked for chart/table.\n" +
+        "Allowed chart_spec: type(bar|line|table), title, x, series[{name,data}], columns, rows, y_label.",
     },
     {
       role: "user",
       content: JSON.stringify({
         question: userMessage,
-        tool,
+        tool: usedTool,
         metric: classifier.metric || null,
-        preferred_chart: classifier.chart_type || null,
+        preferred_chart: explicitChartRequested ? classifier.chart_type || null : null,
+        chart_requested: explicitChartRequested,
         data: summary,
       }),
     },
@@ -915,7 +1015,7 @@ export async function generateAgentResponse(params: {
     getSummaryRowCount(summary) > 0 && /no hay datos|sin datos|datos insuficientes/i.test(text)
       ? `Si hay datos en BBS para esta consulta (${getSummaryRowCount(summary)} filas analizadas). Intenta pedir un corte mas especifico (anio, macrosector o metrica) para devolver un diagnostico de riesgo mas preciso.`
       : text;
-  const chartSpec = sanitizeChartSpec(synthesisRaw.chart_spec);
+  const chartSpec = explicitChartRequested ? sanitizeChartSpec(synthesisRaw.chart_spec) : null;
   return {
     text: safeText,
     chart_spec: chartSpec,
@@ -923,6 +1023,8 @@ export async function generateAgentResponse(params: {
       tool_used: usedTool,
       fallback_used: fallbackUsed,
       row_count: getSummaryRowCount(summary),
+      denial_reason: null,
+      scope_applied: getScopeAppliedMeta(authz, classifier.filters),
       classifier,
       used_context: context,
       tool_errors: toolErrors.length ? toolErrors : undefined,
