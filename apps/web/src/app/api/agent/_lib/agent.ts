@@ -57,6 +57,11 @@ type AgentChartSpec = {
 
 const DEFAULT_AGENT_GUIDE = `You are BBS Agent. Use only BBS data and respect user scope/permissions. Do not use external sources. Default to concise executive text with finding, implication, recommendation. Use chart/table only if explicitly requested. If out of scope, return a polite BBS-only message.`;
 let agentGuideCache: string | null = null;
+type AgentResponseLanguage = "es" | "en";
+
+function pickLocalizedText(language: AgentResponseLanguage, es: string, en: string) {
+  return language === "es" ? es : en;
+}
 
 export function isAgentFeatureEnabled() {
   const raw = (process.env.BBS_AGENT_ENABLED || process.env.NEXT_PUBLIC_BBS_AGENT_ENABLED || "on")
@@ -696,6 +701,26 @@ function normalizeText(value: string) {
     .trim();
 }
 
+function detectResponseLanguage(message: string): AgentResponseLanguage {
+  const raw = (message || "").toLowerCase();
+  if (!raw.trim()) return "es";
+
+  if (/[áéíóúñ¿¡]/i.test(raw)) return "es";
+
+  const esHints = [
+    "que", "como", "dame", "quiero", "analiza", "marca", "categoria", "categoria", "segmento",
+    "macrosector", "años", "ano", "estrategia", "recomendacion", "muestra", "grafica", "tabla"
+  ];
+  const enHints = [
+    "what", "show", "give me", "analyze", "brand", "category", "segment", "sector",
+    "year", "strategy", "recommendation", "chart", "table", "insight"
+  ];
+
+  const esScore = esHints.reduce((acc, token) => (raw.includes(token) ? acc + 1 : acc), 0);
+  const enScore = enHints.reduce((acc, token) => (raw.includes(token) ? acc + 1 : acc), 0);
+  return enScore > esScore ? "en" : "es";
+}
+
 function normalizeCompact(value: string) {
   return value
     .toLowerCase()
@@ -794,11 +819,16 @@ export async function generateAgentResponse(params: {
     .map((item) => item.content)
     .join(" ");
   const intentContext = `${recentUserContext} ${userMessage}`.trim();
+  const responseLanguage = detectResponseLanguage(intentContext);
   const explicitChartRequested = hasExplicitChartIntent(intentContext);
 
   if (isGreetingOnly(userMessage)) {
     return {
-      text: "Hola! Mucho gusto soy BBS Agent, tu asistente de Inteligencia Artificial. Preguntame lo que necesites sobre Brand Benchmark Score o sobre los datos.",
+      text: pickLocalizedText(
+        responseLanguage,
+        "Hola! Mucho gusto soy BBS Agent, tu asistente de Inteligencia Artificial. Preguntame lo que necesites sobre Brand Benchmark Score o sobre los datos.",
+        "Hi! Nice to meet you, I'm BBS Agent, your AI assistant. Ask me anything you need about Brand Benchmark Score or its data."
+      ),
       chart_spec: null as AgentChartSpec | null,
       meta: {
         tool_used: null,
@@ -812,7 +842,11 @@ export async function generateAgentResponse(params: {
 
   if (!authz.can_toggle_brands && hasBrandDisclosureIntent(intentContext)) {
     return {
-      text: "Lo siento, no tienes acceso a este tipo de informacion. Contacta a contacto@naawaconsulting.com si necesitas acceso adicional. Puedo ayudarte con un analisis agregado por macrosector, segmento o categoria.",
+      text: pickLocalizedText(
+        responseLanguage,
+        "Lo siento, no tienes acceso a este tipo de informacion. Contacta a contacto@naawaconsulting.com si necesitas acceso adicional. Puedo ayudarte con un analisis agregado por macrosector, segmento o categoria.",
+        "Sorry, you don't have access to this type of information. Contact contacto@naawaconsulting.com if you need additional access. I can help with aggregated analysis by macrosector, segment, or category."
+      ),
       chart_spec: null as AgentChartSpec | null,
       meta: {
         tool_used: null,
@@ -834,7 +868,8 @@ export async function generateAgentResponse(params: {
         "A request is in_scope when it asks analysis/recommendation based on BBS data.\n" +
         "Mark out_of_scope only for fully external topics.\n" +
         "Do not infer taxonomy filters unless explicitly requested by user text.\n" +
-        "If user did not explicitly request chart/table, set chart_type to null.",
+        "If user did not explicitly request chart/table, set chart_type to null.\n" +
+        `Target response language: ${responseLanguage === "es" ? "Spanish" : "English"}.`,
     },
     {
       role: "user",
@@ -874,7 +909,11 @@ export async function generateAgentResponse(params: {
   }
   if (classifier.in_scope === false) {
     return {
-      text: "Esta consulta esta fuera del alcance de la base de datos de BBS. Para temas externos, usa la IA de tu preferencia.",
+      text: pickLocalizedText(
+        responseLanguage,
+        "Esta consulta esta fuera del alcance de la base de datos de BBS. Para temas externos, usa la IA de tu preferencia.",
+        "This query is outside the scope of the BBS database. For external topics, use your preferred AI assistant."
+      ),
       chart_spec: null as AgentChartSpec | null,
       meta: {
         tool_used: null,
@@ -887,7 +926,11 @@ export async function generateAgentResponse(params: {
   }
   if (classifier.needs_brand_level && !authz.can_toggle_brands) {
     return {
-      text: "Lo siento, no tienes acceso a este tipo de informacion. Contacta a contacto@naawaconsulting.com si necesitas acceso adicional. Puedo darte recomendaciones a nivel categoria/segmento.",
+      text: pickLocalizedText(
+        responseLanguage,
+        "Lo siento, no tienes acceso a este tipo de informacion. Contacta a contacto@naawaconsulting.com si necesitas acceso adicional. Puedo darte recomendaciones a nivel categoria/segmento.",
+        "Sorry, you don't have access to this type of information. Contact contacto@naawaconsulting.com if you need additional access. I can provide recommendations at category/segment level."
+      ),
       chart_spec: null as AgentChartSpec | null,
       meta: {
         tool_used: null,
@@ -952,7 +995,11 @@ export async function generateAgentResponse(params: {
 
   if (getSummaryRowCount(summary) === 0 && toolErrors.length > 0) {
     return {
-      text: "No pude consultar la base BBS en este momento. Intenta nuevamente en unos segundos.",
+      text: pickLocalizedText(
+        responseLanguage,
+        "No pude consultar la base BBS en este momento. Intenta nuevamente en unos segundos.",
+        "I couldn't query the BBS database right now. Please try again in a few seconds."
+      ),
       chart_spec: null as AgentChartSpec | null,
       meta: {
         tool_used: usedTool,
@@ -968,7 +1015,10 @@ export async function generateAgentResponse(params: {
   const deterministicEvolution = buildEvolutionResponseFromSummary(summary, intentContext);
   if (deterministicEvolution) {
     return {
-      text: deterministicEvolution.text,
+      text:
+        responseLanguage === "es"
+          ? deterministicEvolution.text
+          : deterministicEvolution.text.replace("Evolucion calculada con datos BBS para", "Evolution computed from BBS data for"),
       chart_spec: deterministicEvolution.chart_spec,
       meta: {
         tool_used: usedTool,
@@ -993,7 +1043,8 @@ export async function generateAgentResponse(params: {
         "Default style: key finding, implication, tactical recommendation.\n" +
         "Only say no-data if rows is 0.\n" +
         "Only return chart_spec when user explicitly asked for chart/table.\n" +
-        "Allowed chart_spec: type(bar|line|table), title, x, series[{name,data}], columns, rows, y_label.",
+        "Allowed chart_spec: type(bar|line|table), title, x, series[{name,data}], columns, rows, y_label.\n" +
+        `Write the final answer in ${responseLanguage === "es" ? "Spanish" : "English"}.`,
     },
     {
       role: "user",
@@ -1010,10 +1061,18 @@ export async function generateAgentResponse(params: {
 
   const text = typeof synthesisRaw.text === "string" && synthesisRaw.text.trim()
     ? synthesisRaw.text.trim()
-    : "No se encontraron suficientes datos para responder con precision.";
+    : pickLocalizedText(
+        responseLanguage,
+        "No se encontraron suficientes datos para responder con precision.",
+        "Not enough data was found to answer precisely."
+      );
   const safeText =
-    getSummaryRowCount(summary) > 0 && /no hay datos|sin datos|datos insuficientes/i.test(text)
-      ? `Si hay datos en BBS para esta consulta (${getSummaryRowCount(summary)} filas analizadas). Intenta pedir un corte mas especifico (anio, macrosector o metrica) para devolver un diagnostico de riesgo mas preciso.`
+    getSummaryRowCount(summary) > 0 && /no hay datos|sin datos|datos insuficientes|no data|insufficient data/i.test(text)
+      ? pickLocalizedText(
+          responseLanguage,
+          `Si hay datos en BBS para esta consulta (${getSummaryRowCount(summary)} filas analizadas). Intenta pedir un corte mas especifico (anio, macrosector o metrica) para devolver un diagnostico de riesgo mas preciso.`,
+          `There is BBS data for this query (${getSummaryRowCount(summary)} rows analyzed). Try asking for a more specific cut (year, macrosector, or metric) for a more precise risk diagnosis.`
+        )
       : text;
   const chartSpec = explicitChartRequested ? sanitizeChartSpec(synthesisRaw.chart_spec) : null;
   return {
