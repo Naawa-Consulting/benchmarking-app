@@ -721,6 +721,68 @@ function detectResponseLanguage(message: string): AgentResponseLanguage {
   return enScore > esScore ? "en" : "es";
 }
 
+function looksLikeEnglish(text: string) {
+  const raw = (text || "").toLowerCase();
+  const hits = [
+    "key finding",
+    "business implication",
+    "tactical recommendation",
+    "there is",
+    "this query",
+    "please",
+    "brand awareness",
+    "within",
+    "shows",
+  ].reduce((acc, token) => (raw.includes(token) ? acc + 1 : acc), 0);
+  return hits >= 2;
+}
+
+function looksLikeSpanish(text: string) {
+  const raw = (text || "").toLowerCase();
+  if (/[áéíóúñ¿¡]/i.test(raw)) return true;
+  const hits = [
+    "hallazgo",
+    "implicacion",
+    "recomendacion",
+    "esta consulta",
+    "por favor",
+    "marca",
+    "muestra",
+    "categor",
+    "macrosector",
+  ].reduce((acc, token) => (raw.includes(token) ? acc + 1 : acc), 0);
+  return hits >= 2;
+}
+
+async function enforceResponseLanguage(
+  text: string,
+  targetLanguage: AgentResponseLanguage
+) {
+  const needsFix =
+    (targetLanguage === "es" && looksLikeEnglish(text) && !looksLikeSpanish(text)) ||
+    (targetLanguage === "en" && looksLikeSpanish(text) && !looksLikeEnglish(text));
+  if (!needsFix) return text;
+
+  const rewrite = await callOpenAIJson([
+    {
+      role: "system",
+      content:
+        "Rewrite the input text to the requested language, preserving meaning, numbers, entities, and structure. " +
+        "Return ONLY JSON with {\"text\":\"...\"}. Do not add new claims.",
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        target_language: targetLanguage === "es" ? "Spanish" : "English",
+        text,
+      }),
+    },
+  ]);
+  const rewritten =
+    typeof rewrite.text === "string" && rewrite.text.trim() ? rewrite.text.trim() : text;
+  return rewritten;
+}
+
 function normalizeCompact(value: string) {
   return value
     .toLowerCase()
@@ -819,7 +881,7 @@ export async function generateAgentResponse(params: {
     .map((item) => item.content)
     .join(" ");
   const intentContext = `${recentUserContext} ${userMessage}`.trim();
-  const responseLanguage = detectResponseLanguage(intentContext);
+  const responseLanguage = detectResponseLanguage(userMessage);
   const explicitChartRequested = hasExplicitChartIntent(intentContext);
 
   if (isGreetingOnly(userMessage)) {
@@ -1014,11 +1076,13 @@ export async function generateAgentResponse(params: {
 
   const deterministicEvolution = buildEvolutionResponseFromSummary(summary, intentContext);
   if (deterministicEvolution) {
+    const deterministicText =
+      responseLanguage === "es"
+        ? deterministicEvolution.text
+        : deterministicEvolution.text.replace("Evolucion calculada con datos BBS para", "Evolution computed from BBS data for");
+    const localizedDeterministicText = await enforceResponseLanguage(deterministicText, responseLanguage);
     return {
-      text:
-        responseLanguage === "es"
-          ? deterministicEvolution.text
-          : deterministicEvolution.text.replace("Evolucion calculada con datos BBS para", "Evolution computed from BBS data for"),
+      text: localizedDeterministicText,
       chart_spec: deterministicEvolution.chart_spec,
       meta: {
         tool_used: usedTool,
@@ -1074,9 +1138,10 @@ export async function generateAgentResponse(params: {
           `There is BBS data for this query (${getSummaryRowCount(summary)} rows analyzed). Try asking for a more specific cut (year, macrosector, or metric) for a more precise risk diagnosis.`
         )
       : text;
+  const localizedText = await enforceResponseLanguage(safeText, responseLanguage);
   const chartSpec = explicitChartRequested ? sanitizeChartSpec(synthesisRaw.chart_spec) : null;
   return {
-    text: safeText,
+    text: localizedText,
     chart_spec: chartSpec,
     meta: {
       tool_used: usedTool,
