@@ -88,7 +88,7 @@ export default function TopNav() {
       if (!agentEnabled) return false;
       if (!authEnabled) return true;
       if (ownerOnly) return role === "owner";
-      return role !== "viewer";
+      return true;
     });
 
     if (!authEnabled) return filteredByAgent;

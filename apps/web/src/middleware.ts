@@ -97,9 +97,13 @@ export async function middleware(request: NextRequest) {
     const agentEnabled = agentEnabledRaw !== "off" && agentEnabledRaw !== "false" && agentEnabledRaw !== "0";
     const ownerOnlyRaw = (process.env.BBS_AGENT_OWNER_ONLY || "true").trim().toLowerCase();
     const agentOwnerOnly = ownerOnlyRaw !== "off" && ownerOnlyRaw !== "false" && ownerOnlyRaw !== "0";
-    const agentDenied = !agentEnabled || (agentOwnerOnly ? role !== "owner" : role === "viewer");
+    const agentDenied = !agentEnabled || (agentOwnerOnly ? role !== "owner" : false);
 
-    if (role === "viewer" || (isAdminPath && role === "analyst") || (isAgentPath && agentDenied)) {
+    if (
+      (role === "viewer" && !isAgentPath) ||
+      (isAdminPath && role === "analyst") ||
+      (isAgentPath && agentDenied)
+    ) {
       const target = request.nextUrl.clone();
       target.pathname = "/journey";
       target.search = "";
