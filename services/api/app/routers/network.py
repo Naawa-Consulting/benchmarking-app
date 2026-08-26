@@ -5,12 +5,12 @@ import json
 import time
 from collections import defaultdict
 from itertools import combinations
-from pathlib import Path
 
 import duckdb
 from fastapi import APIRouter, Query
 
-from app.data.warehouse import get_repo_root
+from app.data.market_lens import resolve_classification
+from app.data.warehouse import blob_exists, list_study_ids, load_parquet_as_view, read_json_blob
 from app.routers import analytics
 
 router = APIRouter()
@@ -119,9 +119,30 @@ def _parse_csv(raw: str | None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item and item.strip()]
 
 
+def _discover_curated_studies() -> list[str]:
+    return list_study_ids("warehouse/curated", "fact_journey.parquet")
+
+
+def _classification_for_study(study_id: str) -> dict[str, str | None]:
+    payload = read_json_blob(
+        f"warehouse/taxonomy/study_classification/study_id={study_id}.json",
+        default=None,
+    )
+    if payload is None:
+        return {
+            "sector": None,
+            "subsector": None,
+            "category": None,
+            "market_sector": None,
+            "market_subsector": None,
+            "market_category": None,
+            "market_source": None,
+        }
+    return resolve_classification(payload)
+
+
 def _filter_studies(filters: dict) -> list[str]:
-    root = get_repo_root()
-    discovered = analytics._discover_curated_studies(root)
+    discovered = _discover_curated_studies()
     requested = filters.get("study_ids") or []
     if requested:
         study_ids = [study_id for study_id in requested if study_id in discovered]
@@ -133,18 +154,19 @@ def _filter_studies(filters: dict) -> list[str]:
 
     filtered: list[str] = []
     for study_id in study_ids:
-        classification = analytics._classification_for_study(root, study_id)
+        classification = _classification_for_study(study_id)
         if analytics._study_matches_taxonomy(filters, classification):
             filtered.append(study_id)
     return filtered
 
 
-def _parquet_columns(path: Path) -> set[str]:
-    if not path.exists():
+def _parquet_columns(key: str) -> set[str]:
+    if not blob_exists(key):
         return set()
     conn = duckdb.connect()
     try:
-        cursor = conn.execute(f"SELECT * FROM read_parquet('{path}') LIMIT 0")
+        load_parquet_as_view(conn, "cols_src", key)
+        cursor = conn.execute("SELECT * FROM cols_src LIMIT 0")
         return {col[0] for col in cursor.description}
     finally:
         conn.close()
@@ -361,44 +383,44 @@ def _collect_positive_items(
     columns: set[str],
     allowed_items: set[str] | None = None,
 ) -> tuple[dict[str, set[str]], bool]:
-    root = get_repo_root()
-    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-    if not curated_path.exists():
+    curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+    if not blob_exists(curated_key):
         return {}, False
     if column not in columns:
         return {}, False
 
-    respondent_cte, respondent_params, eligible = analytics._respondent_filter_cte(study_id, filters)
-    if not eligible:
-        return {}, False
-
-    value_expr = _value_expr(columns)
-    respondent_filter = (
-        "AND respondent_id IN (SELECT respondent_id FROM filtered_respondents)"
-        if respondent_cte
-        else ""
-    )
-    cte_prefix = f"{respondent_cte}," if respondent_cte else ""
-
-    query = f"""
-        WITH {cte_prefix}
-        base AS (
-            SELECT respondent_id, {column} AS item, {value_expr} AS v_int
-            FROM read_parquet('{curated_path}')
-            WHERE study_id = ?
-              AND LOWER(stage) = '{stage}'
-              AND {column} IS NOT NULL
-              AND TRIM(CAST({column} AS VARCHAR)) <> ''
-              AND {value_expr} IS NOT NULL
-              {respondent_filter}
-        )
-        SELECT respondent_id, item
-        FROM base
-        WHERE v_int = 1
-    """
-
     conn = duckdb.connect()
     try:
+        respondent_cte, respondent_params, eligible = analytics._respondent_filter_cte(conn, study_id, filters)
+        if not eligible:
+            return {}, False
+
+        value_expr = _value_expr(columns)
+        respondent_filter = (
+            "AND respondent_id IN (SELECT respondent_id FROM filtered_respondents)"
+            if respondent_cte
+            else ""
+        )
+        cte_prefix = f"{respondent_cte}," if respondent_cte else ""
+
+        query = f"""
+            WITH {cte_prefix}
+            base AS (
+                SELECT respondent_id, {column} AS item, {value_expr} AS v_int
+                FROM fact_journey_src
+                WHERE study_id = ?
+                  AND LOWER(stage) = '{stage}'
+                  AND {column} IS NOT NULL
+                  AND TRIM(CAST({column} AS VARCHAR)) <> ''
+                  AND {value_expr} IS NOT NULL
+                  {respondent_filter}
+            )
+            SELECT respondent_id, item
+            FROM base
+            WHERE v_int = 1
+        """
+
+        load_parquet_as_view(conn, "fact_journey_src", curated_key)
         rows = conn.execute(query, [*respondent_params, study_id]).fetchall()
     finally:
         conn.close()
@@ -423,34 +445,35 @@ def _build_conditional_metrics_by_touchpoint(
     filters: dict,
     selected_brands: set[str] | None = None,
 ) -> tuple[dict[tuple[str, str], float], dict[tuple[str, str], float]]:
-    root = get_repo_root()
-    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-    columns = _parquet_columns(curated_path)
-    if not curated_path.exists() or "touchpoint" not in columns or "brand" not in columns or "respondent_id" not in columns:
+    curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+    columns = _parquet_columns(curated_key)
+    if not blob_exists(curated_key) or "touchpoint" not in columns or "brand" not in columns or "respondent_id" not in columns:
         return {}, {}
 
-    respondent_cte, respondent_params, eligible = analytics._respondent_filter_cte(study_id, filters)
-    if not eligible:
-        return {}, {}
+    conn = duckdb.connect()
+    try:
+        respondent_cte, respondent_params, eligible = analytics._respondent_filter_cte(conn, study_id, filters)
+        if not eligible:
+            return {}, {}
 
-    value_expr = _value_expr(columns)
-    respondent_filter = (
-        "AND respondent_id IN (SELECT respondent_id FROM filtered_respondents)"
-        if respondent_cte
-        else ""
-    )
-    cte_prefix = f"{respondent_cte}," if respondent_cte else ""
-    selected_brands = selected_brands or set()
-    brand_filter_sql = ""
-    if selected_brands:
-        escaped = ", ".join("'" + brand.replace("'", "''") + "'" for brand in sorted(selected_brands))
-        brand_filter_sql = f" AND brand IN ({escaped})"
+        value_expr = _value_expr(columns)
+        respondent_filter = (
+            "AND respondent_id IN (SELECT respondent_id FROM filtered_respondents)"
+            if respondent_cte
+            else ""
+        )
+        cte_prefix = f"{respondent_cte}," if respondent_cte else ""
+        selected_brands = selected_brands or set()
+        brand_filter_sql = ""
+        if selected_brands:
+            escaped = ", ".join("'" + brand.replace("'", "''") + "'" for brand in sorted(selected_brands))
+            brand_filter_sql = f" AND brand IN ({escaped})"
 
-    query = f"""
+        query = f"""
         WITH {cte_prefix}
         recall_tp AS (
             SELECT respondent_id, brand, touchpoint
-            FROM read_parquet('{curated_path}')
+            FROM fact_journey_src
             WHERE study_id = ?
               AND LOWER(stage) IN ('touchpoints', 'awareness')
               AND touchpoint IS NOT NULL
@@ -464,7 +487,7 @@ def _build_conditional_metrics_by_touchpoint(
         ),
         consideration_brand AS (
             SELECT respondent_id, brand
-            FROM read_parquet('{curated_path}')
+            FROM fact_journey_src
             WHERE study_id = ?
               AND LOWER(stage) IN ('consideration', 'brand_consideration')
               AND brand IS NOT NULL
@@ -476,7 +499,7 @@ def _build_conditional_metrics_by_touchpoint(
         ),
         purchase_brand AS (
             SELECT respondent_id, brand
-            FROM read_parquet('{curated_path}')
+            FROM fact_journey_src
             WHERE study_id = ?
               AND LOWER(stage) IN ('purchase', 'brand_purchase')
               AND brand IS NOT NULL
@@ -502,8 +525,7 @@ def _build_conditional_metrics_by_touchpoint(
         GROUP BY r.brand, r.touchpoint
     """
 
-    conn = duckdb.connect()
-    try:
+        load_parquet_as_view(conn, "fact_journey_src", curated_key)
         rows = conn.execute(query, [*respondent_params, study_id, study_id, study_id]).fetchall()
     finally:
         conn.close()
@@ -593,9 +615,8 @@ def _build_secondary_brand_links(
     selected_brands = set(filters.get("brands") or [])
 
     for study_id in study_ids:
-        root = get_repo_root()
-        curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-        columns = _parquet_columns(curated_path)
+        curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+        columns = _parquet_columns(curated_key)
         items_by_resp, has_rows = _collect_positive_items(
             study_id,
             stage,
@@ -645,9 +666,8 @@ def _build_secondary_touchpoint_links(
     any_rows = False
 
     for study_id in study_ids:
-        root = get_repo_root()
-        curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-        columns = _parquet_columns(curated_path)
+        curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+        columns = _parquet_columns(curated_key)
         if "touchpoint" not in columns:
             continue
         items_by_resp, has_rows = _collect_positive_items(
@@ -1018,7 +1038,7 @@ def demand_network(
         cached["meta"]["cache_hit"] = True
         return cached
 
-    has_curated = bool(analytics._discover_curated_studies(get_repo_root()))
+    has_curated = bool(_discover_curated_studies())
     if not has_curated:
         payload = _synthetic_graph(metric_mode)
         _set_cached(key, payload)

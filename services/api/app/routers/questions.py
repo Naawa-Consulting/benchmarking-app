@@ -1,5 +1,4 @@
-from pathlib import Path
-
+import duckdb
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
@@ -10,7 +9,7 @@ from app.data.rule_engine import (
     load_study_rule_scope,
 )
 from app.data.study_config import load_or_create_study_config
-from app.data.warehouse import get_duckdb_connection, get_repo_root, load_parquet_as_view
+from app.data.warehouse import blob_exists, load_parquet_as_view, read_parquet_blob
 
 router = APIRouter()
 
@@ -21,26 +20,12 @@ def list_questions(
     include_stats: bool = Query(False, description="Include mapping status and value preview"),
     limit: int = Query(200, ge=1, le=1000, description="Max questions to compute value stats for"),
 ) -> dict:
-    variables_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_variables.parquet"
-    )
-    responses_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_responses.parquet"
-    )
-    if not variables_path.exists():
+    variables_key = f"warehouse/raw/study_id={study_id}/raw_variables.parquet"
+    responses_key = f"warehouse/raw/study_id={study_id}/raw_responses.parquet"
+    if not blob_exists(variables_key):
         raise HTTPException(status_code=404, detail="raw_variables.parquet not found for study.")
 
-    df = pd.read_parquet(variables_path)
+    df = read_parquet_blob(variables_key)
     if "var_code" not in df.columns:
         raise HTTPException(status_code=400, detail="raw_variables.parquet missing var_code column.")
 
@@ -71,9 +56,9 @@ def list_questions(
     rules = filter_rules_by_scope(rules, scope)
 
     conn = None
-    if responses_path.exists():
-        conn = get_duckdb_connection()
-        load_parquet_as_view(conn, "responses", str(responses_path))
+    if blob_exists(responses_key):
+        conn = duckdb.connect()
+        load_parquet_as_view(conn, "responses", responses_key)
 
     def infer_type(non_null: int, non_numeric: int) -> str:
         if non_null == 0:

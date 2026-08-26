@@ -1,43 +1,25 @@
-from pathlib import Path
-
-import json
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.data.market_lens import (
     market_taxonomy_items_from_standard,
     resolve_classification,
 )
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import blob_exists, delete_blob, read_json_blob, write_json_blob
 
 router = APIRouter()
 
-
-def _taxonomy_path() -> Path:
-    return (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "taxonomy"
-        / "sector_subsector_category_v1.json"
-    )
+_TAXONOMY_KEY = "warehouse/taxonomy/sector_subsector_category_v1.json"
 
 
-def _study_classification_path(study_id: str) -> Path:
-    return (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "taxonomy"
-        / "study_classification"
-        / f"study_id={study_id}.json"
-    )
+def _study_classification_key(study_id: str) -> str:
+    return f"warehouse/taxonomy/study_classification/study_id={study_id}.json"
 
 
 def _load_taxonomy() -> dict:
-    path = _taxonomy_path()
-    if not path.exists():
+    payload = read_json_blob(_TAXONOMY_KEY, default=None)
+    if payload is None:
         raise HTTPException(status_code=404, detail="Taxonomy file not found.")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return payload
 
 
 @router.get("/taxonomy")
@@ -47,7 +29,7 @@ def get_taxonomy() -> dict:
 
 @router.get("/taxonomy/market")
 def get_market_taxonomy() -> dict:
-    items = market_taxonomy_items_from_standard(get_repo_root())
+    items = market_taxonomy_items_from_standard()
     sectors = sorted({item.get("sector") for item in items if item.get("sector")})
     subsectors = sorted({item.get("subsector") for item in items if item.get("subsector")})
     categories = sorted({item.get("category") for item in items if item.get("category")})
@@ -56,8 +38,9 @@ def get_market_taxonomy() -> dict:
 
 @router.get("/taxonomy/study")
 def get_study_taxonomy(study_id: str = Query(..., description="Study id")) -> dict:
-    path = _study_classification_path(study_id)
-    if not path.exists():
+    key = _study_classification_key(study_id)
+    payload = read_json_blob(key, default=None)
+    if payload is None:
         return {
             "study_id": study_id,
             "sector": None,
@@ -68,11 +51,7 @@ def get_study_taxonomy(study_id: str = Query(..., description="Study id")) -> di
             "market_category": None,
             "market_source": None,
         }
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    resolved = resolve_classification(payload, root=get_repo_root())
+    resolved = resolve_classification(payload)
     return {"study_id": study_id, **resolved}
 
 
@@ -85,17 +64,16 @@ async def save_study_taxonomy(
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
 
-    resolved = resolve_classification(payload, root=get_repo_root())
+    resolved = resolve_classification(payload)
     sector = resolved.get("sector")
     subsector = resolved.get("subsector")
     category = resolved.get("category")
 
-    path = _study_classification_path(study_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    key = _study_classification_key(study_id)
 
     if not sector or not subsector or not category:
-        if path.exists():
-            path.unlink()
+        if blob_exists(key):
+            delete_blob(key)
         return {
             "study_id": study_id,
             "sector": None,
@@ -128,5 +106,5 @@ async def save_study_taxonomy(
         "market_category": resolved.get("market_category"),
         "market_source": resolved.get("market_source") or "rule",
     }
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_blob(key, data)
     return data

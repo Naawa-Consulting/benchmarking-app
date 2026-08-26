@@ -2,18 +2,26 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pyreadstat
 from pandas.api.types import is_categorical_dtype, is_numeric_dtype
 
-from app.data.demographics import build_value_labels_frame, respondents_path, value_labels_path
+from app.data.demographics import build_value_labels_frame, respondents_key, value_labels_key
 from app.data.study_config import load_or_create_study_config
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import (
+    blob_exists,
+    delete_blob,
+    download_to_tempfile,
+    list_blob_names,
+    write_parquet_blob,
+)
 
 logger = logging.getLogger(__name__)
+
+LANDING_PREFIX = "landing"
+RAW_PREFIX = "warehouse/raw"
 
 
 def _slugify_study_id(name: str) -> str:
@@ -24,18 +32,14 @@ def _slugify_study_id(name: str) -> str:
     return value.strip("_") or "study"
 
 
-def _ensure_dirs(base_data_dir: Path) -> tuple[Path, Path]:
-    landing = base_data_dir / "landing"
-    raw_root = base_data_dir / "warehouse" / "raw"
-    landing.mkdir(parents=True, exist_ok=True)
-    raw_root.mkdir(parents=True, exist_ok=True)
-    return landing, raw_root
+def _landing_sav_names() -> list[str]:
+    return [name for name in list_blob_names(LANDING_PREFIX) if name.lower().endswith(".sav")]
 
 
-def _find_landing_path(landing_dir: Path, study_id: str) -> Path | None:
-    for path in landing_dir.glob("*.sav"):
-        if _slugify_study_id(path.stem) == study_id:
-            return path
+def find_landing_key(study_id: str) -> str | None:
+    for name in _landing_sav_names():
+        if _slugify_study_id(name[: -len(".sav")]) == study_id:
+            return f"{LANDING_PREFIX}/{name}"
     return None
 
 
@@ -129,26 +133,50 @@ def _build_responses_frame(df: pd.DataFrame, study_id: str, config: dict) -> pd.
     return long_df
 
 
-def ensure_raw_from_landing(base_data_dir: Path) -> dict[str, list[dict[str, Any]]]:
-    landing_dir, raw_root = _ensure_dirs(base_data_dir)
-    logger.info("Scanning landing folder: %s", landing_dir)
+def _ingest_one(landing_key: str, study_id: str) -> dict[str, Any]:
+    logger.info("Reading .sav file: %s", landing_key)
+    with download_to_tempfile(landing_key, suffix=".sav") as tmp_path:
+        df, meta = pyreadstat.read_sav(tmp_path)
+    logger.info("Building raw parquet outputs for %s", study_id)
+
+    config = load_or_create_study_config(study_id, df.columns)
+    responses_df = _build_responses_frame(df, study_id, config)
+    variables_df = _build_variables_frame(df, meta, study_id)
+    labels_df = build_value_labels_frame(meta, study_id)
+    respondents_df = _build_respondents_frame(df, config)
+
+    write_parquet_blob(f"{RAW_PREFIX}/study_id={study_id}/raw_responses.parquet", responses_df)
+    write_parquet_blob(f"{RAW_PREFIX}/study_id={study_id}/raw_variables.parquet", variables_df)
+    labels_key = value_labels_key(study_id)
+    if labels_df.empty:
+        if blob_exists(labels_key):
+            delete_blob(labels_key)
+    else:
+        write_parquet_blob(labels_key, labels_df)
+    write_parquet_blob(respondents_key(study_id), respondents_df)
+
+    return {"rows": int(len(responses_df)), "variables": int(len(variables_df))}
+
+
+def ensure_raw_from_landing() -> dict[str, list[dict[str, Any]]]:
+    logger.info("Scanning landing prefix: %s", LANDING_PREFIX)
 
     processed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
-    for path in sorted(landing_dir.glob("*.sav")):
-        study_id = _slugify_study_id(path.stem)
-        study_dir = raw_root / f"study_id={study_id}"
-        responses_path = study_dir / "raw_responses.parquet"
-        variables_path = study_dir / "raw_variables.parquet"
+    for name in sorted(_landing_sav_names()):
+        study_id = _slugify_study_id(name[: -len(".sav")])
+        landing_key = f"{LANDING_PREFIX}/{name}"
+        responses_key = f"{RAW_PREFIX}/study_id={study_id}/raw_responses.parquet"
+        variables_key = f"{RAW_PREFIX}/study_id={study_id}/raw_variables.parquet"
 
-        if responses_path.exists() and variables_path.exists():
+        if blob_exists(responses_key) and blob_exists(variables_key):
             logger.info("Skipping %s (raw parquet exists)", study_id)
             skipped.append(
                 {
                     "study_id": study_id,
-                    "file": path.name,
+                    "file": name,
                     "status": "skipped",
                     "reason": "already exists",
                 }
@@ -156,42 +184,22 @@ def ensure_raw_from_landing(base_data_dir: Path) -> dict[str, list[dict[str, Any
             continue
 
         try:
-            logger.info("Reading .sav file: %s", path)
-            df, meta = pyreadstat.read_sav(path)
-            logger.info("Building raw parquet outputs for %s", study_id)
-
-            study_dir.mkdir(parents=True, exist_ok=True)
-            config = load_or_create_study_config(study_id, df.columns)
-            responses_df = _build_responses_frame(df, study_id, config)
-            variables_df = _build_variables_frame(df, meta, study_id)
-            labels_df = build_value_labels_frame(meta, study_id)
-            respondents_df = _build_respondents_frame(df, config)
-
-            responses_df.to_parquet(responses_path, index=False)
-            variables_df.to_parquet(variables_path, index=False)
-            labels_path = value_labels_path(study_id)
-            if labels_df.empty:
-                if labels_path.exists():
-                    labels_path.unlink()
-            else:
-                labels_df.to_parquet(labels_path, index=False)
-            respondents_df.to_parquet(respondents_path(study_id), index=False)
-
+            result = _ingest_one(landing_key, study_id)
             processed.append(
                 {
                     "study_id": study_id,
-                    "file": path.name,
-                    "rows": int(len(responses_df)),
-                    "variables": int(len(variables_df)),
+                    "file": name,
+                    "rows": result["rows"],
+                    "variables": result["variables"],
                     "status": "processed",
                 }
             )
         except Exception as exc:
-            logger.exception("Failed to ingest %s", path)
+            logger.exception("Failed to ingest %s", name)
             errors.append(
                 {
                     "study_id": study_id,
-                    "file": path.name,
+                    "file": name,
                     "status": "error",
                     "error": str(exc),
                 }
@@ -200,49 +208,25 @@ def ensure_raw_from_landing(base_data_dir: Path) -> dict[str, list[dict[str, Any
     return {"processed": processed, "skipped": skipped, "errors": errors}
 
 
-def rebuild_raw_for_study(
-    base_data_dir: Path, study_id: str, force: bool = False
-) -> dict[str, Any]:
-    landing_dir, raw_root = _ensure_dirs(base_data_dir)
-    landing_path = _find_landing_path(landing_dir, study_id)
-    if not landing_path:
+def rebuild_raw_for_study(study_id: str, force: bool = False) -> dict[str, Any]:
+    landing_key = find_landing_key(study_id)
+    if not landing_key:
         return {"status": "error", "reason": "landing .sav not found"}
 
-    study_dir = raw_root / f"study_id={study_id}"
-    responses_path = study_dir / "raw_responses.parquet"
-    variables_path = study_dir / "raw_variables.parquet"
+    responses_key = f"{RAW_PREFIX}/study_id={study_id}/raw_responses.parquet"
+    variables_key = f"{RAW_PREFIX}/study_id={study_id}/raw_variables.parquet"
 
-    if responses_path.exists() and variables_path.exists() and not force:
+    if blob_exists(responses_key) and blob_exists(variables_key) and not force:
         return {"status": "skipped", "reason": "already exists"}
 
     try:
-        logger.info("Reading .sav file: %s", landing_path)
-        df, meta = pyreadstat.read_sav(landing_path)
-        logger.info("Building raw parquet outputs for %s", study_id)
-
-        study_dir.mkdir(parents=True, exist_ok=True)
-        config = load_or_create_study_config(study_id, df.columns)
-        responses_df = _build_responses_frame(df, study_id, config)
-        variables_df = _build_variables_frame(df, meta, study_id)
-        labels_df = build_value_labels_frame(meta, study_id)
-        respondents_df = _build_respondents_frame(df, config)
-
-        responses_df.to_parquet(responses_path, index=False)
-        variables_df.to_parquet(variables_path, index=False)
-        labels_path = value_labels_path(study_id)
-        if labels_df.empty:
-            if labels_path.exists():
-                labels_path.unlink()
-        else:
-            labels_df.to_parquet(labels_path, index=False)
-        respondents_df.to_parquet(respondents_path(study_id), index=False)
-        return {"status": "ok", "rows": int(len(responses_df)), "variables": int(len(variables_df))}
+        result = _ingest_one(landing_key, study_id)
+        return {"status": "ok", "rows": result["rows"], "variables": result["variables"]}
     except Exception as exc:
         logger.exception("Failed to rebuild raw for %s", study_id)
         return {"status": "error", "reason": str(exc)}
 
 
 def ingest_landing_files() -> list[dict[str, Any]]:
-    base_data_dir = get_repo_root() / "data"
-    summary = ensure_raw_from_landing(base_data_dir)
+    summary = ensure_raw_from_landing()
     return summary["processed"] + summary["skipped"] + summary["errors"]

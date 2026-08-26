@@ -1,9 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
+import io
 import unicodedata
-from pathlib import Path
 
+import duckdb
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
@@ -14,24 +15,40 @@ from app.data.rule_engine import (
     load_rules,
     load_study_rule_scope,
 )
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import blob_exists, read_parquet_blob, write_parquet_blob
+from app.storage.blob import StorageNotFoundError, get_storage
 from app.storage.question_map import question_map_path
 
 router = APIRouter()
 IMPUTE_WARN_THRESHOLD = 0.40
 
 
-def _mapping_csv_path() -> Path:
-    return get_repo_root() / "data" / "warehouse" / "mapping" / "question_map_v0.csv"
+def _mapping_csv_key() -> str:
+    return "warehouse/mapping/question_map_v0.csv"
+
+
+def _read_mapping_csv() -> pd.DataFrame | None:
+    try:
+        data = get_storage().read_bytes(_mapping_csv_key())
+    except StorageNotFoundError:
+        return None
+    return pd.read_csv(io.BytesIO(data))
+
+
+def _write_mapping_csv(df: pd.DataFrame) -> None:
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    get_storage().write_bytes(_mapping_csv_key(), buf.getvalue().encode("utf-8"), content_type="text/csv")
 
 
 def _mapping_rows_for_study(study_id: str) -> list[dict]:
-    path = _mapping_csv_path()
-    if not path.exists():
+    try:
+        data = get_storage().read_bytes(_mapping_csv_key())
+    except StorageNotFoundError:
         return []
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        return [row for row in reader if row.get("study_id") == study_id]
+    text = data.decode("utf-8")
+    reader = csv.DictReader(io.StringIO(text))
+    return [row for row in reader if row.get("study_id") == study_id]
 
 
 def _normalize_match(value: object) -> str:
@@ -62,17 +79,10 @@ def _code_tokens(value_code: object) -> str:
 
 
 def _apply_brand_label_true_code_override(study_id: str, df: pd.DataFrame) -> pd.DataFrame:
-    labels_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_value_labels.parquet"
-    )
-    if not labels_path.exists() or df.empty:
+    labels_key = f"warehouse/raw/study_id={study_id}/raw_value_labels.parquet"
+    if not blob_exists(labels_key) or df.empty:
         return df
-    labels = pd.read_parquet(labels_path)
+    labels = read_parquet_blob(labels_key)
     if labels.empty:
         return df
     labels = labels[["var_code", "value_code", "value_label"]].copy()
@@ -117,17 +127,10 @@ def _apply_brand_label_true_code_override(study_id: str, df: pd.DataFrame) -> pd
 
 
 def _apply_catalog_brand_mode(study_id: str, df: pd.DataFrame) -> pd.DataFrame:
-    labels_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_value_labels.parquet"
-    )
-    if not labels_path.exists() or df.empty:
+    labels_key = f"warehouse/raw/study_id={study_id}/raw_value_labels.parquet"
+    if not blob_exists(labels_key) or df.empty:
         return df
-    labels = pd.read_parquet(labels_path)
+    labels = read_parquet_blob(labels_key)
     if labels.empty:
         return df
     labels = labels[["var_code", "value_label"]].copy()
@@ -193,10 +196,10 @@ def _load_mapping_df_from_question_map(study_id: str, rules: dict) -> pd.DataFra
         "value_true_codes",
         "true_codes",
     ]
-    map_path = question_map_path(study_id)
-    if not map_path.exists():
+    map_key = question_map_path(study_id)
+    if not blob_exists(map_key):
         return pd.DataFrame(columns=expected_cols)
-    df = pd.read_parquet(map_path)
+    df = read_parquet_blob(map_key)
     df = df[df["stage"].notna() & (df["stage"].astype(str).str.strip() != "")]
     df = df[df["brand_value"].notna() & (df["brand_value"].astype(str).str.strip() != "")]
     if df.empty:
@@ -416,45 +419,37 @@ def ensure_journey_pipeline(
     sync_raw: bool = Query(True, description="Sync raw from landing"),
     force: bool = Query(False, description="Force rebuild curated mart"),
 ) -> dict:
-    root = get_repo_root()
-    base_data_dir = root / "data"
-
     synced_raw = False
     rebuilt_raw = False
     errors: list[str] = []
     if sync_raw:
-        summary = ensure_raw_from_landing(base_data_dir)
+        summary = ensure_raw_from_landing()
         synced_raw = True
         for err in summary.get("errors", []):
             errors.append(f"{err.get('study_id')}: {err.get('error')}")
         # Keep raw aligned with latest study_config when user forces a rebuild.
         # This prevents stale respondent_id/weight extraction from older ingestions.
         if force:
-            raw_rebuild = rebuild_raw_for_study(base_data_dir, study_id, force=True)
+            raw_rebuild = rebuild_raw_for_study(study_id, force=True)
             if raw_rebuild.get("status") == "error":
                 errors.append(f"{study_id}: {raw_rebuild.get('reason')}")
             elif raw_rebuild.get("status") == "ok":
                 rebuilt_raw = True
 
-    variables_path = (
-        base_data_dir / "warehouse" / "raw" / f"study_id={study_id}" / "raw_variables.parquet"
-    )
-    if not variables_path.exists():
+    variables_key = f"warehouse/raw/study_id={study_id}/raw_variables.parquet"
+    if not blob_exists(variables_key):
         raise HTTPException(status_code=404, detail="raw_variables.parquet not found for study.")
 
     rules = load_rules()
     scope = load_study_rule_scope(study_id, rules)
     rules = filter_rules_by_scope(rules, scope)
-    df_vars = pd.read_parquet(variables_path)
+    df_vars = read_parquet_blob(variables_key)
     mapped_df, stats = apply_rules_to_variables(df_vars, rules)
 
     question_map_df = _load_mapping_df_from_question_map(study_id, rules)
 
-    mapping_path = _mapping_csv_path()
-    mapping_path.parent.mkdir(parents=True, exist_ok=True)
-    existing_rows: list[dict] = []
-    if mapping_path.exists():
-        existing_rows = list(pd.read_csv(mapping_path).to_dict(orient="records"))
+    existing_df = _read_mapping_csv()
+    existing_rows = existing_df.to_dict(orient="records") if existing_df is not None else []
     remaining = [row for row in existing_rows if row.get("study_id") != study_id]
     if not question_map_df.empty:
         merged_rows = remaining + question_map_df.to_dict(orient="records")
@@ -462,23 +457,14 @@ def ensure_journey_pipeline(
         mapped_rows = mapped_df.copy()
         mapped_rows.insert(0, "study_id", study_id)
         merged_rows = remaining + mapped_rows.to_dict(orient="records")
-    pd.DataFrame(merged_rows).to_csv(mapping_path, index=False)
+    _write_mapping_csv(pd.DataFrame(merged_rows))
 
-    curated_path = (
-        base_data_dir
-        / "warehouse"
-        / "curated"
-        / f"study_id={study_id}"
-        / "fact_journey.parquet"
-    )
-    curated_path.parent.mkdir(parents=True, exist_ok=True)
+    curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
 
-    curated_status = "skipped" if curated_path.exists() and not force else "ok"
+    curated_status = "skipped" if blob_exists(curated_key) and not force else "ok"
     if curated_status == "ok":
-        responses_path = (
-            base_data_dir / "warehouse" / "raw" / f"study_id={study_id}" / "raw_responses.parquet"
-        )
-        if not responses_path.exists():
+        responses_key = f"warehouse/raw/study_id={study_id}/raw_responses.parquet"
+        if not blob_exists(responses_key):
             raise HTTPException(status_code=404, detail="raw_responses.parquet not found for study.")
 
         mapping_df = question_map_df if not question_map_df.empty else mapped_df.copy()
@@ -503,23 +489,17 @@ def ensure_journey_pipeline(
                 },
                 "curated": {
                     "status": curated_status,
-                    "path": str(curated_path),
+                    "path": curated_key,
                 },
                 "errors": errors,
             }
 
-        import duckdb
-
         conn = duckdb.connect()
-        conn.execute(
-            f"CREATE OR REPLACE VIEW responses AS SELECT * FROM read_parquet('{responses_path}')"
-        )
+        conn.register("responses", read_parquet_blob(responses_key))
         conn.register("mapping", mapping_df)
-        labels_path = (
-            base_data_dir / "warehouse" / "raw" / f"study_id={study_id}" / "raw_value_labels.parquet"
-        )
-        if labels_path.exists():
-            conn.execute(f"CREATE OR REPLACE VIEW value_labels AS SELECT * FROM read_parquet('{labels_path}')")
+        labels_key = f"warehouse/raw/study_id={study_id}/raw_value_labels.parquet"
+        if blob_exists(labels_key):
+            conn.register("value_labels", read_parquet_blob(labels_key))
         else:
             conn.execute("CREATE OR REPLACE TEMP VIEW value_labels AS SELECT NULL::VARCHAR AS var_code, NULL::VARCHAR AS value_code, NULL::VARCHAR AS value_label WHERE 1=0")
         weight_exists = (
@@ -568,7 +548,7 @@ def ensure_journey_pipeline(
             curated_status = "error"
             errors.append("No rows matched mapping criteria.")
         else:
-            df.to_parquet(curated_path, index=False)
+            write_parquet_blob(curated_key, df)
 
     return {
         "study_id": study_id,
@@ -581,7 +561,7 @@ def ensure_journey_pipeline(
         },
         "curated": {
             "status": curated_status,
-            "path": str(curated_path),
+            "path": curated_key,
         },
         "errors": errors,
     }
@@ -589,20 +569,16 @@ def ensure_journey_pipeline(
 
 @router.get("/pipeline/journey/status")
 def journey_pipeline_status(study_id: str = Query(..., description="Study id")) -> dict:
-    root = get_repo_root()
-    base_data_dir = root / "data"
-    raw_dir = base_data_dir / "warehouse" / "raw" / f"study_id={study_id}"
-    raw_ready = (raw_dir / "raw_responses.parquet").exists() and (raw_dir / "raw_variables.parquet").exists()
-    demographics_ready = (raw_dir / "respondents.parquet").exists()
+    raw_prefix = f"warehouse/raw/study_id={study_id}"
+    raw_ready = blob_exists(f"{raw_prefix}/raw_responses.parquet") and blob_exists(f"{raw_prefix}/raw_variables.parquet")
+    demographics_ready = blob_exists(f"{raw_prefix}/respondents.parquet")
 
     mapping_rows = _mapping_rows_for_study(study_id)
-    question_map_exists = question_map_path(study_id).exists()
+    question_map_exists = blob_exists(question_map_path(study_id))
     mapping_ready = len(mapping_rows) > 0 or question_map_exists
 
-    curated_path = (
-        base_data_dir / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-    )
-    curated_ready = curated_path.exists()
+    curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+    curated_ready = blob_exists(curated_key)
     consideration_imputation = (
         _build_consideration_imputation_report(study_id) if curated_ready else None
     )
@@ -623,10 +599,10 @@ def journey_pipeline_status(study_id: str = Query(..., description="Study id")) 
         "satisfaction_imputation": satisfaction_imputation,
         "csat_imputation": csat_imputation,
         "paths": {
-            "raw_dir": str(raw_dir),
-            "mapping_csv": str(_mapping_csv_path()),
-            "question_map": str(question_map_path(study_id)),
-            "curated_path": str(curated_path),
+            "raw_dir": raw_prefix,
+            "mapping_csv": _mapping_csv_key(),
+            "question_map": question_map_path(study_id),
+            "curated_path": curated_key,
         },
     }
 
@@ -636,18 +612,11 @@ def rebuild_base_pipeline(
     study_id: str = Query(..., description="Study id"),
     force: bool = Query(False, description="Force rebuild raw"),
 ) -> dict:
-    base_data_dir = get_repo_root() / "data"
-    raw_summary = rebuild_raw_for_study(base_data_dir, study_id, force=force)
+    raw_summary = rebuild_raw_for_study(study_id, force=force)
 
-    curated_path = (
-        base_data_dir
-        / "warehouse"
-        / "curated"
-        / f"study_id={study_id}"
-        / "fact_journey.parquet"
-    )
+    curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
     curated_status = "skipped"
-    if curated_path.exists():
+    if blob_exists(curated_key):
         try:
             ensure_journey_pipeline(study_id=study_id, sync_raw=False, force=True)
             curated_status = "ok"

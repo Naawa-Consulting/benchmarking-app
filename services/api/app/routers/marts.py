@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import csv
+import io
 import logging
 import unicodedata
-from pathlib import Path
 
+import duckdb
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
 from app.data.rule_engine import load_rules
-from app.data.warehouse import get_duckdb_connection, get_repo_root, load_parquet_as_view
+from app.data.warehouse import (
+    blob_exists,
+    load_parquet_as_view,
+    read_parquet_blob,
+    write_parquet_blob,
+)
+from app.storage.blob import StorageNotFoundError, get_storage
 from app.storage.question_map import question_map_path
 from app.models.schemas import MartBuildResponse
 
@@ -18,8 +25,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _mapping_csv_path() -> Path:
-    return get_repo_root() / "data" / "warehouse" / "mapping" / "question_map_v0.csv"
+def _mapping_csv_key() -> str:
+    return "warehouse/mapping/question_map_v0.csv"
 
 
 def _normalize_match(value: object) -> str:
@@ -50,17 +57,10 @@ def _code_tokens(value_code: object) -> str:
 
 
 def _apply_brand_label_true_code_override(study_id: str, df: pd.DataFrame) -> pd.DataFrame:
-    labels_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_value_labels.parquet"
-    )
-    if not labels_path.exists() or df.empty:
+    labels_key = f"warehouse/raw/study_id={study_id}/raw_value_labels.parquet"
+    if not blob_exists(labels_key) or df.empty:
         return df
-    labels = pd.read_parquet(labels_path)
+    labels = read_parquet_blob(labels_key)
     if labels.empty:
         return df
     labels = labels[["var_code", "value_code", "value_label"]].copy()
@@ -108,17 +108,10 @@ def _apply_catalog_brand_mode(study_id: str, df: pd.DataFrame) -> pd.DataFrame:
     Detect coded-brand catalog questions (mention slots) and switch them to dynamic brand mode.
     In this mode, brand is resolved from raw_value_labels using the response code.
     """
-    labels_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_value_labels.parquet"
-    )
-    if not labels_path.exists() or df.empty:
+    labels_key = f"warehouse/raw/study_id={study_id}/raw_value_labels.parquet"
+    if not blob_exists(labels_key) or df.empty:
         return df
-    labels = pd.read_parquet(labels_path)
+    labels = read_parquet_blob(labels_key)
     if labels.empty:
         return df
     labels = labels[["var_code", "value_label"]].copy()
@@ -176,9 +169,9 @@ def _apply_catalog_brand_mode(study_id: str, df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_mapping_df(study_id: str) -> pd.DataFrame:
-    map_path = question_map_path(study_id)
-    if map_path.exists():
-        df = pd.read_parquet(map_path)
+    map_key = question_map_path(study_id)
+    if blob_exists(map_key):
+        df = read_parquet_blob(map_key)
         df = df[df["stage"].notna() & (df["stage"].astype(str).str.strip() != "")]
         df = df[df["brand_value"].notna() & (df["brand_value"].astype(str).str.strip() != "")]
         if df.empty:
@@ -198,12 +191,13 @@ def _load_mapping_df(study_id: str) -> pd.DataFrame:
         df = _apply_brand_label_true_code_override(study_id, df)
         return df[["study_id", "var_code", "stage", "brand", "touchpoint", "value_true_codes", "true_codes"]]
 
-    path = _mapping_csv_path()
-    if not path.exists():
+    csv_key = _mapping_csv_key()
+    try:
+        data = get_storage().read_bytes(csv_key)
+    except StorageNotFoundError:
         return pd.DataFrame()
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        rows = [row for row in reader if row.get("study_id") == study_id]
+    reader = csv.DictReader(io.StringIO(data.decode("utf-8")))
+    rows = [row for row in reader if row.get("study_id") == study_id]
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
@@ -217,25 +211,22 @@ def _load_mapping_df(study_id: str) -> pd.DataFrame:
 @router.post("/marts/journey/build", response_model=MartBuildResponse)
 def build_journey_mart(study_id: str = Query(..., description="Study id")) -> MartBuildResponse:
     logger.info("Building journey mart for %s", study_id)
-    root = get_repo_root()
     mapping_df = _load_mapping_df(study_id)
     if mapping_df.empty:
         raise HTTPException(status_code=400, detail="No mapping rows found for study.")
 
-    responses_path = root / "data" / "warehouse" / "raw" / f"study_id={study_id}" / "raw_responses.parquet"
-    if not responses_path.exists():
+    responses_key = f"warehouse/raw/study_id={study_id}/raw_responses.parquet"
+    if not blob_exists(responses_key):
         raise HTTPException(status_code=404, detail="Raw responses parquet not found.")
 
-    curated_dir = root / "data" / "warehouse" / "curated" / f"study_id={study_id}"
-    curated_dir.mkdir(parents=True, exist_ok=True)
-    output_path = curated_dir / "fact_journey.parquet"
+    output_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
 
-    conn = get_duckdb_connection()
-    load_parquet_as_view(conn, "responses", str(responses_path))
+    conn = duckdb.connect()
+    load_parquet_as_view(conn, "responses", responses_key)
     conn.register("mapping", mapping_df)
-    labels_path = root / "data" / "warehouse" / "raw" / f"study_id={study_id}" / "raw_value_labels.parquet"
-    if labels_path.exists():
-        load_parquet_as_view(conn, "value_labels", str(labels_path))
+    labels_key = f"warehouse/raw/study_id={study_id}/raw_value_labels.parquet"
+    if blob_exists(labels_key):
+        load_parquet_as_view(conn, "value_labels", labels_key)
     else:
         conn.execute("CREATE OR REPLACE TEMP VIEW value_labels AS SELECT NULL::VARCHAR AS var_code, NULL::VARCHAR AS value_code, NULL::VARCHAR AS value_label WHERE 1=0")
 
@@ -285,7 +276,7 @@ def build_journey_mart(study_id: str = Query(..., description="Study id")) -> Ma
     if df.empty:
         raise HTTPException(status_code=400, detail="No rows matched mapping criteria.")
 
-    df.to_parquet(output_path, index=False)
+    write_parquet_blob(output_key, df)
 
     respondents = int(df["respondent_id"].nunique())
     rows = int(len(df))
@@ -298,5 +289,5 @@ def build_journey_mart(study_id: str = Query(..., description="Study id")) -> Ma
         rows=rows,
         brands=brands,
         stages=stages,
-        path=str(output_path),
+        path=output_key,
     )

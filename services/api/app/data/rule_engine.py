@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 import unicodedata
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import read_json_blob, write_json_blob
 
 logger = logging.getLogger(__name__)
 
@@ -112,40 +110,28 @@ DEFAULT_RULES = {
 }
 
 
-def _rules_path() -> Path:
-    return get_repo_root() / "data" / "warehouse" / "mapping" / "rules_v1.json"
+def _rules_key() -> str:
+    return "warehouse/mapping/rules_v1.json"
 
 
-def _study_rules_path(study_id: str) -> Path:
-    return (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "mapping"
-        / "study_rules"
-        / f"study_id={study_id}.json"
-    )
+def _study_rules_key(study_id: str) -> str:
+    return f"warehouse/mapping/study_rules/study_id={study_id}.json"
 
 
 def load_rules() -> dict[str, Any]:
-    path = _rules_path()
-    if not path.exists():
+    rules = read_json_blob(_rules_key())
+    if rules is None:
         save_rules(DEFAULT_RULES)
         return DEFAULT_RULES
-    try:
-        rules = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        rules = json.loads(path.read_text(encoding="utf-8-sig"))
     if "touchpoint_rules" not in rules:
         rules["touchpoint_rules"] = DEFAULT_RULES.get("touchpoint_rules", [])
     return rules
 
 
-def save_rules(rules: dict[str, Any]) -> Path:
-    path = _rules_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(rules, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+def save_rules(rules: dict[str, Any]) -> str:
+    key = _rules_key()
+    write_json_blob(key, rules)
+    return key
 
 
 def _default_scope(rules: dict[str, Any], study_id: str) -> dict[str, Any]:
@@ -158,13 +144,9 @@ def _default_scope(rules: dict[str, Any], study_id: str) -> dict[str, Any]:
 
 
 def load_study_rule_scope(study_id: str, rules: dict[str, Any]) -> dict[str, Any]:
-    path = _study_rules_path(study_id)
-    if not path.exists():
+    data = read_json_blob(_study_rules_key(study_id))
+    if data is None:
         return _default_scope(rules, study_id)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
     data.setdefault("study_id", study_id)
     data.setdefault("enabled_stage_rules", _default_scope(rules, study_id)["enabled_stage_rules"])
     data.setdefault(
@@ -176,7 +158,7 @@ def load_study_rule_scope(study_id: str, rules: dict[str, Any]) -> dict[str, Any
 
 def save_study_rule_scope(
     study_id: str, scope: dict[str, Any], rules: dict[str, Any]
-) -> Path:
+) -> str:
     valid_stage = {rule.get("id") for rule in rules.get("stage_rules", [])}
     valid_brand = {rule.get("id") for rule in rules.get("brand_extractors", [])}
     valid_ignore = {rule.get("id") for rule in rules.get("ignore_rules", [])}
@@ -192,10 +174,9 @@ def save_study_rule_scope(
         "enabled_ignore_rules": ignore_ids,
     }
 
-    path = _study_rules_path(study_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    key = _study_rules_key(study_id)
+    write_json_blob(key, payload)
+    return key
 
 
 def filter_rules_by_scope(rules: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]:

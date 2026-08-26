@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 import re
 
 import pandas as pd
@@ -15,7 +14,7 @@ from app.data.rule_engine import (
     save_rules,
     save_study_rule_scope,
 )
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import blob_exists, read_csv_blob, read_parquet_blob, write_csv_blob
 from app.models.schemas import RuleCoverageResponse, RuleSaveResponse
 
 logger = logging.getLogger(__name__)
@@ -23,12 +22,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _raw_variables_path(study_id: str) -> Path:
-    return get_repo_root() / "data" / "warehouse" / "raw" / f"study_id={study_id}" / "raw_variables.parquet"
+def _raw_variables_key(study_id: str) -> str:
+    return f"warehouse/raw/study_id={study_id}/raw_variables.parquet"
 
 
-def _mapping_csv_path() -> Path:
-    return get_repo_root() / "data" / "warehouse" / "mapping" / "question_map_v0.csv"
+def _mapping_csv_key() -> str:
+    return "warehouse/mapping/question_map_v0.csv"
 
 
 @router.get("/rules")
@@ -47,7 +46,7 @@ async def save_rules_endpoint(request: Request) -> RuleSaveResponse:
 
     path = save_rules(payload)
     version = int(payload.get("version", 1))
-    return RuleSaveResponse(ok=True, path=str(path), version=version)
+    return RuleSaveResponse(ok=True, path=path, version=version)
 
 
 @router.get("/rules/study")
@@ -87,37 +86,34 @@ async def save_study_rules(study_id: str = Query(..., description="Study id"), r
         "enabled_ignore_rules": list(ignore_ids),
     }
     path = save_study_rule_scope(study_id, scope, rules)
-    return {"ok": True, "path": str(path), "study_id": study_id}
+    return {"ok": True, "path": path, "study_id": study_id}
 
 
 @router.post("/rules/run", response_model=RuleCoverageResponse)
 def run_rules(study_id: str = Query(..., description="Study id")) -> RuleCoverageResponse:
-    variables_path = _raw_variables_path(study_id)
-    if not variables_path.exists():
+    variables_key = _raw_variables_key(study_id)
+    if not blob_exists(variables_key):
         raise HTTPException(status_code=404, detail="raw_variables.parquet not found for study.")
 
     rules = load_rules()
     scope = load_study_rule_scope(study_id, rules)
     rules = filter_rules_by_scope(rules, scope)
-    df_vars = pd.read_parquet(variables_path)
+    df_vars = read_parquet_blob(variables_key)
     try:
         mapped_df, stats = apply_rules_to_variables(df_vars, rules)
     except re.error as exc:  # type: ignore[name-defined]
         raise HTTPException(status_code=400, detail=f"Regex error: {exc}") from exc
 
-    mapping_path = _mapping_csv_path()
-    mapping_path.parent.mkdir(parents=True, exist_ok=True)
-
-    existing_rows: list[dict] = []
-    if mapping_path.exists():
-        existing_rows = list(pd.read_csv(mapping_path).to_dict(orient="records"))
+    mapping_key = _mapping_csv_key()
+    existing_df = read_csv_blob(mapping_key)
+    existing_rows = existing_df.to_dict(orient="records") if existing_df is not None else []
 
     remaining = [row for row in existing_rows if row.get("study_id") != study_id]
     mapped_rows = mapped_df.copy()
     mapped_rows.insert(0, "study_id", study_id)
 
     merged_rows = remaining + mapped_rows.to_dict(orient="records")
-    pd.DataFrame(merged_rows).to_csv(mapping_path, index=False)
+    write_csv_blob(mapping_key, pd.DataFrame(merged_rows))
 
     return RuleCoverageResponse(
         study_id=study_id,
@@ -125,21 +121,21 @@ def run_rules(study_id: str = Query(..., description="Study id")) -> RuleCoverag
         unmapped_rows=stats["unmapped_rows"],
         ignored_rows=stats["ignored_rows"],
         touchpoint_mapped_rows=stats.get("touchpoint_mapped_rows"),
-        output_path=str(mapping_path),
+        output_path=mapping_key,
         examples=stats["examples"],
     )
 
 
 @router.get("/rules/coverage", response_model=RuleCoverageResponse)
 def rule_coverage(study_id: str = Query(..., description="Study id")) -> RuleCoverageResponse:
-    variables_path = _raw_variables_path(study_id)
-    if not variables_path.exists():
+    variables_key = _raw_variables_key(study_id)
+    if not blob_exists(variables_key):
         raise HTTPException(status_code=404, detail="raw_variables.parquet not found for study.")
 
     rules = load_rules()
     scope = load_study_rule_scope(study_id, rules)
     rules = filter_rules_by_scope(rules, scope)
-    df_vars = pd.read_parquet(variables_path)
+    df_vars = read_parquet_blob(variables_key)
     try:
         _, stats = apply_rules_to_variables(df_vars, rules)
     except re.error as exc:  # type: ignore[name-defined]

@@ -1,23 +1,18 @@
 from __future__ import annotations
 
-import json
 import unicodedata
-from pathlib import Path
 
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import read_json_blob
 
-
-def _taxonomy_dir(root: Path | None = None) -> Path:
-    repo_root = root or get_repo_root()
-    return repo_root / "data" / "warehouse" / "taxonomy"
+_TAXONOMY_PREFIX = "warehouse/taxonomy"
 
 
-def standard_taxonomy_path(root: Path | None = None) -> Path:
-    return _taxonomy_dir(root) / "sector_subsector_category_v1.json"
+def standard_taxonomy_key(root: object | None = None) -> str:
+    return f"{_TAXONOMY_PREFIX}/sector_subsector_category_v1.json"
 
 
-def market_lens_rules_path(root: Path | None = None) -> Path:
-    return _taxonomy_dir(root) / "market_lens_rules_v1.json"
+def market_lens_rules_key(root: object | None = None) -> str:
+    return f"{_TAXONOMY_PREFIX}/market_lens_rules_v1.json"
 
 
 def _normalize(value: str | None) -> str:
@@ -28,17 +23,8 @@ def _normalize(value: str | None) -> str:
     return " ".join(text.strip().lower().split())
 
 
-def _read_json(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-
-
-def load_standard_taxonomy_items(root: Path | None = None) -> list[dict[str, str]]:
-    payload = _read_json(standard_taxonomy_path(root))
+def load_standard_taxonomy_items(root: object | None = None) -> list[dict[str, str]]:
+    payload = read_json_blob(standard_taxonomy_key(root), default={})
     items = payload.get("items", []) if isinstance(payload, dict) else []
     normalized: list[dict[str, str]] = []
     for item in items:
@@ -58,8 +44,8 @@ def load_standard_taxonomy_items(root: Path | None = None) -> list[dict[str, str
     return normalized
 
 
-def load_market_lens_rules(root: Path | None = None) -> dict:
-    payload = _read_json(market_lens_rules_path(root))
+def load_market_lens_rules(root: object | None = None) -> dict:
+    payload = read_json_blob(market_lens_rules_key(root), default={})
     if not isinstance(payload, dict):
         return {"category_rules": [], "subsector_rules": [], "sector_rules": []}
     return {
@@ -78,7 +64,7 @@ def derive_market_lens(
     sector: str | None,
     subsector: str | None,
     category: str | None,
-    root: Path | None = None,
+    root: object | None = None,
 ) -> dict[str, str]:
     rules = load_market_lens_rules(root)
     normalized_sector = _normalize(sector)
@@ -134,7 +120,7 @@ def derive_market_lens(
     }
 
 
-def resolve_classification(data: dict | None, root: Path | None = None) -> dict[str, str | None]:
+def resolve_classification(data: dict | None, root: object | None = None) -> dict[str, str | None]:
     payload = data if isinstance(data, dict) else {}
     sector = str(payload.get("sector") or "").strip() or None
     subsector = str(payload.get("subsector") or "").strip() or None
@@ -167,7 +153,7 @@ def resolve_classification(data: dict | None, root: Path | None = None) -> dict[
     }
 
 
-def market_taxonomy_items_from_standard(root: Path | None = None) -> list[dict[str, str]]:
+def market_taxonomy_items_from_standard(root: object | None = None) -> list[dict[str, str]]:
     rows = load_standard_taxonomy_items(root)
     dedup: set[tuple[str, str, str]] = set()
     items: list[dict[str, str]] = []

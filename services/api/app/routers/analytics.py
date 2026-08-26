@@ -2,13 +2,19 @@
 import re
 import time
 from datetime import datetime
-from pathlib import Path
 
+import duckdb
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.data.demographics import load_demographics_config, normalize_demographics_config
 from app.data.market_lens import resolve_classification
-from app.data.warehouse import get_duckdb_connection, get_repo_root, load_parquet_as_view
+from app.data.warehouse import (
+    blob_exists,
+    list_study_ids,
+    load_parquet_as_view,
+    read_json_blob,
+    read_parquet_blob,
+)
 from app.models.schemas import JourneyPoint, JourneyResponse
 
 router = APIRouter()
@@ -74,14 +80,8 @@ CSAT_IMPUTE_WARN_THRESHOLD = 0.40
 _CSAT_IMPUTE_CACHE: dict[str, tuple[float, dict]] = {}
 
 
-def _discover_curated_studies(root: Path) -> list[str]:
-    curated_root = root / "data" / "warehouse" / "curated"
-    discovered = []
-    if curated_root.exists():
-        for path in curated_root.glob("study_id=*"):
-            if (path / "fact_journey.parquet").exists():
-                discovered.append(path.name.replace("study_id=", "", 1))
-    return discovered
+def _discover_curated_studies() -> list[str]:
+    return list_study_ids("warehouse/curated", "fact_journey.parquet")
 
 
 def _study_year_from_id(study_id: str) -> int | None:
@@ -158,20 +158,20 @@ def _winsorized_median(values: list[float]) -> float | None:
     return _median(clipped)
 
 
-def _consideration_cache_key(root: Path, study_ids: list[str]) -> str:
-    return f"consideration:{root}:{','.join(sorted(study_ids))}"
+def _consideration_cache_key(study_ids: list[str]) -> str:
+    return f"consideration:{','.join(sorted(study_ids))}"
 
 
-def _satisfaction_cache_key(root: Path, study_ids: list[str]) -> str:
-    return f"satisfaction:{root}:{','.join(sorted(study_ids))}"
+def _satisfaction_cache_key(study_ids: list[str]) -> str:
+    return f"satisfaction:{','.join(sorted(study_ids))}"
 
 
-def _csat_cache_key(root: Path, study_ids: list[str]) -> str:
-    return f"csat:{root}:{','.join(sorted(study_ids))}"
+def _csat_cache_key(study_ids: list[str]) -> str:
+    return f"csat:{','.join(sorted(study_ids))}"
 
 
-def _build_consideration_rate_model(root: Path) -> dict:
-    study_ids = _discover_curated_studies(root)
+def _build_consideration_rate_model() -> dict:
+    study_ids = _discover_curated_studies()
     buckets: dict[tuple[str, ...], dict[str, object]] = {}
 
     def _get_bucket(level_key: tuple[str, ...]) -> dict[str, object]:
@@ -190,7 +190,7 @@ def _build_consideration_rate_model(root: Path) -> dict:
         year = _study_year_from_id(study_id)
         if not _is_training_year_valid(year):
             continue
-        classification = _classification_for_study(root, study_id)
+        classification = _classification_for_study(study_id)
         market_sector = _as_non_empty_text(classification.get("market_sector"))
         market_subsector = _as_non_empty_text(classification.get("market_subsector"))
         market_category = _normalize_market_category(classification.get("market_category"))
@@ -267,20 +267,20 @@ def _build_consideration_rate_model(root: Path) -> dict:
     }
 
 
-def _get_consideration_rate_model(root: Path) -> dict:
-    studies = _discover_curated_studies(root)
-    cache_key = _consideration_cache_key(root, studies)
+def _get_consideration_rate_model() -> dict:
+    studies = _discover_curated_studies()
+    cache_key = _consideration_cache_key(studies)
     entry = _CONSIDERATION_IMPUTE_CACHE.get(cache_key)
     if entry and time.time() - entry[0] <= CONSIDERATION_IMPUTE_CACHE_TTL_SECONDS:
         return entry[1]
-    model = _build_consideration_rate_model(root)
+    model = _build_consideration_rate_model()
     _CONSIDERATION_IMPUTE_CACHE.clear()
     _CONSIDERATION_IMPUTE_CACHE[cache_key] = (time.time(), model)
     return model
 
 
-def _build_satisfaction_rate_model(root: Path) -> dict:
-    study_ids = _discover_curated_studies(root)
+def _build_satisfaction_rate_model() -> dict:
+    study_ids = _discover_curated_studies()
     buckets: dict[tuple[str, ...], dict[str, object]] = {}
 
     def _get_bucket(level_key: tuple[str, ...]) -> dict[str, object]:
@@ -299,7 +299,7 @@ def _build_satisfaction_rate_model(root: Path) -> dict:
         year = _study_year_from_id(study_id)
         if not _is_training_year_valid(year):
             continue
-        classification = _classification_for_study(root, study_id)
+        classification = _classification_for_study(study_id)
         market_sector = _as_non_empty_text(classification.get("market_sector"))
         market_subsector = _as_non_empty_text(classification.get("market_subsector"))
         market_category = _normalize_market_category(classification.get("market_category"))
@@ -380,20 +380,20 @@ def _build_satisfaction_rate_model(root: Path) -> dict:
     }
 
 
-def _get_satisfaction_rate_model(root: Path) -> dict:
-    studies = _discover_curated_studies(root)
-    cache_key = _satisfaction_cache_key(root, studies)
+def _get_satisfaction_rate_model() -> dict:
+    studies = _discover_curated_studies()
+    cache_key = _satisfaction_cache_key(studies)
     entry = _SATISFACTION_IMPUTE_CACHE.get(cache_key)
     if entry and time.time() - entry[0] <= SATISFACTION_IMPUTE_CACHE_TTL_SECONDS:
         return entry[1]
-    model = _build_satisfaction_rate_model(root)
+    model = _build_satisfaction_rate_model()
     _SATISFACTION_IMPUTE_CACHE.clear()
     _SATISFACTION_IMPUTE_CACHE[cache_key] = (time.time(), model)
     return model
 
 
-def _build_csat_gap_model(root: Path) -> dict:
-    study_ids = _discover_curated_studies(root)
+def _build_csat_gap_model() -> dict:
+    study_ids = _discover_curated_studies()
     buckets: dict[tuple[str, ...], dict[str, object]] = {}
 
     def _get_bucket(level_key: tuple[str, ...]) -> dict[str, object]:
@@ -412,7 +412,7 @@ def _build_csat_gap_model(root: Path) -> dict:
         year = _study_year_from_id(study_id)
         if not _is_training_year_valid(year):
             continue
-        classification = _classification_for_study(root, study_id)
+        classification = _classification_for_study(study_id)
         market_sector = _as_non_empty_text(classification.get("market_sector"))
         market_subsector = _as_non_empty_text(classification.get("market_subsector"))
         market_category = _normalize_market_category(classification.get("market_category"))
@@ -490,13 +490,13 @@ def _build_csat_gap_model(root: Path) -> dict:
     }
 
 
-def _get_csat_gap_model(root: Path) -> dict:
-    studies = _discover_curated_studies(root)
-    cache_key = _csat_cache_key(root, studies)
+def _get_csat_gap_model() -> dict:
+    studies = _discover_curated_studies()
+    cache_key = _csat_cache_key(studies)
     entry = _CSAT_IMPUTE_CACHE.get(cache_key)
     if entry and time.time() - entry[0] <= CSAT_IMPUTE_CACHE_TTL_SECONDS:
         return entry[1]
-    model = _build_csat_gap_model(root)
+    model = _build_csat_gap_model()
     _CSAT_IMPUTE_CACHE.clear()
     _CSAT_IMPUTE_CACHE[cache_key] = (time.time(), model)
     return model
@@ -743,7 +743,7 @@ def _apply_consideration_imputation_to_rows(
     market_subsector: str,
     market_category: str,
 ) -> dict[str, object]:
-    model = _get_consideration_rate_model(get_repo_root())
+    model = _get_consideration_rate_model()
     metrics = {
         "total_rows": len(rows),
         "imputed_rows": 0,
@@ -840,7 +840,7 @@ def _apply_satisfaction_imputation_to_rows(
     market_subsector: str,
     market_category: str,
 ) -> dict[str, object]:
-    model = _get_satisfaction_rate_model(get_repo_root())
+    model = _get_satisfaction_rate_model()
     metrics = {
         "total_rows": len(rows),
         "imputed_rows": 0,
@@ -941,7 +941,7 @@ def _apply_csat_imputation_to_rows(
     market_subsector: str,
     market_category: str,
 ) -> dict[str, object]:
-    model = _get_csat_gap_model(get_repo_root())
+    model = _get_csat_gap_model()
     metrics = {
         "total_rows": len(rows),
         "eligible_rows": 0,
@@ -1067,15 +1067,11 @@ def _with_clause(*ctes: str) -> str:
     return "WITH " + ",\n".join(cleaned)
 
 
-def _parquet_columns(path: Path) -> set[str]:
-    if not path.exists():
+def _parquet_columns(key: str) -> set[str]:
+    if not blob_exists(key):
         return set()
-    conn = get_duckdb_connection()
-    try:
-        cursor = conn.execute(f"SELECT * FROM read_parquet('{path}') LIMIT 0")
-        return {column[0] for column in cursor.description}
-    finally:
-        conn.close()
+    df = read_parquet_blob(key)
+    return set(df.columns)
 
 
 def _column_or_null(columns: set[str], column_name: str) -> str:
@@ -1193,19 +1189,16 @@ def _quarter_label_from_key(q_key: int) -> str:
 
 
 def _collect_available_quarters_filtered(study_id: str, filters: dict) -> list[int]:
-    root = get_repo_root()
-    respondents_path = (
-        root / "data" / "warehouse" / "raw" / f"study_id={study_id}" / "respondents.parquet"
-    )
-    if not respondents_path.exists():
+    respondents_key = f"warehouse/raw/study_id={study_id}/respondents.parquet"
+    if not blob_exists(respondents_key):
         return []
 
-    respondent_cte, respondent_params, eligible = _respondent_filter_cte(study_id, filters)
-    if not eligible:
-        return []
-
-    conn = get_duckdb_connection()
+    conn = duckdb.connect()
     try:
+        respondent_cte, respondent_params, eligible = _respondent_filter_cte(conn, study_id, filters)
+        if not eligible:
+            return []
+
         if respondent_cte:
             with_prefix = _with_clause(respondent_cte)
             query = f"""
@@ -1218,7 +1211,7 @@ def _collect_available_quarters_filtered(study_id: str, filters: dict) -> list[i
             rows = conn.execute(query, respondent_params).fetchall()
             return [int(row[0]) for row in rows if row and row[0] is not None]
 
-        columns = _parquet_columns(respondents_path)
+        columns = _parquet_columns(respondents_key)
         if "date" not in columns:
             return []
         where = ["q_key IS NOT NULL"]
@@ -1228,12 +1221,13 @@ def _collect_available_quarters_filtered(study_id: str, filters: dict) -> list[i
             placeholders = ",".join("?" for _ in years)
             where.append(f"CAST(q_key / 10 AS INTEGER) IN ({placeholders})")
             params.extend([int(year) for year in years])
+        conn.register("__collect_quarters_respondents_src", read_parquet_blob(respondents_key))
         rows = conn.execute(
             f"""
             SELECT DISTINCT q_key FROM (
                 SELECT EXTRACT(year FROM TRY_CAST(date AS DATE)) * 10
                     + EXTRACT(quarter FROM TRY_CAST(date AS DATE)) AS q_key
-                FROM read_parquet('{respondents_path}')
+                FROM __collect_quarters_respondents_src
             ) q
             WHERE {' AND '.join(where)}
             ORDER BY q_key
@@ -1344,7 +1338,7 @@ def _tracking_series_filtered(filters: dict) -> dict:
     if cached is not None:
         return cached
 
-    root, study_ids = _resolve_study_ids(filters)
+    study_ids = _resolve_study_ids(filters)
     classification_cache: dict[str, dict[str, str | None]] = {}
     matched_studies: list[str] = []
     study_quarters: dict[str, list[int]] = {}
@@ -1354,7 +1348,7 @@ def _tracking_series_filtered(filters: dict) -> dict:
     for study_id in study_ids:
         classification = classification_cache.get(study_id)
         if classification is None:
-            classification = _classification_for_study(root, study_id)
+            classification = _classification_for_study(study_id)
             classification_cache[study_id] = classification
         if not _study_matches_taxonomy(filters, classification):
             continue
@@ -1436,7 +1430,7 @@ def _tracking_series_filtered(filters: dict) -> dict:
     for study_id in matched_studies:
         classification = classification_cache.get(study_id)
         if classification is None:
-            classification = _classification_for_study(root, study_id)
+            classification = _classification_for_study(study_id)
             classification_cache[study_id] = classification
 
         journey_rows_by_quarter = _compute_table_rows_by_quarter_filtered(study_id, filters)
@@ -1579,19 +1573,17 @@ def _journey_table_multi_set_cached(key: str, payload: dict) -> None:
     _JOURNEY_TABLE_MULTI_CACHE[key] = (time.time(), payload)
 
 
-def _resolve_study_ids(filters: dict) -> tuple[Path, list[str]]:
-    root = get_repo_root()
-    discovered = _discover_curated_studies(root)
+def _resolve_study_ids(filters: dict) -> list[str]:
+    discovered = _discover_curated_studies()
     requested = filters.get("study_ids") or []
     if requested:
         study_ids = [study_id for study_id in requested if study_id in discovered]
     else:
         study_ids = discovered
-    return root, study_ids
+    return study_ids
 
 
 def _collect_journey_rows(
-    root: Path,
     study_ids: list[str],
     filters: dict,
     classification_cache: dict[str, dict[str, str | None]] | None = None,
@@ -1602,7 +1594,7 @@ def _collect_journey_rows(
     for study_id in study_ids:
         classification = local_classification_cache.get(study_id)
         if classification is None:
-            classification = _classification_for_study(root, study_id)
+            classification = _classification_for_study(study_id)
             local_classification_cache[study_id] = classification
         if not _study_matches_taxonomy(filters, classification):
             continue
@@ -1764,22 +1756,16 @@ def _needs_respondent_filter(filters: dict) -> bool:
     )
 
 
-def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, list, bool]:
-    root = get_repo_root()
-    respondents_path = (
-        root
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "respondents.parquet"
-    )
+def _respondent_filter_cte(
+    conn: duckdb.DuckDBPyConnection, study_id: str, filters: dict
+) -> tuple[str | None, list, bool]:
+    respondents_key = f"warehouse/raw/study_id={study_id}/respondents.parquet"
     if not _needs_respondent_filter(filters):
         return None, [], True
-    if not respondents_path.exists():
+    if not blob_exists(respondents_key):
         return None, [], False
 
-    respondent_columns = _parquet_columns(respondents_path)
+    respondent_columns = _parquet_columns(respondents_key)
     if "respondent_id" not in respondent_columns:
         return None, [], False
 
@@ -1806,19 +1792,12 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
     ):
         return None, [], False
 
-    labels_path = (
-        root
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_value_labels.parquet"
-    )
-    labels_source = (
-        f"SELECT * FROM read_parquet('{labels_path}')"
-        if labels_path.exists()
-        else "SELECT NULL::VARCHAR AS var_code, NULL::VARCHAR AS value_code, NULL::VARCHAR AS value_label WHERE FALSE"
-    )
+    labels_key = f"warehouse/raw/study_id={study_id}/raw_value_labels.parquet"
+    if blob_exists(labels_key):
+        conn.register("__respondent_filter_labels_src", read_parquet_blob(labels_key))
+        labels_source = "SELECT * FROM __respondent_filter_labels_src"
+    else:
+        labels_source = "SELECT NULL::VARCHAR AS var_code, NULL::VARCHAR AS value_code, NULL::VARCHAR AS value_label WHERE FALSE"
 
     gender_var_sql = _sql_literal(str(gender_var)) if gender_var else ""
     nse_var_sql = _sql_literal(str(nse_var)) if nse_var else ""
@@ -1866,6 +1845,7 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
 
     where_clause = " AND ".join(["1=1"] + conditions)
 
+    conn.register("__respondent_filter_respondents_src", read_parquet_blob(respondents_key))
     cte = f"""
         respondents AS (
             SELECT
@@ -1876,7 +1856,7 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
                 {_column_or_null(respondent_columns, "state_code")},
                 {_column_or_null(respondent_columns, "age")},
                 {_column_or_null(respondent_columns, "date")}
-            FROM read_parquet('{respondents_path}')
+            FROM __respondent_filter_respondents_src
         ),
         labels AS (
             {labels_source}
@@ -1936,16 +1916,10 @@ def _respondent_filter_cte(study_id: str, filters: dict) -> tuple[str | None, li
     """
     return cte, params, True
 
-def _classification_for_study(root: Path, study_id: str) -> dict[str, str | None]:
-    classification_path = (
-        root
-        / "data"
-        / "warehouse"
-        / "taxonomy"
-        / "study_classification"
-        / f"study_id={study_id}.json"
-    )
-    if not classification_path.exists():
+def _classification_for_study(study_id: str) -> dict[str, str | None]:
+    classification_key = f"warehouse/taxonomy/study_classification/study_id={study_id}.json"
+    payload = read_json_blob(classification_key, default=None)
+    if payload is None:
         return {
             "sector": None,
             "subsector": None,
@@ -1955,11 +1929,7 @@ def _classification_for_study(root: Path, study_id: str) -> dict[str, str | None
             "market_category": None,
             "market_source": None,
         }
-    try:
-        payload = json.loads(classification_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        payload = json.loads(classification_path.read_text(encoding="utf-8-sig"))
-    return resolve_classification(payload, root=root)
+    return resolve_classification(payload)
 
 
 def _compute_table_rows_internal(
@@ -1970,21 +1940,23 @@ def _compute_table_rows_internal(
     apply_consideration_imputation: bool = True,
     apply_satisfaction_imputation: bool = True,
     apply_csat_imputation: bool = True,
+    conn: duckdb.DuckDBPyConnection | None = None,
 ) -> list[dict]:
-    root = get_repo_root()
-    classification = _classification_for_study(root, study_id)
+    classification = _classification_for_study(study_id)
     market_sector = _as_non_empty_text(classification.get("market_sector"))
     market_subsector = _as_non_empty_text(classification.get("market_subsector"))
     market_category = _normalize_market_category(classification.get("market_category"))
-    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-    if not curated_path.exists():
+    curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+    if not blob_exists(curated_key):
         if strict_missing:
             raise HTTPException(status_code=404, detail="Curated mart not found for study.")
         return []
 
-    conn = get_duckdb_connection()
+    owns_conn = conn is None
+    if conn is None:
+        conn = duckdb.connect()
     try:
-        load_parquet_as_view(conn, "journey_table", str(curated_path))
+        load_parquet_as_view(conn, "journey_table", curated_key)
         has_value_raw = (
             conn.execute(
                 """
@@ -2348,7 +2320,8 @@ def _compute_table_rows_internal(
 
         return result_rows
     finally:
-        conn.close()
+        if owns_conn:
+            conn.close()
 
 
 def _compute_table_rows(study_id: str) -> list[dict]:
@@ -2356,45 +2329,47 @@ def _compute_table_rows(study_id: str) -> list[dict]:
 
 
 def _compute_table_rows_filtered(study_id: str, filters: dict) -> list[dict]:
-    respondent_cte, respondent_params, eligible = _respondent_filter_cte(study_id, filters)
-    if not eligible:
-        return []
-    return _compute_table_rows_internal(study_id, respondent_cte, respondent_params, False)
+    conn = duckdb.connect()
+    try:
+        respondent_cte, respondent_params, eligible = _respondent_filter_cte(conn, study_id, filters)
+        if not eligible:
+            return []
+        return _compute_table_rows_internal(study_id, respondent_cte, respondent_params, False, conn=conn)
+    finally:
+        conn.close()
 
 
 def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dict[int, list[dict]]:
-    respondent_cte, respondent_params, eligible = _respondent_filter_cte(study_id, filters)
-    if not eligible:
-        return {}
-
-    root = get_repo_root()
-    classification = _classification_for_study(root, study_id)
-    market_sector = _as_non_empty_text(classification.get("market_sector"))
-    market_subsector = _as_non_empty_text(classification.get("market_subsector"))
-    market_category = _normalize_market_category(classification.get("market_category"))
-    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-    if not curated_path.exists():
-        return {}
-    respondents_path = (
-        root / "data" / "warehouse" / "raw" / f"study_id={study_id}" / "respondents.parquet"
-    )
-
-    conn = get_duckdb_connection()
+    conn = duckdb.connect()
     try:
-        load_parquet_as_view(conn, "journey_table", str(curated_path))
+        respondent_cte, respondent_params, eligible = _respondent_filter_cte(conn, study_id, filters)
+        if not eligible:
+            return {}
+
+        classification = _classification_for_study(study_id)
+        market_sector = _as_non_empty_text(classification.get("market_sector"))
+        market_subsector = _as_non_empty_text(classification.get("market_subsector"))
+        market_category = _normalize_market_category(classification.get("market_category"))
+        curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+        if not blob_exists(curated_key):
+            return {}
+        respondents_key = f"warehouse/raw/study_id={study_id}/respondents.parquet"
+
+        load_parquet_as_view(conn, "journey_table", curated_key)
         if respondent_cte is None:
-            if not respondents_path.exists():
+            if not blob_exists(respondents_key):
                 return {}
-            respondent_columns = _parquet_columns(respondents_path)
+            respondent_columns = _parquet_columns(respondents_key)
             if "respondent_id" not in respondent_columns or "date" not in respondent_columns:
                 return {}
+            conn.register("__quarter_filtered_respondents_src", read_parquet_blob(respondents_key))
             respondent_cte = f"""
                 filtered_respondents AS (
                     SELECT
                         respondent_id,
                         EXTRACT(year FROM TRY_CAST(date AS DATE)) * 10
                             + EXTRACT(quarter FROM TRY_CAST(date AS DATE)) AS q_key
-                    FROM read_parquet('{respondents_path}')
+                    FROM __quarter_filtered_respondents_src
                     WHERE respondent_id IS NOT NULL
                       AND TRY_CAST(date AS DATE) IS NOT NULL
                 )
@@ -2756,14 +2731,13 @@ def _compute_table_rows_by_quarter_filtered(study_id: str, filters: dict) -> dic
 
 
 def _compute_touchpoint_rows(study_id: str) -> list[dict]:
-    root = get_repo_root()
-    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-    if not curated_path.exists():
+    curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+    if not blob_exists(curated_key):
         return []
 
-    conn = get_duckdb_connection()
+    conn = duckdb.connect()
     try:
-        load_parquet_as_view(conn, "touchpoints_table", str(curated_path))
+        load_parquet_as_view(conn, "touchpoints_table", curated_key)
         has_touchpoint = (
             conn.execute(
                 """
@@ -2848,18 +2822,17 @@ def _compute_touchpoint_rows(study_id: str) -> list[dict]:
 
 
 def _compute_touchpoint_rows_filtered(study_id: str, filters: dict) -> list[dict]:
-    root = get_repo_root()
-    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-    if not curated_path.exists():
+    curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+    if not blob_exists(curated_key):
         return []
 
-    respondent_cte, respondent_params, eligible = _respondent_filter_cte(study_id, filters)
-    if not eligible:
-        return []
-
-    conn = get_duckdb_connection()
+    conn = duckdb.connect()
     try:
-        load_parquet_as_view(conn, "touchpoints_table", str(curated_path))
+        respondent_cte, respondent_params, eligible = _respondent_filter_cte(conn, study_id, filters)
+        if not eligible:
+            return []
+
+        load_parquet_as_view(conn, "touchpoints_table", curated_key)
         has_touchpoint = (
             conn.execute(
                 """
@@ -2972,34 +2945,32 @@ def _compute_touchpoint_rows_filtered(study_id: str, filters: dict) -> list[dict
 
 
 def _compute_touchpoint_rows_by_quarter_filtered(study_id: str, filters: dict) -> dict[int, list[dict]]:
-    root = get_repo_root()
-    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-    if not curated_path.exists():
+    curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+    if not blob_exists(curated_key):
         return {}
 
-    respondent_cte, respondent_params, eligible = _respondent_filter_cte(study_id, filters)
-    if not eligible:
-        return {}
-    respondents_path = (
-        root / "data" / "warehouse" / "raw" / f"study_id={study_id}" / "respondents.parquet"
-    )
-
-    conn = get_duckdb_connection()
+    conn = duckdb.connect()
     try:
-        load_parquet_as_view(conn, "touchpoints_table", str(curated_path))
+        respondent_cte, respondent_params, eligible = _respondent_filter_cte(conn, study_id, filters)
+        if not eligible:
+            return {}
+        respondents_key = f"warehouse/raw/study_id={study_id}/respondents.parquet"
+
+        load_parquet_as_view(conn, "touchpoints_table", curated_key)
         if respondent_cte is None:
-            if not respondents_path.exists():
+            if not blob_exists(respondents_key):
                 return {}
-            respondent_columns = _parquet_columns(respondents_path)
+            respondent_columns = _parquet_columns(respondents_key)
             if "respondent_id" not in respondent_columns or "date" not in respondent_columns:
                 return {}
+            conn.register("__quarter_filtered_touchpoint_respondents_src", read_parquet_blob(respondents_key))
             respondent_cte = f"""
                 filtered_respondents AS (
                     SELECT
                         respondent_id,
                         EXTRACT(year FROM TRY_CAST(date AS DATE)) * 10
                             + EXTRACT(quarter FROM TRY_CAST(date AS DATE)) AS q_key
-                    FROM read_parquet('{respondents_path}')
+                    FROM __quarter_filtered_touchpoint_respondents_src
                     WHERE respondent_id IS NOT NULL
                       AND TRY_CAST(date AS DATE) IS NOT NULL
                 )
@@ -3120,17 +3091,16 @@ def _compute_touchpoint_rows_by_quarter_filtered(study_id: str, filters: dict) -
 
 @router.get("/journey", response_model=JourneyResponse)
 def journey_analytics(study_id: str = Query(..., description="Study id")) -> JourneyResponse:
-    root = get_repo_root()
-    curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-    if curated_path.exists():
-        parquet_path = curated_path
+    curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+    if blob_exists(curated_key):
+        parquet_key = curated_key
         source = "curated"
     else:
         raise HTTPException(status_code=404, detail="Curated mart not found for study.")
 
-    conn = get_duckdb_connection()
+    conn = duckdb.connect()
     try:
-        load_parquet_as_view(conn, "journey", str(parquet_path))
+        load_parquet_as_view(conn, "journey", parquet_key)
         query = """
             SELECT stage, brand, AVG(value) * 100 AS percentage
             FROM journey
@@ -3155,7 +3125,7 @@ def journey_analytics(study_id: str = Query(..., description="Study id")) -> Jou
 
 @router.get("/journey/table")
 def journey_table(study_id: str = Query(..., description="Study id")) -> dict:
-    classification = _classification_for_study(get_repo_root(), study_id)
+    classification = _classification_for_study(study_id)
     result_rows = _compute_table_rows(study_id)
 
     has_awareness = any(row.get("brand_awareness") is not None for row in result_rows)
@@ -3214,7 +3184,7 @@ def _journey_table_multi_filtered(
         cached_payload["meta"] = meta
         return cached_payload
 
-    root, study_ids = _resolve_study_ids(filters)
+    study_ids = _resolve_study_ids(filters)
 
     if not study_ids:
         payload = {
@@ -3248,7 +3218,7 @@ def _journey_table_multi_filtered(
 
     if normalized_mode in {"benchmark_selection", "full"}:
         selection_rows_all, selection_studies, processed = _collect_journey_rows(
-            root, study_ids, filters, classification_cache
+            study_ids, filters, classification_cache
         )
 
     if normalized_mode in {"benchmark_global"} or include_global_benchmark:
@@ -3257,7 +3227,7 @@ def _journey_table_multi_filtered(
         global_filters["subsector"] = None
         global_filters["category"] = None
         global_rows_all, global_studies, _ = _collect_journey_rows(
-            root, study_ids, global_filters, classification_cache
+            study_ids, global_filters, classification_cache
         )
     collect_ms = round((time.perf_counter() - collect_started) * 1000, 2)
 
@@ -3359,8 +3329,7 @@ def _touchpoints_table_multi_filtered(
     sort_by: str,
     sort_dir: str,
 ) -> dict:
-    root = get_repo_root()
-    discovered = _discover_curated_studies(root)
+    discovered = _discover_curated_studies()
     requested = filters.get("study_ids") or []
     if requested:
         study_ids = [study_id for study_id in requested if study_id in discovered]
@@ -3381,7 +3350,7 @@ def _touchpoints_table_multi_filtered(
 
     rows: list[dict] = []
     for study_id in study_ids:
-        classification = _classification_for_study(root, study_id)
+        classification = _classification_for_study(study_id)
         if not _study_matches_taxonomy(filters, classification):
             continue
         safe_classification = _effective_classification_values(classification, filters)

@@ -1,42 +1,29 @@
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import read_json_blob, write_json_blob
 
 logger = logging.getLogger(__name__)
 
 
-def _config_path(study_id: str) -> Path:
-    return (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "demographics"
-        / f"study_id={study_id}.json"
-    )
+def _config_key(study_id: str) -> str:
+    return f"warehouse/demographics/study_id={study_id}.json"
 
 
 def load_demographics_config(study_id: str) -> dict:
-    path = _config_path(study_id)
-    if not path.exists():
-        return {
-            "study_id": study_id,
-            "date": {"mode": "none", "var_code": None, "constant": None},
-            "gender_var": None,
-            "age_var": None,
-            "nse_var": None,
-            "state_var": None,
-        }
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+    default = {
+        "study_id": study_id,
+        "date": {"mode": "none", "var_code": None, "constant": None},
+        "gender_var": None,
+        "age_var": None,
+        "nse_var": None,
+        "state_var": None,
+    }
+    return read_json_blob(_config_key(study_id), default=default)
 
 
 def normalize_demographics_config(config: dict) -> dict:
@@ -61,13 +48,10 @@ def normalize_demographics_config(config: dict) -> dict:
     return config
 
 
-def save_demographics_config(study_id: str, payload: dict) -> Path:
-    path = _config_path(study_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
-    return path
+def save_demographics_config(study_id: str, payload: dict) -> str:
+    key = _config_key(study_id)
+    write_json_blob(key, payload)
+    return key
 
 
 def build_value_labels_frame(meta: Any, study_id: str) -> pd.DataFrame:
@@ -88,23 +72,9 @@ def build_value_labels_frame(meta: Any, study_id: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def respondents_path(study_id: str) -> Path:
-    return (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "respondents.parquet"
-    )
+def respondents_key(study_id: str) -> str:
+    return f"warehouse/raw/study_id={study_id}/respondents.parquet"
 
 
-def value_labels_path(study_id: str) -> Path:
-    return (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_value_labels.parquet"
-    )
+def value_labels_key(study_id: str) -> str:
+    return f"warehouse/raw/study_id={study_id}/raw_value_labels.parquet"

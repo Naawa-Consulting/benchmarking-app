@@ -1,10 +1,7 @@
-from pathlib import Path
-import shutil
-
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from app.data.ingest_from_landing import ensure_raw_from_landing
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import blob_exists, delete_blob, delete_prefix, read_csv_blob, write_csv_blob
 from app.models.schemas import IngestRunResponse
 
 router = APIRouter()
@@ -12,8 +9,7 @@ router = APIRouter()
 
 @router.post("/ingest/run", response_model=IngestRunResponse)
 def run_ingest() -> IngestRunResponse:
-    base_data_dir = get_repo_root() / "data"
-    summary = ensure_raw_from_landing(base_data_dir)
+    summary = ensure_raw_from_landing()
     return IngestRunResponse(
         status="completed",
         processed=summary["processed"],
@@ -43,21 +39,19 @@ async def upload_sav_to_landing(
     if not filename.lower().endswith(".sav"):
         raise HTTPException(status_code=400, detail="Only .sav files are allowed.")
 
-    base_data_dir = get_repo_root() / "data"
-    landing_dir = base_data_dir / "landing"
-    landing_dir.mkdir(parents=True, exist_ok=True)
-
-    target_path = landing_dir / f"{normalized_study_id}.sav"
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Empty file.")
 
-    Path(target_path).write_bytes(content)
+    landing_key = f"landing/{normalized_study_id}.sav"
+    from app.storage.blob import get_storage
+
+    get_storage().write_bytes(landing_key, content)
 
     return {
         "ok": True,
         "study_id": normalized_study_id,
-        "landing_file": target_path.name,
+        "landing_file": f"{normalized_study_id}.sav",
         "bytes": len(content),
     }
 
@@ -70,42 +64,43 @@ def delete_study_artifacts(
     if not normalized_study_id:
         raise HTTPException(status_code=400, detail="Invalid study_id.")
 
-    root = get_repo_root()
-    data_root = root / "data"
     removed: list[str] = []
     missing: list[str] = []
 
-    candidate_paths = [
-        data_root / "landing" / f"{normalized_study_id}.sav",
-        data_root / "warehouse" / "raw" / f"study_id={normalized_study_id}",
-        data_root / "warehouse" / "curated" / f"study_id={normalized_study_id}",
-        data_root / "warehouse" / "taxonomy" / "study_classification" / f"study_id={normalized_study_id}.json",
-        data_root / "warehouse" / "study_config" / f"study_id={normalized_study_id}.json",
-        data_root / "warehouse" / "demographics" / f"study_id={normalized_study_id}.json",
-        data_root / "warehouse" / "mapping" / "study_rules" / f"study_id={normalized_study_id}.json",
+    directory_prefixes = [
+        f"warehouse/raw/study_id={normalized_study_id}",
+        f"warehouse/curated/study_id={normalized_study_id}",
+    ]
+    file_keys = [
+        f"landing/{normalized_study_id}.sav",
+        f"warehouse/taxonomy/study_classification/study_id={normalized_study_id}.json",
+        f"warehouse/study_config/study_id={normalized_study_id}.json",
+        f"warehouse/demographics/study_id={normalized_study_id}.json",
+        f"warehouse/mapping/study_rules/study_id={normalized_study_id}.json",
     ]
 
-    for path in candidate_paths:
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-            removed.append(str(path))
-        elif path.exists():
-            path.unlink(missing_ok=True)
-            removed.append(str(path))
+    for prefix in directory_prefixes:
+        deleted = delete_prefix(prefix)
+        if deleted:
+            removed.extend(deleted)
         else:
-            missing.append(str(path))
+            missing.append(prefix)
 
-    mapping_csv = data_root / "warehouse" / "mapping" / "question_map_v0.csv"
-    if mapping_csv.exists():
-        import pandas as pd
+    for key in file_keys:
+        if blob_exists(key):
+            delete_blob(key)
+            removed.append(key)
+        else:
+            missing.append(key)
 
-        df = pd.read_csv(mapping_csv)
-        if "study_id" in df.columns:
-            before = len(df)
-            filtered = df[df["study_id"].astype(str) != normalized_study_id]
-            if len(filtered) != before:
-                filtered.to_csv(mapping_csv, index=False)
-                removed.append(str(mapping_csv))
+    mapping_key = "warehouse/mapping/question_map_v0.csv"
+    df = read_csv_blob(mapping_key)
+    if df is not None and "study_id" in df.columns:
+        before = len(df)
+        filtered = df[df["study_id"].astype(str) != normalized_study_id]
+        if len(filtered) != before:
+            write_csv_blob(mapping_key, filtered)
+            removed.append(mapping_key)
 
     return {
         "ok": True,

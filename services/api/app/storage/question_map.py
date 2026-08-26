@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 
-from app.data.warehouse import get_repo_root
-
+from app.data.warehouse import blob_exists, read_parquet_blob, write_parquet_blob
 
 QUESTION_MAP_COLUMNS = [
     "study_id",
@@ -27,37 +24,23 @@ QUESTION_MAP_COLUMNS = [
 ]
 
 
-def question_map_path(study_id: str) -> Path:
-    return (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "question_map.parquet"
-    )
+def question_map_path(study_id: str) -> str:
+    return f"warehouse/raw/study_id={study_id}/question_map.parquet"
 
 
-def _raw_variables_path(study_id: str) -> Path:
-    return (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_variables.parquet"
-    )
+def _raw_variables_key(study_id: str) -> str:
+    return f"warehouse/raw/study_id={study_id}/raw_variables.parquet"
 
 
-def ensure_question_map(study_id: str) -> Path:
-    path = question_map_path(study_id)
-    if path.exists():
-        return path
-    variables_path = _raw_variables_path(study_id)
-    if not variables_path.exists():
+def ensure_question_map(study_id: str) -> str:
+    key = question_map_path(study_id)
+    if blob_exists(key):
+        return key
+    variables_key = _raw_variables_key(study_id)
+    if not blob_exists(variables_key):
         raise FileNotFoundError("Study not ingested yet. Ingest first.")
 
-    df = pd.read_parquet(variables_path)
+    df = read_parquet_blob(variables_key)
     if "question_text" not in df.columns:
         df["question_text"] = None
     if "var_type" not in df.columns:
@@ -84,26 +67,21 @@ def ensure_question_map(study_id: str) -> Path:
             "updated_by": None,
         }
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
     save_question_map(study_id, rows)
-    return path
+    return key
 
 
 def load_question_map(study_id: str) -> pd.DataFrame:
-    path = ensure_question_map(study_id)
-    df = pd.read_parquet(path)
-    return df
+    key = ensure_question_map(study_id)
+    return read_parquet_blob(key)
 
 
-def save_question_map(study_id: str, df: pd.DataFrame) -> Path:
-    path = question_map_path(study_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".tmp")
+def save_question_map(study_id: str, df: pd.DataFrame) -> str:
+    key = question_map_path(study_id)
     df = df.copy()
     for column in QUESTION_MAP_COLUMNS:
         if column not in df.columns:
             df[column] = None
     df = df[QUESTION_MAP_COLUMNS]
-    df.to_parquet(tmp_path, index=False)
-    tmp_path.replace(path)
-    return path
+    write_parquet_blob(key, df)
+    return key

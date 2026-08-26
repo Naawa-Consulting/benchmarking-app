@@ -1,23 +1,20 @@
 from __future__ import annotations
 
-import json
 import re
 import unicodedata
-from pathlib import Path
 
 import duckdb
-import pandas as pd
 import pyreadstat
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.data.demographics import (
     load_demographics_config,
     normalize_demographics_config,
-    respondents_path,
+    respondents_key,
     save_demographics_config,
-    value_labels_path,
+    value_labels_key,
 )
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import blob_exists, load_parquet_as_view, read_parquet_blob, write_parquet_blob
 
 router = APIRouter()
 
@@ -123,35 +120,19 @@ def get_demographics_config(study_id: str = Query(..., description="Study id")) 
 
 
 def _variables_for_study(study_id: str) -> list[str]:
-    variables_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_variables.parquet"
-    )
-    if not variables_path.exists():
+    variables_key = f"warehouse/raw/study_id={study_id}/raw_variables.parquet"
+    if not blob_exists(variables_key):
         raise HTTPException(status_code=404, detail="raw_variables.parquet not found for study.")
-    df = pd.read_parquet(variables_path, columns=["var_code"])
+    df = read_parquet_blob(variables_key, columns=["var_code"])
     return df["var_code"].astype(str).tolist()
 
 
 def _validate_age_var(study_id: str, var_code: str) -> None:
-    responses_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_responses.parquet"
-    )
-    if not responses_path.exists():
+    responses_key = f"warehouse/raw/study_id={study_id}/raw_responses.parquet"
+    if not blob_exists(responses_key):
         raise HTTPException(status_code=404, detail="raw_responses.parquet not found for study.")
     conn = duckdb.connect()
-    conn.execute(
-        f"CREATE OR REPLACE VIEW responses AS SELECT * FROM read_parquet('{responses_path}')"
-    )
+    load_parquet_as_view(conn, "responses", responses_key)
     row = conn.execute(
         """
         SELECT
@@ -171,21 +152,12 @@ def _validate_age_var(study_id: str, var_code: str) -> None:
 
 
 def _build_respondents_parquet(study_id: str, config: dict) -> None:
-    responses_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_responses.parquet"
-    )
-    if not responses_path.exists():
+    responses_key = f"warehouse/raw/study_id={study_id}/raw_responses.parquet"
+    if not blob_exists(responses_key):
         raise HTTPException(status_code=404, detail="raw_responses.parquet not found for study.")
 
     conn = duckdb.connect()
-    conn.execute(
-        f"CREATE OR REPLACE VIEW responses AS SELECT * FROM read_parquet('{responses_path}')"
-    )
+    load_parquet_as_view(conn, "responses", responses_key)
 
     date_config = config.get("date", {}) if config else {}
     date_mode = date_config.get("mode", "none")
@@ -219,10 +191,10 @@ def _build_respondents_parquet(study_id: str, config: dict) -> None:
         ],
     ).df()
     gender_labels = {}
-    labels_file = value_labels_path(study_id)
-    if labels_file.exists() and gender_var:
+    labels_key = value_labels_key(study_id)
+    if blob_exists(labels_key) and gender_var:
         try:
-            labels_df = pd.read_parquet(labels_file, columns=["var_code", "value_code", "value_label"])
+            labels_df = read_parquet_blob(labels_key, columns=["var_code", "value_code", "value_label"])
             labels_df = labels_df[labels_df["var_code"].astype(str) == str(gender_var)]
             gender_labels = {
                 str(row["value_code"]): str(row["value_label"])
@@ -265,9 +237,7 @@ def _build_respondents_parquet(study_id: str, config: dict) -> None:
             df["date"] = parsed
         else:
             df["date"] = None
-    path = respondents_path(study_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, index=False)
+    write_parquet_blob(respondents_key(study_id), df)
 
 
 @router.post("/demographics/config")
@@ -337,10 +307,10 @@ def demographics_value_labels(
     study_id: str = Query(..., description="Study id"),
     var_code: str = Query(..., description="Variable code"),
 ) -> dict:
-    labels_path = value_labels_path(study_id)
-    if not labels_path.exists():
+    labels_key = value_labels_key(study_id)
+    if not blob_exists(labels_key):
         return {"study_id": study_id, "var_code": var_code, "items": []}
-    df = pd.read_parquet(labels_path)
+    df = read_parquet_blob(labels_key)
     df = df[df["var_code"].astype(str) == str(var_code)]
     items = [
         {"value_code": str(row["value_code"]), "value_label": str(row["value_label"])}
@@ -355,22 +325,15 @@ def demographics_gender_map_preview(
     var_code: str = Query(..., description="Gender variable code"),
     limit: int = Query(50, ge=1, le=500),
 ) -> dict:
-    responses_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_responses.parquet"
-    )
-    if not responses_path.exists():
+    responses_key = f"warehouse/raw/study_id={study_id}/raw_responses.parquet"
+    if not blob_exists(responses_key):
         raise HTTPException(status_code=404, detail="raw_responses.parquet not found for study.")
 
-    labels_path = value_labels_path(study_id)
+    labels_key = value_labels_key(study_id)
     labels: dict[str, str] = {}
-    if labels_path.exists():
+    if blob_exists(labels_key):
         try:
-            labels_df = pd.read_parquet(labels_path, columns=["var_code", "value_code", "value_label"])
+            labels_df = read_parquet_blob(labels_key, columns=["var_code", "value_code", "value_label"])
             labels_df = labels_df[labels_df["var_code"].astype(str) == str(var_code)]
             labels = {
                 str(row["value_code"]): str(row["value_label"])
@@ -382,9 +345,7 @@ def demographics_gender_map_preview(
 
     conn = duckdb.connect()
     try:
-        conn.execute(
-            f"CREATE OR REPLACE VIEW responses AS SELECT * FROM read_parquet('{responses_path}')"
-        )
+        load_parquet_as_view(conn, "responses", responses_key)
         rows = conn.execute(
             """
             SELECT value, COUNT(*) AS cnt
@@ -422,21 +383,12 @@ def demographics_preview(
     var_code: str = Query(..., description="Variable code"),
     n: int = Query(5, ge=1, le=50, description="Rows to preview"),
 ) -> dict:
-    responses_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_responses.parquet"
-    )
-    if not responses_path.exists():
+    responses_key = f"warehouse/raw/study_id={study_id}/raw_responses.parquet"
+    if not blob_exists(responses_key):
         raise HTTPException(status_code=404, detail="raw_responses.parquet not found for study.")
 
     conn = duckdb.connect()
-    conn.execute(
-        f"CREATE OR REPLACE VIEW responses AS SELECT * FROM read_parquet('{responses_path}')"
-    )
+    load_parquet_as_view(conn, "responses", responses_key)
     rows = conn.execute(
         """
         SELECT value
@@ -482,21 +434,12 @@ def demographics_date_preview(
     if mode != "var" or not var_code:
         return {"raw_samples": [], "parsed_samples": [], "parse_success_rate": 0.0}
 
-    responses_path = (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_responses.parquet"
-    )
-    if not responses_path.exists():
+    responses_key = f"warehouse/raw/study_id={study_id}/raw_responses.parquet"
+    if not blob_exists(responses_key):
         raise HTTPException(status_code=404, detail="raw_responses.parquet not found for study.")
 
     conn = duckdb.connect()
-    conn.execute(
-        f"CREATE OR REPLACE VIEW responses AS SELECT * FROM read_parquet('{responses_path}')"
-    )
+    load_parquet_as_view(conn, "responses", responses_key)
     rows = conn.execute(
         """
         SELECT value

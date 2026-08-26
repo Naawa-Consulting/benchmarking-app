@@ -44,6 +44,9 @@ export async function forwardLegacy(
   const headers: Record<string, string> = {};
   const contentType = request.headers.get("content-type");
   if (contentType) headers["content-type"] = contentType;
+  if (process.env.INTERNAL_API_KEY) {
+    headers["x-internal-api-key"] = process.env.INTERNAL_API_KEY;
+  }
   const body = method === "POST" ? await request.text() : undefined;
   const response = await fetch(`${base}${pathWithQuery}`, {
     method,

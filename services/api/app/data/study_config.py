@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import json
-import logging
-from pathlib import Path
 from typing import Iterable
 
-from app.data.warehouse import get_repo_root
-
-logger = logging.getLogger(__name__)
-
+from app.data.warehouse import read_json_blob, write_json_blob
 
 RESPONDENT_ID_CANDIDATES = [
     "respondent_id",
@@ -34,14 +28,8 @@ WEIGHT_CANDIDATES = [
 ]
 
 
-def _study_config_path(study_id: str) -> Path:
-    return (
-        get_repo_root()
-        / "data"
-        / "warehouse"
-        / "study_config"
-        / f"study_id={study_id}.json"
-    )
+def _study_config_key(study_id: str) -> str:
+    return f"warehouse/study_config/study_id={study_id}.json"
 
 
 def _normalize_names(names: Iterable[str]) -> dict[str, str]:
@@ -77,22 +65,13 @@ def detect_base_columns(var_codes: Iterable[str]) -> tuple[str | None, str | Non
 
 
 def load_study_config(study_id: str) -> dict:
-    path = _study_config_path(study_id)
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+    return read_json_blob(_study_config_key(study_id), default={}) or {}
 
 
-def save_study_config(study_id: str, payload: dict) -> Path:
-    path = _study_config_path(study_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
-    return path
+def save_study_config(study_id: str, payload: dict) -> str:
+    key = _study_config_key(study_id)
+    write_json_blob(key, payload)
+    return key
 
 
 def load_or_create_study_config(study_id: str, var_codes: Iterable[str]) -> dict:

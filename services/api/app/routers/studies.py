@@ -1,12 +1,17 @@
-﻿from pathlib import Path
-
 import re
 
+import duckdb
 from fastapi import APIRouter, HTTPException, Query
 
 from app.data.market_lens import resolve_classification
 from app.data.ingest_from_landing import ensure_raw_from_landing
-from app.data.warehouse import get_duckdb_connection, get_repo_root, load_parquet_as_view
+from app.data.warehouse import (
+    blob_exists,
+    list_blob_names,
+    list_study_ids,
+    load_parquet_as_view,
+    read_json_blob,
+)
 from app.models.schemas import PreviewVariable, Study, StudyPreviewResponse
 
 router = APIRouter()
@@ -20,92 +25,73 @@ def _slugify_landing(stem: str) -> str:
     return value.strip("_") or "study"
 
 
-def _classification_for_study(root: Path, study_id: str) -> dict[str, str | None]:
-    path = (
-        root
-        / "data"
-        / "warehouse"
-        / "taxonomy"
-        / "study_classification"
-        / f"study_id={study_id}.json"
-    )
-    if not path.exists():
-        return {
-            "sector": None,
-            "subsector": None,
-            "category": None,
-            "market_sector": None,
-            "market_subsector": None,
-            "market_category": None,
-            "market_source": None,
-        }
+def _classification_for_study(study_id: str) -> dict[str, str | None]:
+    empty = {
+        "sector": None,
+        "subsector": None,
+        "category": None,
+        "market_sector": None,
+        "market_subsector": None,
+        "market_category": None,
+        "market_source": None,
+    }
+    key = f"warehouse/taxonomy/study_classification/study_id={study_id}.json"
     try:
-        import json
-
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json_blob(key, default=None)
     except Exception:
-        return {
-            "sector": None,
-            "subsector": None,
-            "category": None,
-            "market_sector": None,
-            "market_subsector": None,
-            "market_category": None,
-            "market_source": None,
-        }
-    return resolve_classification(payload, root=root)
+        return empty
+    if payload is None:
+        return empty
+    try:
+        return resolve_classification(payload)
+    except Exception:
+        return empty
 
 
 @router.get("/")
 def list_studies(sync: bool = Query(False, description="Sync from landing")):
-    root = get_repo_root()
-    base_data_dir = root / "data"
-
     sync_summary = None
     if sync:
-        sync_summary = ensure_raw_from_landing(base_data_dir)
+        sync_summary = ensure_raw_from_landing()
 
-    landing_dir = base_data_dir / "landing"
-    landing_files = (
-        {_slugify_landing(path.stem): path.name for path in landing_dir.glob("*.sav")}
-        if landing_dir.exists()
-        else {}
-    )
+    landing_files = {
+        _slugify_landing(name[: -len(".sav")]): name
+        for name in list_blob_names("landing")
+        if name.lower().endswith(".sav")
+    }
 
     studies: list[Study] = []
     seen: set[str] = set()
 
-    raw_root = root / "data" / "warehouse" / "raw"
-    if raw_root.exists():
-        for path in sorted(raw_root.glob("study_id=*")):
-            study_id = path.name.replace("study_id=", "", 1)
-            curated_path = root / "data" / "warehouse" / "curated" / f"study_id={study_id}" / "fact_journey.parquet"
-            classification = _classification_for_study(root, study_id)
-            if study_id and study_id not in seen:
-                studies.append(
-                    Study(
-                        id=study_id,
-                        name=study_id,
-                        source="raw",
-                        raw_ready=True,
-                        curated_ready=curated_path.exists(),
-                        landing_file=landing_files.get(study_id),
-                        status="ready",
-                        sector=classification["sector"],
-                        subsector=classification["subsector"],
-                        category=classification["category"],
-                        market_sector=classification["market_sector"],
-                        market_subsector=classification["market_subsector"],
-                        market_category=classification["market_category"],
-                        market_source=classification["market_source"],
-                    )
+    study_ids = list_study_ids("warehouse/raw", "raw_responses.parquet")
+    for study_id in study_ids:
+        curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+        classification = _classification_for_study(study_id)
+        if study_id and study_id not in seen:
+            studies.append(
+                Study(
+                    id=study_id,
+                    name=study_id,
+                    source="raw",
+                    raw_ready=True,
+                    curated_ready=blob_exists(curated_key),
+                    landing_file=landing_files.get(study_id),
+                    status="ready",
+                    sector=classification["sector"],
+                    subsector=classification["subsector"],
+                    category=classification["category"],
+                    market_sector=classification["market_sector"],
+                    market_subsector=classification["market_subsector"],
+                    market_category=classification["market_category"],
+                    market_source=classification["market_source"],
                 )
-                seen.add(study_id)
+            )
+            seen.add(study_id)
 
     for study_id, filename in landing_files.items():
         if study_id in seen:
             continue
-        classification = _classification_for_study(root, study_id)
+        classification = _classification_for_study(study_id)
         studies.append(
             Study(
                 id=study_id,
@@ -131,7 +117,7 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
             study_id = error.get("study_id")
             if not study_id:
                 continue
-            classification = _classification_for_study(root, study_id)
+            classification = _classification_for_study(study_id)
             studies.append(
                 Study(
                     id=study_id,
@@ -159,22 +145,21 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
 
 @router.get("/{study_id}/preview", response_model=StudyPreviewResponse)
 def study_preview(study_id: str) -> StudyPreviewResponse:
-    raw_root = get_repo_root() / "data" / "warehouse" / "raw"
-    study_dir = raw_root / f"study_id={study_id}"
-    responses_path = study_dir / "raw_responses.parquet"
-    variables_path = study_dir / "raw_variables.parquet"
+    study_dir = f"warehouse/raw/study_id={study_id}"
+    responses_key = f"{study_dir}/raw_responses.parquet"
+    variables_key = f"{study_dir}/raw_variables.parquet"
 
-    if not study_dir.exists() or not responses_path.exists():
+    if not blob_exists(responses_key):
         raise HTTPException(status_code=404, detail="Study not found in raw warehouse.")
 
-    conn = get_duckdb_connection()
-    load_parquet_as_view(conn, "responses", str(responses_path))
+    conn = duckdb.connect()
+    load_parquet_as_view(conn, "responses", responses_key)
     rows = int(conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0])
     variables = int(conn.execute("SELECT COUNT(DISTINCT var_code) FROM responses").fetchone()[0])
 
     variables_sample: list[PreviewVariable] = []
-    if variables_path.exists():
-        load_parquet_as_view(conn, "var_meta", str(variables_path))
+    if blob_exists(variables_key):
+        load_parquet_as_view(conn, "var_meta", variables_key)
         sample_rows = conn.execute(
             "SELECT var_code, question_text FROM var_meta LIMIT 50"
         ).fetchall()
@@ -189,7 +174,7 @@ def study_preview(study_id: str) -> StudyPreviewResponse:
 
     return StudyPreviewResponse(
         study_id=study_id,
-        raw_path=str(study_dir),
+        raw_path=study_dir,
         rows=rows,
         variables=variables,
         variables_sample=variables_sample,

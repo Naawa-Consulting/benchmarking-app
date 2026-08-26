@@ -1,58 +1,41 @@
 from __future__ import annotations
 
-import json
 import logging
-import re
-from pathlib import Path
 
-import pandas as pd
+import duckdb
 import pyreadstat
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.data.ingest_from_landing import find_landing_key
 from app.data.study_config import (
     load_or_create_study_config,
     load_study_config,
     save_study_config,
 )
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import blob_exists, download_to_tempfile, load_parquet_as_view, read_parquet_blob
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-def _raw_paths(study_id: str) -> tuple[Path, Path]:
-    base = get_repo_root() / "data" / "warehouse" / "raw" / f"study_id={study_id}"
-    return base / "raw_variables.parquet", base / "raw_responses.parquet"
-
-
-def _landing_sav_path(study_id: str) -> Path | None:
-    landing_dir = get_repo_root() / "data" / "landing"
-    for path in landing_dir.glob("*.sav"):
-        if _slugify(path.stem) == study_id:
-            return path
-    return None
-
-
-def _slugify(value: str) -> str:
-    normalized = value.strip().lower()
-    normalized = re.sub(r"\s+", "_", normalized)
-    normalized = re.sub(r"[^a-z0-9_]", "", normalized)
-    normalized = re.sub(r"_+", "_", normalized)
-    return normalized.strip("_") or "study"
+def _raw_keys(study_id: str) -> tuple[str, str]:
+    base = f"warehouse/raw/study_id={study_id}"
+    return f"{base}/raw_variables.parquet", f"{base}/raw_responses.parquet"
 
 
 @router.get("/study-config")
 def get_study_config(study_id: str = Query(..., description="Study id")) -> dict:
-    variables_path, _ = _raw_paths(study_id)
-    if variables_path.exists():
-        df = pd.read_parquet(variables_path, columns=["var_code"])
+    variables_key, _ = _raw_keys(study_id)
+    if blob_exists(variables_key):
+        df = read_parquet_blob(variables_key, columns=["var_code"])
         config = load_or_create_study_config(study_id, df["var_code"].tolist())
         return config
 
-    landing_path = _landing_sav_path(study_id)
-    if landing_path and landing_path.exists():
-        df, _ = pyreadstat.read_sav(landing_path)
+    landing_key = find_landing_key(study_id)
+    if landing_key:
+        with download_to_tempfile(landing_key, suffix=".sav") as tmp_path:
+            df, _ = pyreadstat.read_sav(tmp_path)
         config = load_or_create_study_config(study_id, df.columns)
         return config
 
@@ -72,11 +55,11 @@ async def save_study_config_endpoint(
     weight_var = payload.get("weight_var")
     source = payload.get("source", "manual")
 
-    variables_path, _ = _raw_paths(study_id)
-    if not variables_path.exists():
+    variables_key, _ = _raw_keys(study_id)
+    if not blob_exists(variables_key):
         raise HTTPException(status_code=404, detail="raw_variables.parquet not found for study.")
 
-    df = pd.read_parquet(variables_path, columns=["var_code"])
+    df = read_parquet_blob(variables_key, columns=["var_code"])
     valid_vars = set(df["var_code"].astype(str))
 
     if respondent_id_var != "__index__" and respondent_id_var not in valid_vars:
@@ -96,16 +79,16 @@ async def save_study_config_endpoint(
             "default": 1.0,
         },
     }
-    path = save_study_config(study_id, config)
-    logger.info("Saved study config: %s", path)
+    key = save_study_config(study_id, config)
+    logger.info("Saved study config: %s", key)
     return config
 
 
 @router.get("/study/variables")
 def list_study_variables(study_id: str = Query(..., description="Study id")) -> dict:
-    variables_path, _ = _raw_paths(study_id)
-    if variables_path.exists():
-        df = pd.read_parquet(variables_path)
+    variables_key, _ = _raw_keys(study_id)
+    if blob_exists(variables_key):
+        df = read_parquet_blob(variables_key)
         if "question_text" not in df.columns:
             df["question_text"] = None
         if "var_type" not in df.columns:
@@ -120,9 +103,10 @@ def list_study_variables(study_id: str = Query(..., description="Study id")) -> 
         ]
         return {"study_id": study_id, "variables": items}
 
-    landing_path = _landing_sav_path(study_id)
-    if landing_path and landing_path.exists():
-        df, meta = pyreadstat.read_sav(landing_path)
+    landing_key = find_landing_key(study_id)
+    if landing_key:
+        with download_to_tempfile(landing_key, suffix=".sav") as tmp_path:
+            df, meta = pyreadstat.read_sav(tmp_path)
         column_labels = list(getattr(meta, "column_labels", []))
         items = []
         for idx, var_code in enumerate(df.columns):
@@ -144,16 +128,12 @@ def base_preview(
     study_id: str = Query(..., description="Study id"),
     n: int = Query(5, ge=1, le=50, description="Rows to preview"),
 ) -> dict:
-    _, responses_path = _raw_paths(study_id)
-    if not responses_path.exists():
+    _, responses_key = _raw_keys(study_id)
+    if not blob_exists(responses_key):
         raise HTTPException(status_code=404, detail="raw_responses.parquet not found for study.")
 
-    import duckdb
-
     conn = duckdb.connect()
-    conn.execute(
-        f"CREATE OR REPLACE VIEW responses AS SELECT * FROM read_parquet('{responses_path}')"
-    )
+    load_parquet_as_view(conn, "responses", responses_key)
     rows = conn.execute(
         """
         SELECT respondent_id, weight

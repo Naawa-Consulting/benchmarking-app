@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import duckdb
 from fastapi import APIRouter, Query
 
-from app.data.demographics import load_demographics_config, normalize_demographics_config, respondents_path, value_labels_path
+from app.data.demographics import load_demographics_config, normalize_demographics_config, respondents_key, value_labels_key
 from app.data.market_lens import market_taxonomy_items_from_standard, resolve_classification
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import blob_exists, list_study_ids, load_parquet_as_view, read_json_blob
 
 router = APIRouter()
 
@@ -50,26 +47,14 @@ def _normalize_gender_label(value: object) -> str:
     return "Unknown"
 
 
-def _discover_curated_studies(root: Path) -> list[str]:
-    curated_root = root / "data" / "warehouse" / "curated"
-    discovered = []
-    if curated_root.exists():
-        for path in curated_root.glob("study_id=*"):
-            if (path / "fact_journey.parquet").exists():
-                discovered.append(path.name.replace("study_id=", "", 1))
-    return discovered
+def _discover_curated_studies() -> list[str]:
+    return list_study_ids("warehouse/curated", "fact_journey.parquet")
 
 
-def _classification_for_study(root: Path, study_id: str) -> dict[str, str | None]:
-    classification_path = (
-        root
-        / "data"
-        / "warehouse"
-        / "taxonomy"
-        / "study_classification"
-        / f"study_id={study_id}.json"
-    )
-    if not classification_path.exists():
+def _classification_for_study(study_id: str) -> dict[str, str | None]:
+    key = f"warehouse/taxonomy/study_classification/study_id={study_id}.json"
+    payload = read_json_blob(key, default=None)
+    if payload is None:
         return {
             "sector": None,
             "subsector": None,
@@ -79,22 +64,17 @@ def _classification_for_study(root: Path, study_id: str) -> dict[str, str | None
             "market_category": None,
             "market_source": None,
         }
-    try:
-        payload = json.loads(classification_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        payload = json.loads(classification_path.read_text(encoding="utf-8-sig"))
-    return resolve_classification(payload, root=root)
+    return resolve_classification(payload)
 
 
 @router.get("/filters/options/studies")
 def filter_study_options() -> dict:
-    root = get_repo_root()
-    study_ids = _discover_curated_studies(root)
+    study_ids = _discover_curated_studies()
     items = []
     for study_id in study_ids:
-        classification = _classification_for_study(root, study_id)
+        classification = _classification_for_study(study_id)
         config = normalize_demographics_config(load_demographics_config(study_id))
-        respondents_exists = respondents_path(study_id).exists()
+        respondents_exists = blob_exists(respondents_key(study_id))
         date_mode = (config.get("date") or {}).get("mode", "none")
         items.append(
             {
@@ -118,26 +98,16 @@ def filter_study_options() -> dict:
 def filter_taxonomy_options(view: str = Query("market", description="market|standard")) -> dict:
     normalized_view = view.lower().strip() if isinstance(view, str) else "market"
     if normalized_view == "market":
-        items = market_taxonomy_items_from_standard(get_repo_root())
+        items = market_taxonomy_items_from_standard()
         sectors = sorted({item.get("sector") for item in items if item.get("sector")})
         subsectors = sorted({item.get("subsector") for item in items if item.get("subsector")})
         categories = sorted({item.get("category") for item in items if item.get("category")})
         return {"items": items, "sectors": sectors, "subsectors": subsectors, "categories": categories}
 
-    root = get_repo_root()
-    taxonomy_path = (
-        root
-        / "data"
-        / "warehouse"
-        / "taxonomy"
-        / "sector_subsector_category_v1.json"
-    )
-    if not taxonomy_path.exists():
+    taxonomy_key = "warehouse/taxonomy/sector_subsector_category_v1.json"
+    payload = read_json_blob(taxonomy_key, default=None)
+    if payload is None:
         return {"items": [], "sectors": [], "subsectors": [], "categories": []}
-    try:
-        payload = json.loads(taxonomy_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        payload = json.loads(taxonomy_path.read_text(encoding="utf-8-sig"))
     items = payload.get("items", [])
     sectors = sorted({item.get("sector") for item in items if item.get("sector")})
     subsectors = sorted({item.get("subsector") for item in items if item.get("subsector")})
@@ -145,8 +115,8 @@ def filter_taxonomy_options(view: str = Query("market", description="market|stan
     return {"items": items, "sectors": sectors, "subsectors": subsectors, "categories": categories}
 
 
-def _parse_study_ids(raw: str | None, root: Path) -> list[str]:
-    discovered = _discover_curated_studies(root)
+def _parse_study_ids(raw: str | None) -> list[str]:
+    discovered = _discover_curated_studies()
     if not raw:
         return discovered
     requested = [item.strip() for item in raw.split(",") if item.strip()]
@@ -157,8 +127,7 @@ def _parse_study_ids(raw: str | None, root: Path) -> list[str]:
 def filter_demographic_options(
     study_ids: str | None = Query(None, description="Comma-separated study ids"),
 ) -> dict:
-    root = get_repo_root()
-    selected = _parse_study_ids(study_ids, root)
+    selected = _parse_study_ids(study_ids)
 
     gender_values: set[str] = set()
     nse_values: set[str] = set()
@@ -167,13 +136,13 @@ def filter_demographic_options(
     age_max = None
 
     for study_id in selected:
-        resp_path = respondents_path(study_id)
-        if not resp_path.exists():
+        resp_key = respondents_key(study_id)
+        if not blob_exists(resp_key):
             continue
         conn = duckdb.connect()
         try:
             config = normalize_demographics_config(load_demographics_config(study_id))
-            conn.execute(f"CREATE OR REPLACE VIEW respondents AS SELECT * FROM read_parquet('{resp_path}')")
+            load_parquet_as_view(conn, "respondents", resp_key)
 
             if config.get("age_var"):
                 row = conn.execute(
@@ -185,16 +154,14 @@ def filter_demographic_options(
                     if row[1] is not None:
                         age_max = row[1] if age_max is None else max(age_max, row[1])
 
-            labels_path = value_labels_path(study_id)
-            if not labels_path.exists():
+            labels_key = value_labels_key(study_id)
+            if not blob_exists(labels_key):
                 continue
-            conn.execute(f"CREATE OR REPLACE VIEW labels AS SELECT * FROM read_parquet('{labels_path}')")
+            load_parquet_as_view(conn, "labels", labels_key)
 
             respondent_columns = {
                 column[0]
-                for column in conn.execute(
-                    f"SELECT * FROM read_parquet('{resp_path}') LIMIT 0"
-                ).description
+                for column in conn.execute("SELECT * FROM respondents LIMIT 0").description
             }
 
             if "gender" in respondent_columns:
@@ -288,17 +255,16 @@ def filter_demographic_options(
 def filter_date_options(
     study_ids: str | None = Query(None, description="Comma-separated study ids"),
 ) -> dict:
-    root = get_repo_root()
-    selected = _parse_study_ids(study_ids, root)
+    selected = _parse_study_ids(study_ids)
     quarters: set[int] = set()
 
     for study_id in selected:
-        resp_path = respondents_path(study_id)
-        if not resp_path.exists():
+        resp_key = respondents_key(study_id)
+        if not blob_exists(resp_key):
             continue
         conn = duckdb.connect()
         try:
-            conn.execute(f"CREATE OR REPLACE VIEW respondents AS SELECT * FROM read_parquet('{resp_path}')")
+            load_parquet_as_view(conn, "respondents", resp_key)
             rows = conn.execute(
                 """
                 SELECT DISTINCT

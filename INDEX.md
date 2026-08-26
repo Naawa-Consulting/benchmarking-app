@@ -172,8 +172,9 @@ Todo el frontend pasa por aquí; nunca se llama a FastAPI o Supabase directo des
 | app/data/market_lens.py | Resolución de clasificación de mercado (sector/subsector/categoría) por estudio. |
 | app/data/demographics.py | Config y utilidades de dimensiones demográficas. |
 | app/data/study_config.py | Detección de columnas base (`detect_base_columns`) por estudio. |
-| app/data/warehouse.py | Acceso a DuckDB y resolución de la raíz del repo. |
+| app/data/warehouse.py | Helpers de acceso a datos (parquet/csv/json) respaldados por Supabase Storage — reemplazó el acceso a disco local + DuckDB en `data/warehouse.duckdb`. |
 | app/data/standardize.py | Placeholder — estandarización de esquemas cliente-específicos (no implementado aún). |
+| app/storage/blob.py | `SupabaseStorage` — cliente REST (vía `httpx`) para el bucket de Storage donde vive todo el pipeline (ingesta, raw/curated, mapping, reglas, config). |
 | app/storage/question_map.py | Persistencia del mapa de preguntas. |
 | tests/test_study_config.py | Tests unitarios (`unittest`) de `detect_base_columns`. |
 
@@ -183,6 +184,7 @@ Todo el frontend pasa por aquí; nunca se llama a FastAPI o Supabase directo des
 | run_api.ps1 | Levanta el venv + uvicorn del API (rutas hardcodeadas al disco del autor — ajustar `$ApiRoot`). |
 | run_web.ps1 | `npm install` + `npm run dev` (rutas hardcodeadas al disco del autor — ajustar `$WebRoot`). |
 | export_supabase_seed.py | Bootstrap: siembra tablas iniciales de Supabase desde outputs locales del API. |
+| export_storage_seed.py | Sube `data/landing` + `data/warehouse` (local, gitignored) al bucket de Supabase Storage — correr una sola vez antes de apuntar Render al proyecto real. |
 
 ## [supabase/sql/](supabase/sql/) — contrato y migraciones SQL
 Migraciones numeradas, aplicadas en orden en el SQL Editor de Supabase. `001_bbs_rpc_contract.sql`

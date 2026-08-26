@@ -4,13 +4,14 @@ import csv
 import io
 import logging
 import re
-from pathlib import Path
 from typing import Any
 
+import duckdb
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Response
 
-from app.data.warehouse import get_duckdb_connection, get_repo_root, load_parquet_as_view
+from app.data.warehouse import blob_exists, load_parquet_as_view, read_parquet_blob
+from app.storage.blob import StorageNotFoundError, get_storage
 from app.models.schemas import (
     MappingCandidate,
     MappingListResponse,
@@ -31,43 +32,42 @@ RULES: dict[str, str] = {
 }
 
 
-def _mapping_csv_path() -> Path:
-    return get_repo_root() / "data" / "warehouse" / "mapping" / "question_map_v0.csv"
+def _mapping_csv_key() -> str:
+    return "warehouse/mapping/question_map_v0.csv"
 
 
 def _load_mapping_rows() -> list[dict[str, str]]:
-    path = _mapping_csv_path()
-    if not path.exists():
+    try:
+        data = get_storage().read_bytes(_mapping_csv_key())
+    except StorageNotFoundError:
         return []
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        return [row for row in reader]
+    text = data.decode("utf-8")
+    reader = csv.DictReader(io.StringIO(text))
+    return [row for row in reader]
 
 
 def _write_mapping_rows(rows: list[dict[str, str]]) -> None:
-    path = _mapping_csv_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ["study_id", "var_code", "stage", "brand", "value_true_codes"]
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    get_storage().write_bytes(_mapping_csv_key(), buf.getvalue().encode("utf-8"), content_type="text/csv")
 
 
 def _variables_from_raw(study_id: str) -> pd.DataFrame:
-    raw_root = get_repo_root() / "data" / "warehouse" / "raw"
-    variables_path = raw_root / f"study_id={study_id}" / "raw_variables.parquet"
-    responses_path = raw_root / f"study_id={study_id}" / "raw_responses.parquet"
+    variables_key = f"warehouse/raw/study_id={study_id}/raw_variables.parquet"
+    responses_key = f"warehouse/raw/study_id={study_id}/raw_responses.parquet"
 
-    if variables_path.exists():
-        df = pd.read_parquet(variables_path)
+    if blob_exists(variables_key):
+        df = read_parquet_blob(variables_key)
         return df[["var_code", "question_text"]]
 
-    if not responses_path.exists():
+    if not blob_exists(responses_key):
         raise HTTPException(status_code=404, detail="Raw data not found for study.")
 
-    conn = get_duckdb_connection()
-    load_parquet_as_view(conn, "responses", str(responses_path))
+    conn = duckdb.connect()
+    load_parquet_as_view(conn, "responses", responses_key)
     rows = conn.execute("SELECT DISTINCT var_code FROM responses").fetchall()
     return pd.DataFrame(rows, columns=["var_code"])
 
@@ -170,5 +170,5 @@ def save_mapping(payload: MappingSaveRequest) -> MappingSaveResponse:
         study_id=payload.study_id,
         saved_rows=len(new_rows),
         total_rows=len(remaining) + len(new_rows),
-        path=str(_mapping_csv_path()),
+        path=_mapping_csv_key(),
     )

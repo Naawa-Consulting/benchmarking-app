@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 
 import duckdb
 import pandas as pd
@@ -13,7 +12,7 @@ from app.data.rule_engine import (
     load_rules,
     load_study_rule_scope,
 )
-from app.data.warehouse import get_repo_root
+from app.data.warehouse import blob_exists, load_parquet_as_view, read_parquet_blob
 from app.storage.question_map import load_question_map, save_question_map
 
 router = APIRouter()
@@ -213,25 +212,10 @@ def question_value_preview(
     mode: str = Query("labels", description="labels|samples"),
     n: int = Query(12, ge=1, le=50),
 ) -> dict:
-    root = get_repo_root()
-    labels_path = (
-        root
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_value_labels.parquet"
-    )
-    responses_path = (
-        root
-        / "data"
-        / "warehouse"
-        / "raw"
-        / f"study_id={study_id}"
-        / "raw_responses.parquet"
-    )
-    if mode == "labels" and labels_path.exists():
-        df = pd.read_parquet(labels_path)
+    labels_key = f"warehouse/raw/study_id={study_id}/raw_value_labels.parquet"
+    responses_key = f"warehouse/raw/study_id={study_id}/raw_responses.parquet"
+    if mode == "labels" and blob_exists(labels_key):
+        df = read_parquet_blob(labels_key)
         df = df[df["var_code"].astype(str) == str(var_code)]
         if not df.empty:
             items = [
@@ -240,11 +224,11 @@ def question_value_preview(
             ]
             return {"var_code": var_code, "kind": "labels", "items": items}
 
-    if not responses_path.exists():
+    if not blob_exists(responses_key):
         raise HTTPException(status_code=404, detail="raw_responses.parquet not found for study.")
 
     conn = duckdb.connect()
-    conn.execute(f"CREATE OR REPLACE VIEW responses AS SELECT * FROM read_parquet('{responses_path}')")
+    load_parquet_as_view(conn, "responses", responses_key)
     rows = conn.execute(
         """
         SELECT DISTINCT value
