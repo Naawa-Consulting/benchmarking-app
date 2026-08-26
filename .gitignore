@@ -26,3 +26,7 @@ supabase/sql/001_bbs_rpc_contract.sql
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent control files (local-only, not shared)
+BITACORA.md
+CLAUDE.md

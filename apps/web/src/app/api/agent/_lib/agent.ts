@@ -55,9 +55,60 @@ type AgentChartSpec = {
   y_label?: string;
 };
 
+const DEFAULT_AGENT_MAX_TOOL_ROWS = 45;
+const DEFAULT_AGENT_MAX_TRACKING_ROWS = 12;
+const DEFAULT_AGENT_MAX_OUTPUT_TOKENS = 900;
+const AGENT_ROW_KEYS = [
+  "brand",
+  "brand_name",
+  "entity",
+  "name",
+  "label",
+  "market_sector",
+  "market_subsector",
+  "market_category",
+  "sector",
+  "subsector",
+  "category",
+  "year",
+  "period",
+  "brand_awareness",
+  "brand_consideration",
+  "brand_purchase",
+  "brand_satisfaction",
+  "brand_recommendation",
+  "csat",
+  "nps",
+  "journey_index",
+  "recall",
+  "purchase",
+  "consideration",
+  "sample_size",
+  "interviews",
+  "respondents",
+];
+
 const DEFAULT_AGENT_GUIDE = `You are BBS Agent. Use only BBS data and respect user scope/permissions. Do not use external sources. Default to concise executive text with finding, implication, recommendation. Use chart/table only if explicitly requested. If out of scope, return a polite BBS-only message.`;
 let agentGuideCache: string | null = null;
 type AgentResponseLanguage = "es" | "en";
+
+function envInt(name: string, fallback: number, min: number, max: number) {
+  const value = Number.parseInt((process.env[name] || "").trim(), 10);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+function compactAgentRow(row: unknown) {
+  if (!row || typeof row !== "object") return row;
+  const raw = row as Record<string, unknown>;
+  const compact: Record<string, unknown> = {};
+  for (const key of AGENT_ROW_KEYS) {
+    const value = raw[key];
+    if (value === null || value === undefined || value === "") continue;
+    compact[key] = typeof value === "number" ? Number(value.toFixed(4)) : value;
+  }
+  return Object.keys(compact).length ? compact : row;
+}
 
 function pickLocalizedText(language: AgentResponseLanguage, es: string, en: string) {
   return language === "es" ? es : en;
@@ -168,6 +219,7 @@ async function callOpenAIJson(messages: Array<{ role: "system" | "user" | "assis
     throw new Error("Missing OPENAI_API_KEY.");
   }
   const model = (process.env.BBS_AGENT_MODEL || "gpt-4.1-mini").trim();
+  const maxTokens = envInt("BBS_AGENT_MAX_OUTPUT_TOKENS", DEFAULT_AGENT_MAX_OUTPUT_TOKENS, 300, 2000);
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -177,6 +229,7 @@ async function callOpenAIJson(messages: Array<{ role: "system" | "user" | "assis
     body: JSON.stringify({
       model,
       temperature: 0.1,
+      max_tokens: maxTokens,
       response_format: { type: "json_object" },
       messages,
     }),
@@ -837,6 +890,8 @@ function filterRowsByBrandIntent(rows: unknown[], userMessage: string) {
 
 function summarizeToolData(tool: string, data: unknown, userMessage: string) {
   if (!data || typeof data !== "object") return { type: tool, rows: [] as unknown[] };
+  const maxToolRows = envInt("BBS_AGENT_MAX_TOOL_ROWS", DEFAULT_AGENT_MAX_TOOL_ROWS, 10, 120);
+  const maxTrackingRows = envInt("BBS_AGENT_MAX_TRACKING_ROWS", DEFAULT_AGENT_MAX_TRACKING_ROWS, 5, 30);
   if (tool === "tracking_series") {
     const payload = Array.isArray(data) ? data[0] : data;
     const series = (payload as { bbs_tracking_series?: Record<string, unknown> })?.bbs_tracking_series;
@@ -849,7 +904,7 @@ function summarizeToolData(tool: string, data: unknown, userMessage: string) {
       periods: Array.isArray((series as { periods?: unknown[] })?.periods)
         ? (series as { periods?: unknown[] }).periods
         : [],
-      rows: rows.slice(0, 20),
+      rows: rows.slice(0, maxTrackingRows).map(compactAgentRow),
     };
   }
   const rows = Array.isArray((data as { rows?: unknown[] }).rows) ? ((data as { rows?: unknown[] }).rows as unknown[]) : [];
@@ -857,7 +912,7 @@ function summarizeToolData(tool: string, data: unknown, userMessage: string) {
   const effectiveRows = filteredRows.length > 0 ? filteredRows : rows;
   return {
     type: tool,
-    rows: effectiveRows.slice(0, 120),
+    rows: effectiveRows.slice(0, maxToolRows).map(compactAgentRow),
   };
 }
 

@@ -7,6 +7,34 @@ Monorepo for the BBS product with three core analytics experiences:
 
 Plus Admin tools for data ingestion, validation, taxonomy, and rules.
 
+## Estado actual
+_Última actualización: 2026-08-25_
+
+- Vercel + Supabase deployment mode is live in read-only beta alongside the legacy FastAPI backend
+  (`BBS_DATA_SOURCE` switches between them; see "Vercel + Supabase Deployment Mode" below).
+- Most recent focus has been hardening the Agent module: `AGENTE.md` as the single behavior source,
+  es/en response-language enforcement, and access control (`BBS_AGENT_OWNER_ONLY`).
+- In progress, not yet committed: trimming/compacting the row payloads sent to the Agent's LLM calls
+  and making row/token limits configurable via env vars, to control cost/latency.
+- The P0–P2 optimization backlog further down this document (shared aggregation service, ScopeBar
+  brand-option cost, tracking query consolidation, etc.) is still open — treat it as the current
+  known-gaps list, not resolved history.
+- See [BITACORA.md](BITACORA.md) for the chronological work log and [INDEX.md](INDEX.md) for a
+  file-by-file map of the repo.
+
+## Permisos y restricciones del agente
+
+- `data/` is a real local warehouse (parquet/DuckDB + source `.sav` files), not disposable fixtures —
+  don't bulk-delete or bulk-rewrite it without confirming with the user first.
+- `supabase/sql/*.sql` migrations are applied manually in the Supabase SQL Editor; there is no
+  migration runner in this repo. Adding a new numbered file here does not mean it has been applied —
+  don't assume schema changes are live without checking.
+- `.env*` files are git-ignored by design (see `.gitignore`) — never commit them or paste their
+  contents into files that do get committed.
+- Changes to `AGENTE.md`, `apps/web/src/middleware.ts`, or `apps/web/src/app/api/_lib/authz.ts`
+  affect real production access control (agent behavior, auth gating, role/scope permissions) —
+  treat as sensitive and flag them clearly when made.
+
 ## Stack
 - Frontend: Next.js App Router + TypeScript + Tailwind + ECharts + Radix Popover
 - Backend: FastAPI + DuckDB + Parquet

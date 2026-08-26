@@ -1,5 +1,5 @@
 ﻿param(
-  [string]$ApiRoot = "C:\Users\sebmo\OneDrive - Awsaan Consulting SA de CV\Naawa\2026\nw\Product\benchmarking-app\services\api"
+  [string]$ApiRoot = "C:\Users\sebmo\OneDrive - Awsaan Consulting SA de CV\Naawa\product\bbs\services\api"
 )
 
 Set-Location $ApiRoot
