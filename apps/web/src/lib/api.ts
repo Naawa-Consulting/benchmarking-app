@@ -20,8 +20,13 @@ function useNextApiProxy(path: string) {
 
 function buildUrl(path: string) {
   if (isAbsoluteUrl(path)) return path;
-  const base = useNextApiProxy(path) ? normalizeBase(NEXT_API_BASE_URL) : normalizeBase(LEGACY_API_BASE_URL);
-  return `${base}${path}`;
+  if (useNextApiProxy(path)) return `${normalizeBase(NEXT_API_BASE_URL)}${path}`;
+  // Everything else (mapping, rules, study-config, question-map, studies, pipeline,
+  // ingest, demographics, taxonomy) goes through the Next.js gateway (/api/[...path]),
+  // which forwards to FastAPI with the internal API key attached server-side. Calling
+  // FastAPI directly from the browser would require exposing that key client-side,
+  // defeating its purpose.
+  return `/api${path}`;
 }
 
 export type ApiResult<T = unknown> = {
@@ -259,7 +264,7 @@ export function buildJourneyMartDetailed(studyId: string) {
 }
 
 export function getMappingTemplateUrl(studyId: string) {
-  return `${normalizeBase(LEGACY_API_BASE_URL)}/mapping/template?study_id=${encodeURIComponent(studyId)}`;
+  return `/api/mapping/template?study_id=${encodeURIComponent(studyId)}`;
 }
 
 export function getRulesDetailed() {

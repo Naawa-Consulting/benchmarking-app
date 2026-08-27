@@ -54,6 +54,16 @@ export async function forwardLegacy(
     body,
     cache: "no-store",
   });
+  const responseContentType = response.headers.get("content-type") || "";
+  if (!responseContentType.includes("application/json")) {
+    // Non-JSON responses (e.g. the mapping CSV template download) must pass through
+    // as-is — wrapping them in NextResponse.json would corrupt the file.
+    const buffer = await response.arrayBuffer();
+    return new NextResponse(buffer, {
+      status: response.status,
+      headers: { "content-type": responseContentType || "application/octet-stream" },
+    });
+  }
   const data = await readJsonSafe(response);
   return NextResponse.json(data, { status: response.status });
 }
