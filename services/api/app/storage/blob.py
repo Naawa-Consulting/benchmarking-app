@@ -39,7 +39,10 @@ class SupabaseStorage:
     def write_bytes(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         headers = {**self._headers, "Content-Type": content_type, "x-upsert": "true"}
         resp = httpx.post(self._object_url(key), headers=headers, content=data, timeout=120.0)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Storage write failed ({resp.status_code}) for key={key!r} size={len(data)}: {resp.text}"
+            )
 
     def delete(self, key: str) -> None:
         resp = httpx.delete(self._object_url(key), headers=self._headers, timeout=30.0)
