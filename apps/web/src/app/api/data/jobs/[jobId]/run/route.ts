@@ -169,7 +169,10 @@ export async function POST(
       )}&sync_raw=1&force=1`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(process.env.INTERNAL_API_KEY ? { "x-internal-api-key": process.env.INTERNAL_API_KEY } : {}),
+        },
         cache: "no-store",
       }
     );
@@ -184,7 +187,10 @@ export async function POST(
       `${legacyBase}/pipeline/journey/status?study_id=${encodeURIComponent(studyId)}`,
       {
         method: "GET",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(process.env.INTERNAL_API_KEY ? { "x-internal-api-key": process.env.INTERNAL_API_KEY } : {}),
+        },
         cache: "no-store",
       }
     );

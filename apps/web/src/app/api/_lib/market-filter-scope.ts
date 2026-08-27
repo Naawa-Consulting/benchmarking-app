@@ -80,7 +80,10 @@ async function fetchLegacyStudies(): Promise<StudyCatalogItem[]> {
     process.env.NEXT_PUBLIC_API_BASE_URL ||
     "http://localhost:8000"
   ).replace(/\/+$/, "");
-  const response = await fetch(`${base}/filters/options/studies`, { cache: "no-store" });
+  const response = await fetch(`${base}/filters/options/studies`, {
+    cache: "no-store",
+    headers: process.env.INTERNAL_API_KEY ? { "x-internal-api-key": process.env.INTERNAL_API_KEY } : undefined,
+  });
   if (!response.ok) return [];
   const payload = (await response.json().catch(() => ({}))) as { items?: Array<Record<string, unknown>> };
   const items = Array.isArray(payload.items) ? payload.items : [];

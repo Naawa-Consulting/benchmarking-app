@@ -84,7 +84,10 @@ export async function POST(
     `${legacyBase}/ingest/study/delete?study_id=${encodeURIComponent(studyId)}`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(process.env.INTERNAL_API_KEY ? { "x-internal-api-key": process.env.INTERNAL_API_KEY } : {}),
+      },
       cache: "no-store",
     }
   );

@@ -68,6 +68,7 @@ export async function POST(request: NextRequest) {
     `${legacyBase}/ingest/upload?study_id=${encodeURIComponent(studyId)}`,
     {
       method: "POST",
+      headers: process.env.INTERNAL_API_KEY ? { "x-internal-api-key": process.env.INTERNAL_API_KEY } : undefined,
       body: form,
       cache: "no-store",
     }

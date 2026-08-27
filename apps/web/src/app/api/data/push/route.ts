@@ -84,7 +84,10 @@ async function readJsonSafe(response: Response) {
 
 async function fetchLegacyJson(pathWithQuery: string) {
   const legacyBase = getLegacyApiBaseUrl();
-  const response = await fetch(`${legacyBase}${pathWithQuery}`, { cache: "no-store" });
+  const response = await fetch(`${legacyBase}${pathWithQuery}`, {
+    cache: "no-store",
+    headers: process.env.INTERNAL_API_KEY ? { "x-internal-api-key": process.env.INTERNAL_API_KEY } : undefined,
+  });
   const data = await readJsonSafe(response);
   if (!response.ok) {
     throw new Error(`Legacy request failed ${pathWithQuery}: ${JSON.stringify(data)}`);

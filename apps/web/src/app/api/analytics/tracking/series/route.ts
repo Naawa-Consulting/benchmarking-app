@@ -29,13 +29,17 @@ async function tryLegacyTrackingSeries(
       const resp = await fetch(`${base}/analytics/tracking/series${qs ? `?${qs}` : ""}`, {
         method: "GET",
         cache: "no-store",
+        headers: process.env.INTERNAL_API_KEY ? { "x-internal-api-key": process.env.INTERNAL_API_KEY } : undefined,
       });
       if (!resp.ok) return null;
       return await resp.json().catch(() => null);
     }
     const resp = await fetch(`${base}/analytics/tracking/series`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(process.env.INTERNAL_API_KEY ? { "x-internal-api-key": process.env.INTERNAL_API_KEY } : {}),
+      },
       body: JSON.stringify(payload),
       cache: "no-store",
     });
