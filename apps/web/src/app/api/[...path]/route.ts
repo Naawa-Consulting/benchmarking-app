@@ -8,13 +8,18 @@ import { forwardLegacy, getDataSource } from "../_lib/backend";
 // tables Journey/Network/Tracking read from.
 const ALWAYS_LEGACY_PREFIXES = [
   "/mapping",
+  "/marts",
   "/rules",
-  "/study-config",
+  "/questions",
   "/question-map",
+  "/study-config",
   "/studies",
   "/study/",
   "/ingest",
   "/pipeline",
+  "/taxonomy",
+  "/demographics",
+  "/health",
 ];
 
 function resolvePath(request: NextRequest, path: string[]) {
