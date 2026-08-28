@@ -230,6 +230,7 @@ export default function RulesStudioPage() {
   const [questionMapSearch, setQuestionMapSearch] = useState("");
   const [questionMapUnmappedOnly, setQuestionMapUnmappedOnly] = useState(false);
   const [questionMapSelection, setQuestionMapSelection] = useState<Set<string>>(new Set());
+  const [questionMapBusy, setQuestionMapBusy] = useState(false);
   const [bulkStage, setBulkStage] = useState("");
   const [bulkBrand, setBulkBrand] = useState("");
   const [bulkTouchpoint, setBulkTouchpoint] = useState("");
@@ -797,30 +798,40 @@ export default function RulesStudioPage() {
   };
 
   const handleBulkUpdate = async (mode: { stage?: string; brand?: string; touchpoint?: string }, patch: Record<string, unknown>) => {
-    if (!selectedStudyId || questionMapSelection.size === 0) return;
-    const payload = {
-      var_codes: Array.from(questionMapSelection),
-      patch,
-      mode,
-      updated_by: "admin-ui",
-    };
-    const result = await bulkUpdateQuestionMapDetailed(selectedStudyId, payload);
-    setLastResponse(result);
-    if (result.ok) {
-      await refreshQuestionMap();
-      setQuestionMapSelection(new Set());
+    if (!selectedStudyId || questionMapSelection.size === 0 || questionMapBusy) return;
+    setQuestionMapBusy(true);
+    try {
+      const payload = {
+        var_codes: Array.from(questionMapSelection),
+        patch,
+        mode,
+        updated_by: "admin-ui",
+      };
+      const result = await bulkUpdateQuestionMapDetailed(selectedStudyId, payload);
+      setLastResponse(result);
+      if (result.ok) {
+        await refreshQuestionMap();
+        setQuestionMapSelection(new Set());
+      }
+    } finally {
+      setQuestionMapBusy(false);
     }
   };
 
   const handleApplySuggestions = async () => {
-    if (!selectedStudyId) return;
-    const result = await applyQuestionMapSuggestionsDetailed(selectedStudyId, {
-      targets: ["stage", "brand", "touchpoint"],
-      only_empty: true,
-    });
-    setLastResponse(result);
-    if (result.ok) {
-      await refreshQuestionMap();
+    if (!selectedStudyId || questionMapBusy) return;
+    setQuestionMapBusy(true);
+    try {
+      const result = await applyQuestionMapSuggestionsDetailed(selectedStudyId, {
+        targets: ["stage", "brand", "touchpoint"],
+        only_empty: true,
+      });
+      setLastResponse(result);
+      if (result.ok) {
+        await refreshQuestionMap();
+      }
+    } finally {
+      setQuestionMapBusy(false);
     }
   };
 
@@ -2375,12 +2386,12 @@ export default function RulesStudioPage() {
                     </p>
                   </div>
                   <button
-                    className="rounded-full bg-emerald-600 px-4 py-2 text-xs font-medium text-white"
+                    className="rounded-full bg-emerald-600 px-4 py-2 text-xs font-medium text-white disabled:opacity-50"
                     onClick={handleApplySuggestions}
                     type="button"
-                    disabled={!canMutate}
+                    disabled={!canMutate || questionMapBusy}
                   >
-                    Apply suggestions (fill blanks)
+                    {questionMapBusy ? "Saving..." : "Apply suggestions (fill blanks)"}
                   </button>
                 </div>
 
@@ -2400,6 +2411,7 @@ export default function RulesStudioPage() {
                     Unmapped only
                   </label>
                   <span className="text-xs text-slate">Status: {questionMapState}</span>
+                  {questionMapBusy && <span className="text-xs font-medium text-amber-600">Saving…</span>}
                 </div>
 
                 <div className="mt-4 flex flex-wrap gap-3 rounded-2xl border border-ink/10 bg-white p-3 text-xs">
@@ -2425,7 +2437,7 @@ export default function RulesStudioPage() {
                         )
                       }
                       type="button"
-                      disabled={!canMutate}
+                      disabled={!canMutate || questionMapBusy}
                     >
                       Apply Stage
                     </button>
@@ -2433,7 +2445,7 @@ export default function RulesStudioPage() {
                       className="rounded-lg border border-ink/10 px-2 py-1"
                       onClick={() => handleBulkUpdate({ stage: "clear" }, { stage: null })}
                       type="button"
-                      disabled={!canMutate}
+                      disabled={!canMutate || questionMapBusy}
                     >
                       Clear Stage
                     </button>
@@ -2454,7 +2466,7 @@ export default function RulesStudioPage() {
                         )
                       }
                       type="button"
-                      disabled={!canMutate}
+                      disabled={!canMutate || questionMapBusy}
                     >
                       Apply Brand
                     </button>
@@ -2462,7 +2474,7 @@ export default function RulesStudioPage() {
                       className="rounded-lg border border-ink/10 px-2 py-1"
                       onClick={() => handleBulkUpdate({ brand: "clear" }, { brand_value: null })}
                       type="button"
-                      disabled={!canMutate}
+                      disabled={!canMutate || questionMapBusy}
                     >
                       Clear Brand
                     </button>
@@ -2483,7 +2495,7 @@ export default function RulesStudioPage() {
                         )
                       }
                       type="button"
-                      disabled={!canMutate}
+                      disabled={!canMutate || questionMapBusy}
                     >
                       Apply Touchpoint
                     </button>
@@ -2493,7 +2505,7 @@ export default function RulesStudioPage() {
                         handleBulkUpdate({ touchpoint: "clear" }, { touchpoint_value: null })
                       }
                       type="button"
-                      disabled={!canMutate}
+                      disabled={!canMutate || questionMapBusy}
                     >
                       Clear Touchpoint
                     </button>
