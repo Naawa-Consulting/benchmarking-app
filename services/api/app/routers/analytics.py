@@ -187,17 +187,14 @@ def _build_consideration_rate_model() -> dict:
             buckets[level_key] = bucket
         return bucket
 
-    for study_id in study_ids:
+    def _load_study(study_id: str) -> tuple[str, dict, list[dict]] | None:
         year = _study_year_from_id(study_id)
         if not _is_training_year_valid(year):
-            continue
+            return None
         classification = _classification_for_study(study_id)
-        market_sector = _as_non_empty_text(classification.get("market_sector"))
-        market_subsector = _as_non_empty_text(classification.get("market_subsector"))
         market_category = _normalize_market_category(classification.get("market_category"))
         if _normalize_for_match(market_category) in CONSIDERATION_EXCLUDED_MARKET_CATEGORIES:
-            continue
-
+            return None
         rows = _compute_table_rows_internal(
             study_id=study_id,
             respondent_cte=None,
@@ -207,6 +204,22 @@ def _build_consideration_rate_model() -> dict:
             apply_satisfaction_imputation=False,
             apply_csat_imputation=False,
         )
+        return study_id, classification, rows
+
+    # Each study load is dominated by Storage round-trips (classification + the
+    # full curated parquet), not CPU — loading concurrently and aggregating into
+    # `buckets` afterward (sequentially) avoids needing locks around it.
+    loaded: list[tuple[str, dict, list[dict]]] = []
+    if study_ids:
+        with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+            for result in executor.map(_load_study, study_ids):
+                if result is not None:
+                    loaded.append(result)
+
+    for study_id, classification, rows in loaded:
+        market_sector = _as_non_empty_text(classification.get("market_sector"))
+        market_subsector = _as_non_empty_text(classification.get("market_subsector"))
+        market_category = _normalize_market_category(classification.get("market_category"))
         for row in rows:
             awareness = row.get("brand_awareness")
             consideration = row.get("brand_consideration")
@@ -296,17 +309,14 @@ def _build_satisfaction_rate_model() -> dict:
             buckets[level_key] = bucket
         return bucket
 
-    for study_id in study_ids:
+    def _load_study(study_id: str) -> tuple[str, dict, list[dict]] | None:
         year = _study_year_from_id(study_id)
         if not _is_training_year_valid(year):
-            continue
+            return None
         classification = _classification_for_study(study_id)
-        market_sector = _as_non_empty_text(classification.get("market_sector"))
-        market_subsector = _as_non_empty_text(classification.get("market_subsector"))
         market_category = _normalize_market_category(classification.get("market_category"))
         if _normalize_for_match(market_category) in CONSIDERATION_EXCLUDED_MARKET_CATEGORIES:
-            continue
-
+            return None
         rows = _compute_table_rows_internal(
             study_id=study_id,
             respondent_cte=None,
@@ -316,6 +326,19 @@ def _build_satisfaction_rate_model() -> dict:
             apply_satisfaction_imputation=False,
             apply_csat_imputation=False,
         )
+        return study_id, classification, rows
+
+    loaded: list[tuple[str, dict, list[dict]]] = []
+    if study_ids:
+        with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+            for result in executor.map(_load_study, study_ids):
+                if result is not None:
+                    loaded.append(result)
+
+    for study_id, classification, rows in loaded:
+        market_sector = _as_non_empty_text(classification.get("market_sector"))
+        market_subsector = _as_non_empty_text(classification.get("market_subsector"))
+        market_category = _normalize_market_category(classification.get("market_category"))
         for row in rows:
             purchase = row.get("brand_purchase")
             recommendation = row.get("brand_recommendation")
@@ -409,17 +432,14 @@ def _build_csat_gap_model() -> dict:
             buckets[level_key] = bucket
         return bucket
 
-    for study_id in study_ids:
+    def _load_study(study_id: str) -> tuple[str, dict, list[dict]] | None:
         year = _study_year_from_id(study_id)
         if not _is_training_year_valid(year):
-            continue
+            return None
         classification = _classification_for_study(study_id)
-        market_sector = _as_non_empty_text(classification.get("market_sector"))
-        market_subsector = _as_non_empty_text(classification.get("market_subsector"))
         market_category = _normalize_market_category(classification.get("market_category"))
         if _normalize_for_match(market_category) in CONSIDERATION_EXCLUDED_MARKET_CATEGORIES:
-            continue
-
+            return None
         rows = _compute_table_rows_internal(
             study_id=study_id,
             respondent_cte=None,
@@ -429,6 +449,19 @@ def _build_csat_gap_model() -> dict:
             apply_satisfaction_imputation=False,
             apply_csat_imputation=False,
         )
+        return study_id, classification, rows
+
+    loaded: list[tuple[str, dict, list[dict]]] = []
+    if study_ids:
+        with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+            for result in executor.map(_load_study, study_ids):
+                if result is not None:
+                    loaded.append(result)
+
+    for study_id, classification, rows in loaded:
+        market_sector = _as_non_empty_text(classification.get("market_sector"))
+        market_subsector = _as_non_empty_text(classification.get("market_subsector"))
+        market_category = _normalize_market_category(classification.get("market_category"))
         for row in rows:
             satisfaction = row.get("brand_satisfaction")
             csat = row.get("csat")
