@@ -211,7 +211,7 @@ def _build_consideration_rate_model() -> dict:
     # `buckets` afterward (sequentially) avoids needing locks around it.
     loaded: list[tuple[str, dict, list[dict]]] = []
     if study_ids:
-        with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+        with ThreadPoolExecutor(max_workers=min(4, len(study_ids))) as executor:
             for result in executor.map(_load_study, study_ids):
                 if result is not None:
                     loaded.append(result)
@@ -330,7 +330,7 @@ def _build_satisfaction_rate_model() -> dict:
 
     loaded: list[tuple[str, dict, list[dict]]] = []
     if study_ids:
-        with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+        with ThreadPoolExecutor(max_workers=min(4, len(study_ids))) as executor:
             for result in executor.map(_load_study, study_ids):
                 if result is not None:
                     loaded.append(result)
@@ -453,7 +453,7 @@ def _build_csat_gap_model() -> dict:
 
     loaded: list[tuple[str, dict, list[dict]]] = []
     if study_ids:
-        with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+        with ThreadPoolExecutor(max_workers=min(4, len(study_ids))) as executor:
             for result in executor.map(_load_study, study_ids):
                 if result is not None:
                     loaded.append(result)
@@ -1655,7 +1655,7 @@ def _collect_journey_rows(
         # (classification + curated parquet reads), not CPU — running them
         # concurrently on threads cuts wall-clock time roughly by the pool size
         # instead of paying per-study latency sequentially.
-        with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+        with ThreadPoolExecutor(max_workers=min(4, len(study_ids))) as executor:
             for result in executor.map(_process, study_ids):
                 if result is None:
                     continue
@@ -3413,7 +3413,7 @@ def _touchpoints_table_multi_filtered(
         ]
 
     rows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+    with ThreadPoolExecutor(max_workers=min(4, len(study_ids))) as executor:
         for built_rows in executor.map(_process, study_ids):
             rows.extend(built_rows)
 

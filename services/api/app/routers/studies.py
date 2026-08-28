@@ -75,7 +75,7 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
     # latency sequentially across dozens of studies.
     lookups: dict[str, tuple[dict[str, str | None], bool]] = {}
     if study_ids:
-        with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+        with ThreadPoolExecutor(max_workers=min(4, len(study_ids))) as executor:
             for study_id, classification, curated_ready in executor.map(_lookup, study_ids):
                 lookups[study_id] = (classification, curated_ready)
 
