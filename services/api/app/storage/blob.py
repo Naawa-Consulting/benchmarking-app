@@ -40,12 +40,22 @@ class SupabaseStorage:
             "Authorization": f"Bearer {service_role_key}",
             "apikey": service_role_key,
         }
+        # A bare `httpx.get`/`httpx.post` call opens a brand-new connection (full TCP +
+        # TLS handshake) every time. This workload makes hundreds of calls to the same
+        # host per request (classification + curated parquet per study, times dozens of
+        # studies) from a thread pool — reusing one pooled, keep-alive client cuts that
+        # handshake cost out entirely and matters a lot on a CPU-throttled free tier.
+        # httpx.Client is documented as thread-safe for concurrent use.
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(120.0),
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=32),
+        )
 
     def _object_url(self, key: str) -> str:
         return f"{self._base}/storage/v1/object/{self._bucket}/{key}"
 
     def read_bytes(self, key: str) -> bytes:
-        resp = httpx.get(self._object_url(key), headers=self._headers, timeout=60.0)
+        resp = self._client.get(self._object_url(key), headers=self._headers)
         if resp.status_code == 404 or _is_not_found_body(resp):
             raise StorageNotFoundError(key)
         resp.raise_for_status()
@@ -53,24 +63,23 @@ class SupabaseStorage:
 
     def write_bytes(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         headers = {**self._headers, "Content-Type": content_type, "x-upsert": "true"}
-        resp = httpx.post(self._object_url(key), headers=headers, content=data, timeout=120.0)
+        resp = self._client.post(self._object_url(key), headers=headers, content=data)
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"Storage write failed ({resp.status_code}) for key={key!r} size={len(data)}: {resp.text}"
             )
 
     def delete(self, key: str) -> None:
-        resp = httpx.delete(self._object_url(key), headers=self._headers, timeout=30.0)
+        resp = self._client.delete(self._object_url(key), headers=self._headers)
         if resp.status_code not in (200, 204, 404):
             resp.raise_for_status()
 
     def stat(self, key: str) -> dict | None:
         parent, _, name = key.rpartition("/")
-        resp = httpx.post(
+        resp = self._client.post(
             f"{self._base}/storage/v1/object/list/{self._bucket}",
             headers={**self._headers, "Content-Type": "application/json"},
             json={"prefix": parent, "search": name},
-            timeout=30.0,
         )
         resp.raise_for_status()
         for item in resp.json():
@@ -88,21 +97,19 @@ class SupabaseStorage:
         keys — callers that need full keys should join them back with the prefix.
         """
         normalized_prefix = prefix.rstrip("/")
-        resp = httpx.post(
+        resp = self._client.post(
             f"{self._base}/storage/v1/object/list/{self._bucket}",
             headers={**self._headers, "Content-Type": "application/json"},
             json={"prefix": normalized_prefix, "limit": limit},
-            timeout=30.0,
         )
         resp.raise_for_status()
         return [item["name"] for item in resp.json() if item.get("name")]
 
     def move(self, src_key: str, dst_key: str) -> None:
-        resp = httpx.post(
+        resp = self._client.post(
             f"{self._base}/storage/v1/object/move",
             headers={**self._headers, "Content-Type": "application/json"},
             json={"bucketId": self._bucket, "sourceKey": src_key, "destinationKey": dst_key},
-            timeout=60.0,
         )
         resp.raise_for_status()
 
