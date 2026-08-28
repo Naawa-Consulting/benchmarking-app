@@ -1,4 +1,5 @@
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 import duckdb
 from fastapi import APIRouter, HTTPException, Query
@@ -64,9 +65,22 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
     seen: set[str] = set()
 
     study_ids = list_study_ids("warehouse/raw", "raw_responses.parquet")
-    for study_id in study_ids:
+
+    def _lookup(study_id: str) -> tuple[str, dict[str, str | None], bool]:
         curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
-        classification = _classification_for_study(study_id)
+        return study_id, _classification_for_study(study_id), blob_exists(curated_key)
+
+    # Each lookup is two Storage round-trips per study — running them concurrently
+    # cuts wall-clock time roughly by the pool size instead of paying per-study
+    # latency sequentially across dozens of studies.
+    lookups: dict[str, tuple[dict[str, str | None], bool]] = {}
+    if study_ids:
+        with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+            for study_id, classification, curated_ready in executor.map(_lookup, study_ids):
+                lookups[study_id] = (classification, curated_ready)
+
+    for study_id in study_ids:
+        classification, curated_ready = lookups[study_id]
         if study_id and study_id not in seen:
             studies.append(
                 Study(
@@ -74,7 +88,7 @@ def list_studies(sync: bool = Query(False, description="Sync from landing")):
                     name=study_id,
                     source="raw",
                     raw_ready=True,
-                    curated_ready=blob_exists(curated_key),
+                    curated_ready=curated_ready,
                     landing_file=landing_files.get(study_id),
                     status="ready",
                     sector=classification["sector"],

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 type PushSummary = {
   study_ids: string[];

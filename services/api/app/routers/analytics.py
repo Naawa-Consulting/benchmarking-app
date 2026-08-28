@@ -1,6 +1,7 @@
 ﻿import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import duckdb
@@ -1588,33 +1589,47 @@ def _collect_journey_rows(
     filters: dict,
     classification_cache: dict[str, dict[str, str | None]] | None = None,
 ) -> tuple[list[dict], list[str], int]:
-    rows: list[dict] = []
-    matched_studies: list[str] = []
     local_classification_cache = classification_cache if classification_cache is not None else {}
-    for study_id in study_ids:
+
+    def _process(study_id: str) -> tuple[str, list[dict]] | None:
         classification = local_classification_cache.get(study_id)
         if classification is None:
             classification = _classification_for_study(study_id)
             local_classification_cache[study_id] = classification
         if not _study_matches_taxonomy(filters, classification):
-            continue
+            return None
         safe_classification = _effective_classification_values(classification, filters)
         filtered_rows = _compute_table_rows_filtered(study_id, filters)
-        if filtered_rows:
-            matched_studies.append(study_id)
-        for row in filtered_rows:
-            rows.append(
-                {
-                    "study_id": study_id,
-                    "study_name": study_id,
-                    **safe_classification,
-                    **row,
-                    "quality_flags": {
-                        "population_denominator": bool(row.get("base_n_population")),
-                        "awareness_ceiling_applied": bool(row.get("awareness_ceiling_applied")),
-                    },
-                }
-            )
+        built_rows = [
+            {
+                "study_id": study_id,
+                "study_name": study_id,
+                **safe_classification,
+                **row,
+                "quality_flags": {
+                    "population_denominator": bool(row.get("base_n_population")),
+                    "awareness_ceiling_applied": bool(row.get("awareness_ceiling_applied")),
+                },
+            }
+            for row in filtered_rows
+        ]
+        return study_id, built_rows
+
+    rows: list[dict] = []
+    matched_studies: list[str] = []
+    if study_ids:
+        # Each iteration is dominated by network round-trips to Supabase Storage
+        # (classification + curated parquet reads), not CPU — running them
+        # concurrently on threads cuts wall-clock time roughly by the pool size
+        # instead of paying per-study latency sequentially.
+        with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+            for result in executor.map(_process, study_ids):
+                if result is None:
+                    continue
+                study_id, built_rows = result
+                if built_rows:
+                    matched_studies.append(study_id)
+                rows.extend(built_rows)
     return rows, matched_studies, len(study_ids)
 
 
@@ -3348,22 +3363,26 @@ def _touchpoints_table_multi_filtered(
             },
         }
 
-    rows: list[dict] = []
-    for study_id in study_ids:
+    def _process(study_id: str) -> list[dict]:
         classification = _classification_for_study(study_id)
         if not _study_matches_taxonomy(filters, classification):
-            continue
+            return []
         safe_classification = _effective_classification_values(classification, filters)
         filtered_rows = _compute_touchpoint_rows_filtered(study_id, filters)
-        for row in filtered_rows:
-            rows.append(
-                {
-                    "study_id": study_id,
-                    "study_name": study_id,
-                    **safe_classification,
-                    **row,
-                }
-            )
+        return [
+            {
+                "study_id": study_id,
+                "study_name": study_id,
+                **safe_classification,
+                **row,
+            }
+            for row in filtered_rows
+        ]
+
+    rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=min(16, len(study_ids))) as executor:
+        for built_rows in executor.map(_process, study_ids):
+            rows.extend(built_rows)
 
     reverse = sort_dir.lower() != "asc"
     metric_sort_key = sort_by if sort_by in {"recall", "consideration", "purchase"} else "recall"
