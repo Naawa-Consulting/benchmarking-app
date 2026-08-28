@@ -9,6 +9,21 @@ class StorageNotFoundError(FileNotFoundError):
     pass
 
 
+def _is_not_found_body(resp: httpx.Response) -> bool:
+    # Supabase Storage's object-get endpoint returns HTTP 400 (not 404) for a missing
+    # key, with the real "not found" signal buried in the JSON body's statusCode field
+    # (e.g. {"statusCode":"404","error":"Bucket not found","code":"NoSuchBucket"}) —
+    # that error/code text is misleading (the bucket exists), Supabase just reuses the
+    # same shape for "object not found" too, so we only trust the statusCode field.
+    if resp.status_code != 400:
+        return False
+    try:
+        payload = resp.json()
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and str(payload.get("statusCode")) == "404"
+
+
 class SupabaseStorage:
     """Thin wrapper around the Supabase Storage REST API — httpx direct, no SDK.
 
@@ -31,7 +46,7 @@ class SupabaseStorage:
 
     def read_bytes(self, key: str) -> bytes:
         resp = httpx.get(self._object_url(key), headers=self._headers, timeout=60.0)
-        if resp.status_code == 404:
+        if resp.status_code == 404 or _is_not_found_body(resp):
             raise StorageNotFoundError(key)
         resp.raise_for_status()
         return resp.content
