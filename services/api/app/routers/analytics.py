@@ -80,9 +80,61 @@ CSAT_IMPUTE_CACHE_TTL_SECONDS = 120
 CSAT_IMPUTE_WARN_THRESHOLD = 0.40
 _CSAT_IMPUTE_CACHE: dict[str, tuple[float, dict]] = {}
 
+DISCOVER_CURATED_STUDIES_CACHE_TTL_SECONDS = 30
+_DISCOVER_CURATED_STUDIES_CACHE: dict[str, tuple[float, list[str]]] = {}
+
+# The three rate-model builders below all train on the exact same per-study data
+# (classification + imputation-disabled rows) — this cache lets them share one
+# corpus-wide load instead of each re-downloading every curated study's parquet.
+RATE_MODEL_TRAINING_DATA_CACHE_TTL_SECONDS = 120
+_RATE_MODEL_TRAINING_DATA_CACHE: dict[str, tuple[float, list[tuple[str, dict, list[dict]]]]] = {}
+
 
 def _discover_curated_studies() -> list[str]:
-    return list_study_ids("warehouse/curated", "fact_journey.parquet")
+    cached = _DISCOVER_CURATED_STUDIES_CACHE.get("all")
+    if cached and time.time() - cached[0] <= DISCOVER_CURATED_STUDIES_CACHE_TTL_SECONDS:
+        return cached[1]
+    result = list_study_ids("warehouse/curated", "fact_journey.parquet")
+    _DISCOVER_CURATED_STUDIES_CACHE["all"] = (time.time(), result)
+    return result
+
+
+def _load_study_for_rate_model(study_id: str) -> tuple[str, dict, list[dict]] | None:
+    year = _study_year_from_id(study_id)
+    if not _is_training_year_valid(year):
+        return None
+    classification = _classification_for_study(study_id)
+    market_category = _normalize_market_category(classification.get("market_category"))
+    if _normalize_for_match(market_category) in CONSIDERATION_EXCLUDED_MARKET_CATEGORIES:
+        return None
+    rows = _compute_table_rows_internal(
+        study_id=study_id,
+        respondent_cte=None,
+        respondent_params=[],
+        strict_missing=False,
+        apply_consideration_imputation=False,
+        apply_satisfaction_imputation=False,
+        apply_csat_imputation=False,
+    )
+    return study_id, classification, rows
+
+
+def _load_rate_model_training_data(study_ids: list[str]) -> list[tuple[str, dict, list[dict]]]:
+    cache_key = ",".join(sorted(study_ids))
+    entry = _RATE_MODEL_TRAINING_DATA_CACHE.get(cache_key)
+    if entry and time.time() - entry[0] <= RATE_MODEL_TRAINING_DATA_CACHE_TTL_SECONDS:
+        return entry[1]
+
+    loaded: list[tuple[str, dict, list[dict]]] = []
+    if study_ids:
+        with ThreadPoolExecutor(max_workers=min(4, len(study_ids))) as executor:
+            for result in executor.map(_load_study_for_rate_model, study_ids):
+                if result is not None:
+                    loaded.append(result)
+
+    _RATE_MODEL_TRAINING_DATA_CACHE.clear()
+    _RATE_MODEL_TRAINING_DATA_CACHE[cache_key] = (time.time(), loaded)
+    return loaded
 
 
 def _study_year_from_id(study_id: str) -> int | None:
@@ -187,34 +239,9 @@ def _build_consideration_rate_model() -> dict:
             buckets[level_key] = bucket
         return bucket
 
-    def _load_study(study_id: str) -> tuple[str, dict, list[dict]] | None:
-        year = _study_year_from_id(study_id)
-        if not _is_training_year_valid(year):
-            return None
-        classification = _classification_for_study(study_id)
-        market_category = _normalize_market_category(classification.get("market_category"))
-        if _normalize_for_match(market_category) in CONSIDERATION_EXCLUDED_MARKET_CATEGORIES:
-            return None
-        rows = _compute_table_rows_internal(
-            study_id=study_id,
-            respondent_cte=None,
-            respondent_params=[],
-            strict_missing=False,
-            apply_consideration_imputation=False,
-            apply_satisfaction_imputation=False,
-            apply_csat_imputation=False,
-        )
-        return study_id, classification, rows
-
-    # Each study load is dominated by Storage round-trips (classification + the
-    # full curated parquet), not CPU — loading concurrently and aggregating into
-    # `buckets` afterward (sequentially) avoids needing locks around it.
-    loaded: list[tuple[str, dict, list[dict]]] = []
-    if study_ids:
-        with ThreadPoolExecutor(max_workers=min(4, len(study_ids))) as executor:
-            for result in executor.map(_load_study, study_ids):
-                if result is not None:
-                    loaded.append(result)
+    # Shared across all three rate-model builders (same study_ids, same
+    # imputation-disabled rows) — see _load_rate_model_training_data.
+    loaded = _load_rate_model_training_data(study_ids)
 
     for study_id, classification, rows in loaded:
         market_sector = _as_non_empty_text(classification.get("market_sector"))
@@ -309,31 +336,7 @@ def _build_satisfaction_rate_model() -> dict:
             buckets[level_key] = bucket
         return bucket
 
-    def _load_study(study_id: str) -> tuple[str, dict, list[dict]] | None:
-        year = _study_year_from_id(study_id)
-        if not _is_training_year_valid(year):
-            return None
-        classification = _classification_for_study(study_id)
-        market_category = _normalize_market_category(classification.get("market_category"))
-        if _normalize_for_match(market_category) in CONSIDERATION_EXCLUDED_MARKET_CATEGORIES:
-            return None
-        rows = _compute_table_rows_internal(
-            study_id=study_id,
-            respondent_cte=None,
-            respondent_params=[],
-            strict_missing=False,
-            apply_consideration_imputation=False,
-            apply_satisfaction_imputation=False,
-            apply_csat_imputation=False,
-        )
-        return study_id, classification, rows
-
-    loaded: list[tuple[str, dict, list[dict]]] = []
-    if study_ids:
-        with ThreadPoolExecutor(max_workers=min(4, len(study_ids))) as executor:
-            for result in executor.map(_load_study, study_ids):
-                if result is not None:
-                    loaded.append(result)
+    loaded = _load_rate_model_training_data(study_ids)
 
     for study_id, classification, rows in loaded:
         market_sector = _as_non_empty_text(classification.get("market_sector"))
@@ -432,31 +435,7 @@ def _build_csat_gap_model() -> dict:
             buckets[level_key] = bucket
         return bucket
 
-    def _load_study(study_id: str) -> tuple[str, dict, list[dict]] | None:
-        year = _study_year_from_id(study_id)
-        if not _is_training_year_valid(year):
-            return None
-        classification = _classification_for_study(study_id)
-        market_category = _normalize_market_category(classification.get("market_category"))
-        if _normalize_for_match(market_category) in CONSIDERATION_EXCLUDED_MARKET_CATEGORIES:
-            return None
-        rows = _compute_table_rows_internal(
-            study_id=study_id,
-            respondent_cte=None,
-            respondent_params=[],
-            strict_missing=False,
-            apply_consideration_imputation=False,
-            apply_satisfaction_imputation=False,
-            apply_csat_imputation=False,
-        )
-        return study_id, classification, rows
-
-    loaded: list[tuple[str, dict, list[dict]]] = []
-    if study_ids:
-        with ThreadPoolExecutor(max_workers=min(4, len(study_ids))) as executor:
-            for result in executor.map(_load_study, study_ids):
-                if result is not None:
-                    loaded.append(result)
+    loaded = _load_rate_model_training_data(study_ids)
 
     for study_id, classification, rows in loaded:
         market_sector = _as_non_empty_text(classification.get("market_sector"))
