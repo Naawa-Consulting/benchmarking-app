@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import unicodedata
 
 import duckdb
@@ -20,6 +21,8 @@ from app.data.rule_engine import (
 from app.data.warehouse import blob_exists, read_parquet_blob, write_parquet_blob
 from app.storage.blob import StorageNotFoundError, get_storage
 from app.storage.question_map import question_map_path
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 IMPUTE_WARN_THRESHOLD = 0.40
@@ -686,17 +689,31 @@ def _run_push_job(job_id: str, study_ids: list[str], callback_url: str) -> None:
             "taxonomy": taxonomy_result,
             "demographics": demographics_result,
         }
-        httpx.post(callback_url, json=body, headers=headers, timeout=90.0)
+        resp = httpx.post(callback_url, json=body, headers=headers, timeout=90.0, follow_redirects=True)
+        if resp.status_code >= 400:
+            logger.error(
+                "Push callback to %s returned %s for job %s: %s",
+                callback_url, resp.status_code, job_id, resp.text[:500],
+            )
+        else:
+            logger.info("Push callback to %s succeeded (%s) for job %s", callback_url, resp.status_code, job_id)
     except Exception as exc:
+        logger.exception("Push job %s failed before reporting results", job_id)
         try:
-            httpx.post(
+            fail_resp = httpx.post(
                 callback_url,
                 json={"job_id": job_id, "error": str(exc)},
                 headers=headers,
                 timeout=30.0,
+                follow_redirects=True,
             )
+            if fail_resp.status_code >= 400:
+                logger.error(
+                    "Push failure-callback to %s also failed (%s) for job %s",
+                    callback_url, fail_resp.status_code, job_id,
+                )
         except Exception:
-            pass
+            logger.exception("Push failure-callback to %s raised for job %s", callback_url, job_id)
 
 
 @router.post("/pipeline/push/start")

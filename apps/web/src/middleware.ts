@@ -40,12 +40,21 @@ function isProtectedPath(pathname: string) {
   );
 }
 
+// Server-to-server callback from FastAPI (Render) once its background Push
+// computation finishes — has no Supabase session (it's not a browser request),
+// so it must bypass the session gate below. It has its own protection instead:
+// the route handler checks the shared X-Internal-Api-Key header.
+const INTERNAL_CALLBACK_PATHS = ["/api/data/push/finish"];
+
 export async function middleware(request: NextRequest) {
   if (!isSupabaseAuthEnabled()) {
     return NextResponse.next();
   }
 
   const pathname = request.nextUrl.pathname;
+  if (INTERNAL_CALLBACK_PATHS.includes(pathname)) {
+    return NextResponse.next();
+  }
   const isDataPath = pathname.startsWith("/data");
   const isAdminPath = pathname.startsWith("/admin");
   const isAgentPath = pathname.startsWith("/agent");
