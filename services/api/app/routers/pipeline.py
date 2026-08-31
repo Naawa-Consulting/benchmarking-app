@@ -5,9 +5,11 @@ import io
 import unicodedata
 
 import duckdb
+import httpx
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 
+from app.core.config import get_settings
 from app.data.ingest_from_landing import ensure_raw_from_landing, rebuild_raw_for_study
 from app.data.rule_engine import (
     apply_rules_to_variables,
@@ -628,3 +630,82 @@ def rebuild_base_pipeline(
         "raw": raw_summary,
         "curated": {"status": curated_status},
     }
+
+
+def _run_push_job(job_id: str, study_ids: list[str], callback_url: str) -> None:
+    """Computes everything apps/web's Push button needs, then reports the result
+    to Vercel by HTTP callback. Runs as a FastAPI BackgroundTasks job, so it has
+    no per-request time ceiling the way the triggering Vercel function does —
+    that's the whole point: Push can take as long as it needs here.
+
+    Imports are lazy to avoid a module-load-time circular import between
+    analytics/filters/studies and this router (same pattern already used by
+    the imputation-report builders above)."""
+    settings = get_settings()
+    headers = {"Content-Type": "application/json"}
+    if settings.internal_api_key:
+        headers["x-internal-api-key"] = settings.internal_api_key
+
+    try:
+        from app.routers import analytics, filters
+        from app.routers import studies as studies_router
+
+        job_filters = analytics._parse_filters({"study_ids": study_ids, "taxonomy_view": "standard"})
+        journey_result = analytics._journey_table_multi_filtered(
+            job_filters, "all", "brand_awareness", "desc"
+        )
+        touchpoints_result = analytics._touchpoints_table_multi_filtered(
+            job_filters, "all", "recall", "desc"
+        )
+        taxonomy_result = filters.filter_taxonomy_options(view="standard")
+        demographics_result = filters.filter_demographic_options(study_ids=",".join(study_ids))
+
+        studies_result = []
+        for study_id in study_ids:
+            classification = studies_router._classification_for_study(study_id)
+            studies_result.append(
+                {
+                    "id": study_id,
+                    "name": study_id,
+                    "sector": classification.get("sector"),
+                    "subsector": classification.get("subsector"),
+                    "category": classification.get("category"),
+                    "market_sector": classification.get("market_sector"),
+                    "market_subsector": classification.get("market_subsector"),
+                    "market_category": classification.get("market_category"),
+                    "market_source": classification.get("market_source"),
+                }
+            )
+
+        body = {
+            "job_id": job_id,
+            "study_ids": study_ids,
+            "journey": journey_result,
+            "touchpoints": touchpoints_result,
+            "studies": studies_result,
+            "taxonomy": taxonomy_result,
+            "demographics": demographics_result,
+        }
+        httpx.post(callback_url, json=body, headers=headers, timeout=90.0)
+    except Exception as exc:
+        try:
+            httpx.post(
+                callback_url,
+                json={"job_id": job_id, "error": str(exc)},
+                headers=headers,
+                timeout=30.0,
+            )
+        except Exception:
+            pass
+
+
+@router.post("/pipeline/push/start")
+async def start_push(request: Request, background_tasks: BackgroundTasks) -> dict:
+    payload = await request.json()
+    job_id = payload.get("job_id")
+    study_ids = payload.get("study_ids") or []
+    callback_url = payload.get("callback_url")
+    if not job_id or not study_ids or not callback_url:
+        raise HTTPException(status_code=400, detail="job_id, study_ids and callback_url are required.")
+    background_tasks.add_task(_run_push_job, job_id, study_ids, callback_url)
+    return {"status": "scheduled", "job_id": job_id}

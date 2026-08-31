@@ -281,6 +281,35 @@ export default function DataOpsPanel({ canMutate, role, selectedStudyId }: DataO
     }
   }
 
+  async function pollPushJob(jobId: string) {
+    // The push computation runs as a background job on Render with no fixed time
+    // limit, so we poll for its outcome instead of waiting on a single request
+    // (which would be capped by Vercel's function duration). ~6 minutes total.
+    const maxAttempts = 72;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      try {
+        const response = await fetch("/api/data/publish/history?limit=20", { cache: "no-store" });
+        const data = await response.json().catch(() => ({}));
+        const items: PushHistoryRow[] = Array.isArray(data?.items) ? data.items : [];
+        const job = items.find((item) => item.id === jobId);
+        if (job && job.status !== "running") {
+          if (job.status === "success") {
+            setMessage("Snapshot pushed to Supabase.");
+          } else {
+            setError(job.error_message || "Push to Supabase failed.");
+          }
+          await loadData();
+          window.dispatchEvent(new Event("bbs:data-studies-changed"));
+          return;
+        }
+      } catch {
+        // Transient poll failure — keep trying until maxAttempts.
+      }
+    }
+    setError("Push is taking longer than expected. Check the publish history below for its result.");
+  }
+
   async function pushStudyToSupabase() {
     if (!selectedStudyId || !canPublishToSupabase) return;
     setPushBusy(true);
@@ -293,13 +322,12 @@ export default function DataOpsPanel({ canMutate, role, selectedStudyId }: DataO
         body: JSON.stringify({ study_id: selectedStudyId }),
       });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
+      if (!response.ok || !data?.job_id) {
         setError(data?.detail || "Push to Supabase failed.");
-      } else {
-        setMessage("Snapshot pushed to Supabase.");
-        await loadData();
-        window.dispatchEvent(new Event("bbs:data-studies-changed"));
+        return;
       }
+      setMessage("Push started — processing on the backend…");
+      await pollPushJob(data.job_id as string);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Push to Supabase failed.");
     } finally {
