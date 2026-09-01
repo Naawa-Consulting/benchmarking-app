@@ -187,7 +187,6 @@ Todo el frontend pasa por aquí; nunca se llama a FastAPI o Supabase directo des
 | run_web.ps1 | `npm install` + `npm run dev` (rutas hardcodeadas al disco del autor — ajustar `$WebRoot`). |
 | export_supabase_seed.py | Bootstrap: siembra tablas iniciales de Supabase desde outputs locales del API. |
 | export_storage_seed.py | Sube `data/landing` + `data/warehouse` (local, gitignored) al bucket de Supabase Storage — correr una sola vez antes de apuntar Render al proyecto real. |
-| compare_rate_models.py | **Temporal** — compara los rate models parquet vs. SQL bucket por bucket antes de fijar `BBS_RATE_MODEL_SOURCE=sql` en Render. Borrar una vez confirmado el corte. |
 
 ## [supabase/sql/](supabase/sql/) — contrato y migraciones SQL
 Migraciones numeradas, aplicadas en orden en el SQL Editor de Supabase. `001_bbs_rpc_contract.sql`
@@ -210,6 +209,7 @@ no está trackeado en git.
 | 024_rate_model_training_stats_rpc.sql | `bbs_rate_model_training_stats` — entrena los 3 rate models de imputación (consideration/satisfaction/csat) vía SQL sobre `journey_metrics`, reemplazando el escaneo de parquet de todo el corpus en cada Push. |
 | 025_fix_consideration_source_mislabel_backfill.sql | Backfill de una fila con `brand_consideration_source` mal etiquetado (bug corregido en `analytics.py`). |
 | 026_capture_live_rpc_definitions.sql | Captura de gobernanza (no-op) del DDL real de `bbs_journey_table_multi`/`bbs_touchpoints_table_multi`/`bbs_tracking_series`/`bbs_network`, que solo vivían en el editor SQL de Supabase. |
+| 027_market_lens_footwear.sql | Agrega Calzado/Calzado deportivo a los fallbacks `bbs_market_subsector`/`bbs_market_category` (mismo patrón que 013 para bebidas). |
 
 ## [data/](data/) — warehouse local (no trackeado en git)
 Ver detalle en [CLAUDE.md](CLAUDE.md) § "Datos locales". Contiene `landing/` (`.sav` fuente),
