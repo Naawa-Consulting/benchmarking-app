@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 import httpx
 
 from app.core.config import get_settings
@@ -55,7 +57,14 @@ class SupabaseStorage:
         return f"{self._base}/storage/v1/object/{self._bucket}/{key}"
 
     def read_bytes(self, key: str) -> bytes:
-        resp = self._client.get(self._object_url(key), headers=self._headers)
+        # Cache-busting query param: Supabase Storage sits behind a Cloudflare CDN that can
+        # serve a GET on this exact URL from cache for days after a successful write to the
+        # same key (observed live — no official purge API; Supabase's own guidance is
+        # cache-busting the read URL). A stale read here isn't just a display bug: mapping.py/
+        # rules.py/pipeline.py do read-modify-write on a CSV shared across all studies, so a
+        # stale read can silently drop another study's recent save on rewrite.
+        url = f"{self._object_url(key)}?cb={uuid.uuid4().hex}"
+        resp = self._client.get(url, headers=self._headers)
         if resp.status_code == 404 or _is_not_found_body(resp):
             raise StorageNotFoundError(key)
         resp.raise_for_status()

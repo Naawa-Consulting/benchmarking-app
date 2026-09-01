@@ -2,7 +2,7 @@
 
 Mapa completo de carpetas y archivos del proyecto. Se actualiza en automático — ver protocolo en [CLAUDE.md](CLAUDE.md).
 
-**Última actualización:** 2026-08-25
+**Última actualización:** 2026-08-31
 
 **Excluidos de este índice:** `node_modules/`, `.next/`, `.venv/`, `__pycache__/`, `.pytest_cache/`,
 `*.pyc`, `apps/web/tsconfig.tsbuildinfo`, archivos `.env*`. La carpeta **`data/`** completa está
@@ -148,10 +148,10 @@ Todo el frontend pasa por aquí; nunca se llama a FastAPI o Supabase directo des
 | requirements.txt | Dependencias (FastAPI, DuckDB, pandas, pyarrow, pyreadstat). |
 | .env.example | Variables: `API_TITLE`, `API_VERSION`, `CORS_ORIGINS`. |
 | app/main.py | Crea la app FastAPI, registra todos los routers y CORS. |
-| app/core/config.py | `Settings` desde variables de entorno. |
+| app/core/config.py | `Settings` desde variables de entorno, incluye `rate_model_source` (`BBS_RATE_MODEL_SOURCE`: `auto`\|`sql`\|`parquet`). |
 | app/core/logging.py | Configuración básica de logging. |
 | app/models/schemas.py | Modelos Pydantic (`Study`, etc.). |
-| app/routers/analytics.py | **Router central (~140KB)**: endpoints Journey/Network/Tracking (`GET`+`POST`, `response_mode` progresivo). |
+| app/routers/analytics.py | **Router central (~140KB)**: endpoints Journey/Network/Tracking (`GET`+`POST`, `response_mode` progresivo). Los 3 rate models de imputación cross-study (`_build_consideration_rate_model`/`_build_satisfaction_rate_model`/`_build_csat_gap_model`) entrenan vía RPC SQL (`bbs_rate_model_training_stats`) sobre `journey_metrics`, con fallback automático al escaneo de parquet (`BBS_RATE_MODEL_SOURCE`). |
 | app/routers/network.py | Endpoint `/network` — construye el grafo de demanda (touchpoints ↔ marcas/benchmark). |
 | app/routers/filters.py | Opciones de filtros (estudios, taxonomía, demografía, fecha) para la Scope Bar. |
 | app/routers/demographics.py | Endpoints y config de dimensiones demográficas. |
@@ -161,7 +161,7 @@ Todo el frontend pasa por aquí; nunca se llama a FastAPI o Supabase directo des
 | app/routers/study_config.py | Configuración por estudio (columnas base: respondent/weight). |
 | app/routers/ingest.py | Ingesta de archivos `.sav` desde `data/landing`. |
 | app/routers/mapping.py | Mapeo de preguntas/columnas del estudio a esquema canónico. |
-| app/routers/pipeline.py | Orquesta el pipeline de ingesta→mapeo→curado. |
+| app/routers/pipeline.py | Orquesta el pipeline de ingesta→mapeo→curado. Incluye `_apply_consideration_from_purchase_override` — corrección per-estudio (gateada por `methodology_overrides.consideration_from_purchase`) para estudios donde consideración y compra se preguntaron simultáneamente. |
 | app/routers/questions.py | Endpoints de catálogo de preguntas. |
 | app/routers/question_map.py | CRUD del mapa de preguntas por estudio. |
 | app/routers/rules.py | Reglas de clasificación/taxonomía (motor de reglas). |
@@ -171,12 +171,14 @@ Todo el frontend pasa por aquí; nunca se llama a FastAPI o Supabase directo des
 | app/data/rule_engine.py | Motor de reglas de clasificación/inferencia de mapeo. |
 | app/data/market_lens.py | Resolución de clasificación de mercado (sector/subsector/categoría) por estudio. |
 | app/data/demographics.py | Config y utilidades de dimensiones demográficas. |
-| app/data/study_config.py | Detección de columnas base (`detect_base_columns`) por estudio. |
+| app/data/study_config.py | Detección de columnas base (`detect_base_columns`) por estudio; también `load_methodology_overrides`/`save_methodology_overrides` (blob separado, sobrevive al guardado de columnas base). |
 | app/data/warehouse.py | Helpers de acceso a datos (parquet/csv/json) respaldados por Supabase Storage — reemplazó el acceso a disco local + DuckDB en `data/warehouse.duckdb`. |
 | app/data/standardize.py | Placeholder — estandarización de esquemas cliente-específicos (no implementado aún). |
-| app/storage/blob.py | `SupabaseStorage` — cliente REST (vía `httpx`) para el bucket de Storage donde vive todo el pipeline (ingesta, raw/curated, mapping, reglas, config). |
+| app/storage/blob.py | `SupabaseStorage` — cliente REST (vía `httpx`) para el bucket de Storage donde vive todo el pipeline (ingesta, raw/curated, mapping, reglas, config). Cada lectura anexa un query param de cache-busting — Supabase Storage está detrás de un CDN Cloudflare que puede servir un GET con días de antigüedad tras un write exitoso al mismo key. |
 | app/storage/question_map.py | Persistencia del mapa de preguntas. |
+| app/storage/postgres_rpc.py | `SupabasePostgresRpc` — cliente REST (`httpx`, sin SDK) contra PostgREST RPC de Supabase; primer acceso directo de `services/api` a Postgres (antes solo hablaba con Storage). |
 | tests/test_study_config.py | Tests unitarios (`unittest`) de `detect_base_columns`. |
+| tests/test_pipeline_overrides.py | Tests de `_apply_consideration_from_purchase_override` (fuerza consideración=1 cuando hay compra=1 sin considerar). |
 
 ## [scripts/](scripts/) — utilidades locales
 | Archivo | Descripción |
@@ -185,6 +187,7 @@ Todo el frontend pasa por aquí; nunca se llama a FastAPI o Supabase directo des
 | run_web.ps1 | `npm install` + `npm run dev` (rutas hardcodeadas al disco del autor — ajustar `$WebRoot`). |
 | export_supabase_seed.py | Bootstrap: siembra tablas iniciales de Supabase desde outputs locales del API. |
 | export_storage_seed.py | Sube `data/landing` + `data/warehouse` (local, gitignored) al bucket de Supabase Storage — correr una sola vez antes de apuntar Render al proyecto real. |
+| compare_rate_models.py | **Temporal** — compara los rate models parquet vs. SQL bucket por bucket antes de fijar `BBS_RATE_MODEL_SOURCE=sql` en Render. Borrar una vez confirmado el corte. |
 
 ## [supabase/sql/](supabase/sql/) — contrato y migraciones SQL
 Migraciones numeradas, aplicadas en orden en el SQL Editor de Supabase. `001_bbs_rpc_contract.sql`
@@ -203,6 +206,10 @@ no está trackeado en git.
 | 019_expand_user_access_scopes_market_types.sql | Expande tipos de scope de acceso de usuario. |
 | 020_agent_chat_module.sql | Tablas del módulo Agente (conversaciones/mensajes). |
 | 021–023_*_imputation_columns.sql | Columnas de imputación (consideration/satisfaction/CSAT) para manejo de missingness. |
+| 013_market_lens_beverages_beer.sql | Agrega Cervezas/Bebidas alcohólicas/no alcohólicas a los fallbacks `bbs_market_subsector`/`bbs_market_category` (antes sin ninguna rama para bebidas). |
+| 024_rate_model_training_stats_rpc.sql | `bbs_rate_model_training_stats` — entrena los 3 rate models de imputación (consideration/satisfaction/csat) vía SQL sobre `journey_metrics`, reemplazando el escaneo de parquet de todo el corpus en cada Push. |
+| 025_fix_consideration_source_mislabel_backfill.sql | Backfill de una fila con `brand_consideration_source` mal etiquetado (bug corregido en `analytics.py`). |
+| 026_capture_live_rpc_definitions.sql | Captura de gobernanza (no-op) del DDL real de `bbs_journey_table_multi`/`bbs_touchpoints_table_multi`/`bbs_tracking_series`/`bbs_network`, que solo vivían en el editor SQL de Supabase. |
 
 ## [data/](data/) — warehouse local (no trackeado en git)
 Ver detalle en [CLAUDE.md](CLAUDE.md) § "Datos locales". Contiene `landing/` (`.sav` fuente),

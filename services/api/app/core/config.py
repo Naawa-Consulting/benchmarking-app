@@ -17,6 +17,7 @@ class Settings:
     supabase_service_role_key: str
     storage_bucket: str
     internal_api_key: str | None
+    rate_model_source: str
 
 
 def get_settings() -> Settings:
@@ -28,4 +29,9 @@ def get_settings() -> Settings:
         supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
         storage_bucket=os.getenv("BBS_STORAGE_BUCKET", "bbs-pipeline"),
         internal_api_key=os.getenv("INTERNAL_API_KEY") or None,
+        # "auto" (default): try the SQL rate-model RPC, fall back to the parquet scan on any
+        # failure or empty result — safe for local dev without Postgres access.
+        # "sql": never fall back silently — a broken RPC raises instead of degrading unnoticed.
+        # "parquet": force the old path (used by the parity-check script and as an escape hatch).
+        rate_model_source=os.getenv("BBS_RATE_MODEL_SOURCE", "auto"),
     )

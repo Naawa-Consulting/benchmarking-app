@@ -1,4 +1,5 @@
 ﻿import json
+import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -7,6 +8,7 @@ from datetime import datetime
 import duckdb
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.core.config import get_settings
 from app.data.demographics import load_demographics_config, normalize_demographics_config
 from app.data.market_lens import resolve_classification
 from app.data.warehouse import (
@@ -17,6 +19,9 @@ from app.data.warehouse import (
     read_parquet_blob,
 )
 from app.models.schemas import JourneyPoint, JourneyResponse
+from app.storage.postgres_rpc import get_postgres_rpc
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -86,8 +91,67 @@ _DISCOVER_CURATED_STUDIES_CACHE: dict[str, tuple[float, list[str]]] = {}
 # The three rate-model builders below all train on the exact same per-study data
 # (classification + imputation-disabled rows) — this cache lets them share one
 # corpus-wide load instead of each re-downloading every curated study's parquet.
+# Only used as the fallback path (see _load_rate_model_training_stats_from_sql below) —
+# the primary path trains from public.journey_metrics via a single SQL RPC instead of
+# scanning every curated study's parquet, since that scan is what made a Push of one
+# study take minutes and scale with the size of the whole warehouse.
 RATE_MODEL_TRAINING_DATA_CACHE_TTL_SECONDS = 120
 _RATE_MODEL_TRAINING_DATA_CACHE: dict[str, tuple[float, list[tuple[str, dict, list[dict]]]]] = {}
+
+RATE_MODEL_SQL_STATS_CACHE_TTL_SECONDS = 120
+_RATE_MODEL_SQL_STATS_CACHE: dict[str, tuple[float, dict | None]] = {}
+
+
+def _load_rate_model_training_stats_from_sql() -> dict | None:
+    """Calls bbs_rate_model_training_stats (supabase/sql/024_rate_model_training_stats_rpc.sql)
+    and returns its JSON, or None if the SQL path isn't usable right now (see
+    BBS_RATE_MODEL_SOURCE below) — callers fall back to the parquet scan in that case."""
+    settings = get_settings()
+    if settings.rate_model_source == "parquet":
+        return None
+
+    cached = _RATE_MODEL_SQL_STATS_CACHE.get("all")
+    if cached and time.time() - cached[0] <= RATE_MODEL_SQL_STATS_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    result: dict | None
+    try:
+        response = get_postgres_rpc().call(
+            "bbs_rate_model_training_stats",
+            {
+                "p_min_year": CONSIDERATION_TRAIN_MIN_YEAR,
+                "p_invalid_year": CONSIDERATION_INVALID_YEAR,
+                "p_max_year": datetime.utcnow().year + 1,
+                "p_excluded_market_categories": sorted(CONSIDERATION_EXCLUDED_MARKET_CATEGORIES),
+            },
+        )
+        if not isinstance(response, dict) or not any(
+            response.get(family) for family in ("consideration", "satisfaction", "csat")
+        ):
+            # journey_metrics has no usable rows yet (e.g. dev before any Push) — not an
+            # error, just nothing to train from via SQL.
+            result = None
+        else:
+            result = response
+    except Exception:
+        logger.warning("rate model SQL RPC failed, falling back to parquet scan", exc_info=True)
+        if settings.rate_model_source == "sql":
+            raise
+        result = None
+
+    _RATE_MODEL_SQL_STATS_CACHE["all"] = (time.time(), result)
+    return result
+
+
+def _bucket_key_from_sql_row(row: dict) -> tuple[str, ...]:
+    level = row.get("level")
+    if level == "category":
+        return ("category", row.get("market_sector"), row.get("market_subsector"), row.get("market_category"))
+    if level == "subsector":
+        return ("subsector", row.get("market_sector"), row.get("market_subsector"))
+    if level == "sector":
+        return ("sector", row.get("market_sector"))
+    return ("global",)
 
 
 def _discover_curated_studies() -> list[str]:
@@ -223,8 +287,7 @@ def _csat_cache_key(study_ids: list[str]) -> str:
     return f"csat:{','.join(sorted(study_ids))}"
 
 
-def _build_consideration_rate_model() -> dict:
-    study_ids = _discover_curated_studies()
+def _consideration_rates_from_parquet(study_ids: list[str]) -> tuple[dict, list]:
     buckets: dict[tuple[str, ...], dict[str, object]] = {}
 
     def _get_bucket(level_key: tuple[str, ...]) -> dict[str, object]:
@@ -300,6 +363,48 @@ def _build_consideration_rate_model() -> dict:
                 }
             )
 
+    return rates, warnings
+
+
+def _consideration_rates_from_sql_rows(rows: list[dict]) -> tuple[dict, list]:
+    rates: dict[tuple[str, ...], dict[str, float | int | None]] = {}
+    warnings: list[dict[str, object]] = []
+    for row in rows:
+        key = _bucket_key_from_sql_row(row)
+        comparisons_total = int(row.get("comparisons_total") or 0)
+        comparisons_p_gt_c = int(row.get("comparisons_p_gt_c") or 0)
+        anomaly_pct = (comparisons_p_gt_c / comparisons_total) if comparisons_total > 0 else None
+        rates[key] = {
+            "n_ca": int(row.get("n_ca") or 0),
+            "r_ca": row.get("r_ca"),
+            "n_pc": int(row.get("n_pc") or 0),
+            "r_pc": row.get("r_pc"),
+            "comparisons_total": comparisons_total,
+            "comparisons_p_gt_c": comparisons_p_gt_c,
+            "p_gt_c_pct": anomaly_pct,
+        }
+        if key and key[0] == "category" and anomaly_pct is not None and anomaly_pct > CONSIDERATION_IMPUTE_WARN_THRESHOLD:
+            warnings.append(
+                {
+                    "level": "category",
+                    "market_sector": key[1] if len(key) > 1 else None,
+                    "market_subsector": key[2] if len(key) > 2 else None,
+                    "market_category": key[3] if len(key) > 3 else None,
+                    "purchase_gt_consideration_pct": round(anomaly_pct * 100, 1),
+                    "training_n": comparisons_total,
+                }
+            )
+    return rates, warnings
+
+
+def _build_consideration_rate_model() -> dict:
+    study_ids = _discover_curated_studies()
+    sql_stats = _load_rate_model_training_stats_from_sql()
+    if sql_stats is not None:
+        rates, warnings = _consideration_rates_from_sql_rows(sql_stats.get("consideration") or [])
+    else:
+        rates, warnings = _consideration_rates_from_parquet(study_ids)
+
     return {
         "version": CONSIDERATION_IMPUTE_VERSION,
         "study_ids": study_ids,
@@ -320,8 +425,7 @@ def _get_consideration_rate_model() -> dict:
     return model
 
 
-def _build_satisfaction_rate_model() -> dict:
-    study_ids = _discover_curated_studies()
+def _satisfaction_rates_from_parquet(study_ids: list[str]) -> tuple[dict, list]:
     buckets: dict[tuple[str, ...], dict[str, object]] = {}
 
     def _get_bucket(level_key: tuple[str, ...]) -> dict[str, object]:
@@ -399,6 +503,48 @@ def _build_satisfaction_rate_model() -> dict:
                 }
             )
 
+    return rates, warnings
+
+
+def _satisfaction_rates_from_sql_rows(rows: list[dict]) -> tuple[dict, list]:
+    rates: dict[tuple[str, ...], dict[str, float | int | None]] = {}
+    warnings: list[dict[str, object]] = []
+    for row in rows:
+        key = _bucket_key_from_sql_row(row)
+        comparisons_total = int(row.get("comparisons_total") or 0)
+        comparisons_r_gt_s = int(row.get("comparisons_r_gt_s") or 0)
+        anomaly_pct = (comparisons_r_gt_s / comparisons_total) if comparisons_total > 0 else None
+        rates[key] = {
+            "n_sp": int(row.get("n_sp") or 0),
+            "r_sp": row.get("r_sp"),
+            "n_sr": int(row.get("n_sr") or 0),
+            "r_sr": row.get("r_sr"),
+            "comparisons_total": comparisons_total,
+            "comparisons_r_gt_s": comparisons_r_gt_s,
+            "r_gt_s_pct": anomaly_pct,
+        }
+        if key and key[0] == "category" and anomaly_pct is not None and anomaly_pct > SATISFACTION_IMPUTE_WARN_THRESHOLD:
+            warnings.append(
+                {
+                    "level": "category",
+                    "market_sector": key[1] if len(key) > 1 else None,
+                    "market_subsector": key[2] if len(key) > 2 else None,
+                    "market_category": key[3] if len(key) > 3 else None,
+                    "recommendation_gt_satisfaction_pct": round(anomaly_pct * 100, 1),
+                    "training_n": comparisons_total,
+                }
+            )
+    return rates, warnings
+
+
+def _build_satisfaction_rate_model() -> dict:
+    study_ids = _discover_curated_studies()
+    sql_stats = _load_rate_model_training_stats_from_sql()
+    if sql_stats is not None:
+        rates, warnings = _satisfaction_rates_from_sql_rows(sql_stats.get("satisfaction") or [])
+    else:
+        rates, warnings = _satisfaction_rates_from_parquet(study_ids)
+
     return {
         "version": SATISFACTION_IMPUTE_VERSION,
         "study_ids": study_ids,
@@ -419,8 +565,7 @@ def _get_satisfaction_rate_model() -> dict:
     return model
 
 
-def _build_csat_gap_model() -> dict:
-    study_ids = _discover_curated_studies()
+def _csat_rates_from_parquet(study_ids: list[str]) -> tuple[dict, list]:
     buckets: dict[tuple[str, ...], dict[str, object]] = {}
 
     def _get_bucket(level_key: tuple[str, ...]) -> dict[str, object]:
@@ -494,6 +639,48 @@ def _build_csat_gap_model() -> dict:
                     "training_n": comparisons_total,
                 }
             )
+
+    return rates, warnings
+
+
+def _csat_rates_from_sql_rows(rows: list[dict]) -> tuple[dict, list]:
+    rates: dict[tuple[str, ...], dict[str, float | int | None]] = {}
+    warnings: list[dict[str, object]] = []
+    for row in rows:
+        key = _bucket_key_from_sql_row(row)
+        comparisons_total = int(row.get("comparisons_total") or 0)
+        comparisons_csat_gt_sat = int(row.get("comparisons_csat_gt_sat") or 0)
+        anomaly_pct = (comparisons_csat_gt_sat / comparisons_total) if comparisons_total > 0 else None
+        rates[key] = {
+            "n_delta_sc": int(row.get("n_delta_sc") or 0),
+            "delta_sc": row.get("delta_sc"),
+            "n_delta_cr": int(row.get("n_delta_cr") or 0),
+            "delta_cr": row.get("delta_cr"),
+            "comparisons_total": comparisons_total,
+            "comparisons_csat_gt_sat": comparisons_csat_gt_sat,
+            "csat_gt_sat_pct": anomaly_pct,
+        }
+        if key and key[0] == "category" and anomaly_pct is not None and anomaly_pct > CSAT_IMPUTE_WARN_THRESHOLD:
+            warnings.append(
+                {
+                    "level": "category",
+                    "market_sector": key[1] if len(key) > 1 else None,
+                    "market_subsector": key[2] if len(key) > 2 else None,
+                    "market_category": key[3] if len(key) > 3 else None,
+                    "csat_gt_satisfaction_pct": round(anomaly_pct * 100, 1),
+                    "training_n": comparisons_total,
+                }
+            )
+    return rates, warnings
+
+
+def _build_csat_gap_model() -> dict:
+    study_ids = _discover_curated_studies()
+    sql_stats = _load_rate_model_training_stats_from_sql()
+    if sql_stats is not None:
+        rates, warnings = _csat_rates_from_sql_rows(sql_stats.get("csat") or [])
+    else:
+        rates, warnings = _csat_rates_from_parquet(study_ids)
 
     return {
         "version": CSAT_IMPUTE_VERSION,
@@ -808,7 +995,7 @@ def _apply_consideration_imputation_to_rows(
                     levels_map[level] = int(levels_map.get(level, 0)) + 1
             else:
                 row["brand_consideration_imputed"] = None
-                row["brand_consideration_source"] = "observed"
+                row["brand_consideration_source"] = "none"
                 row["brand_consideration_impute_level"] = "none"
                 row["brand_consideration_impute_version"] = None
 

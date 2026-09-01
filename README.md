@@ -8,10 +8,16 @@ Monorepo for the BBS product with three core analytics experiences:
 Plus Admin tools for data ingestion, validation, taxonomy, and rules.
 
 ## Estado actual
-_Última actualización: 2026-08-25_
+_Última actualización: 2026-08-31_
 
 - Vercel + Supabase deployment mode is live in read-only beta alongside the legacy FastAPI backend
   (`BBS_DATA_SOURCE` switches between them; see "Vercel + Supabase Deployment Mode" below).
+- Push no longer scans the full curated corpus per study pushed: the 3 cross-study imputation rate
+  models now train via a SQL RPC (`bbs_rate_model_training_stats`) over `journey_metrics` instead of
+  scanning every curated study's parquet, controlled by `BBS_RATE_MODEL_SOURCE` (`auto` default, falls
+  back to the parquet scan on any failure). Supabase Storage reads also gained cache-busting
+  (`app/storage/blob.py`) after finding the CDN in front of it could serve reads days stale after a
+  successful write. See BITACORA.md 2026-08-31 for the investigation and validation detail.
 - Most recent focus has been hardening the Agent module: `AGENTE.md` as the single behavior source,
   es/en response-language enforcement, and access control (`BBS_AGENT_OWNER_ONLY`).
 - In progress, not yet committed: trimming/compacting the row payloads sent to the Agent's LLM calls
