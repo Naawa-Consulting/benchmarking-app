@@ -210,6 +210,7 @@ no está trackeado en git.
 | 025_fix_consideration_source_mislabel_backfill.sql | Backfill de una fila con `brand_consideration_source` mal etiquetado (bug corregido en `analytics.py`). |
 | 026_capture_live_rpc_definitions.sql | Captura de gobernanza (no-op) del DDL real de `bbs_journey_table_multi`/`bbs_touchpoints_table_multi`/`bbs_tracking_series`/`bbs_network`, que solo vivían en el editor SQL de Supabase. |
 | 027_market_lens_footwear.sql | Agrega Calzado/Calzado deportivo a los fallbacks `bbs_market_subsector`/`bbs_market_category` (mismo patrón que 013 para bebidas). |
+| 028_market_lens_automotive_and_smartphones.sql | Agrega Automotriz (Vehículos de pasajeros/híbridos) y Tecnología→Hardware→Teléfonos celulares a los fallbacks `bbs_market_sector`/`bbs_market_subsector`/`bbs_market_category` — primeras categorías con `market_sector` propio ("Automotive"/"Technology") en vez de heredar el genérico de su sector estándar. |
 
 ## [data/](data/) — warehouse local (no trackeado en git)
 Ver detalle en [CLAUDE.md](CLAUDE.md) § "Datos locales". Contiene `landing/` (`.sav` fuente),
