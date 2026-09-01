@@ -32,6 +32,24 @@ def _study_config_key(study_id: str) -> str:
     return f"warehouse/study_config/study_id={study_id}.json"
 
 
+def _methodology_overrides_key(study_id: str) -> str:
+    # Kept in its own blob, separate from _study_config_key: the study-config POST
+    # endpoint (save_study_config_endpoint) always overwrites its file wholesale with
+    # only respondent_id/weight, so anything else stored there would get silently
+    # wiped by the next base-column save.
+    return f"warehouse/study_config/study_id={study_id}.methodology.json"
+
+
+def load_methodology_overrides(study_id: str) -> dict:
+    return read_json_blob(_methodology_overrides_key(study_id), default={}) or {}
+
+
+def save_methodology_overrides(study_id: str, payload: dict) -> str:
+    key = _methodology_overrides_key(study_id)
+    write_json_blob(key, payload)
+    return key
+
+
 def _normalize_names(names: Iterable[str]) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for name in names:

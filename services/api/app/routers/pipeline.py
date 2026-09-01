@@ -18,6 +18,7 @@ from app.data.rule_engine import (
     load_rules,
     load_study_rule_scope,
 )
+from app.data.study_config import load_methodology_overrides
 from app.data.warehouse import blob_exists, read_parquet_blob, write_parquet_blob
 from app.storage.blob import StorageNotFoundError, get_storage
 from app.storage.question_map import question_map_path
@@ -418,6 +419,43 @@ def _build_csat_imputation_report(study_id: str) -> dict:
     }
 
 
+def _apply_consideration_from_purchase_override(study_id: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Force stage='consideration' value=1 wherever the same respondent+brand has
+    stage='purchase' value=1.
+
+    Some studies field consideration and purchase as a single-select grid per brand
+    instead of a cumulative funnel, so respondents who bought a brand directly often
+    never mark it as considered — consideration reads artificially lower than
+    purchase. Gated per-study via methodology_overrides so it never affects studies
+    fielded normally.
+    """
+    purchased_pairs = set(
+        map(
+            tuple,
+            df.loc[(df["stage"] == "purchase") & (df["value"] == 1), ["respondent_id", "brand"]].itertuples(
+                index=False, name=None
+            ),
+        )
+    )
+    if not purchased_pairs:
+        return df
+
+    is_consideration = df["stage"] == "consideration"
+    pair_in_purchased = list(zip(df["respondent_id"], df["brand"]))
+    force_mask = is_consideration & pd.Series(
+        [pair in purchased_pairs for pair in pair_in_purchased], index=df.index
+    )
+    force_mask &= df["value"] != 1
+    if force_mask.any():
+        logger.info(
+            "consideration_from_purchase override: forced %d consideration rows to value=1 for study %s",
+            int(force_mask.sum()),
+            study_id,
+        )
+        df.loc[force_mask, "value"] = 1
+    return df
+
+
 @router.post("/pipeline/journey/ensure")
 def ensure_journey_pipeline(
     study_id: str = Query(..., description="Study id"),
@@ -553,6 +591,9 @@ def ensure_journey_pipeline(
             curated_status = "error"
             errors.append("No rows matched mapping criteria.")
         else:
+            overrides = load_methodology_overrides(study_id)
+            if overrides.get("consideration_from_purchase"):
+                df = _apply_consideration_from_purchase_override(study_id, df)
             write_parquet_blob(curated_key, df)
 
     return {
