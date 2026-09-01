@@ -92,14 +92,30 @@ export function buildJourneyHeatmap(
 ): JourneyHeatmapMatrix {
   const totalStudies = new Set(model.rows.map((row) => row.studyId)).size;
   const studySampleById = new Map<string, number>();
-  const brandSampleByName = new Map<string, number>();
+  // Per brand, per study: dedupe multiple rows for the same (brand, study) pair by
+  // taking the max, same as studySampleById above — then sum across studies so a
+  // brand tracked across several waves reports its combined sample, not just the
+  // single largest wave (which is what a plain max-by-brand-name gave us before,
+  // and which never grows as more waves are added to the selection).
+  const brandStudySampleByName = new Map<string, Map<string, number>>();
   for (const row of model.rows) {
     const sample = row.basePopulationN ?? row.baseN ?? null;
     if (typeof sample !== "number" || sample <= 0) continue;
     const studyPrev = studySampleById.get(row.studyId) ?? 0;
     if (sample > studyPrev) studySampleById.set(row.studyId, sample);
-    const brandPrev = brandSampleByName.get(row.brandName) ?? 0;
-    if (sample > brandPrev) brandSampleByName.set(row.brandName, sample);
+
+    let byStudy = brandStudySampleByName.get(row.brandName);
+    if (!byStudy) {
+      byStudy = new Map<string, number>();
+      brandStudySampleByName.set(row.brandName, byStudy);
+    }
+    const brandStudyPrev = byStudy.get(row.studyId) ?? 0;
+    if (sample > brandStudyPrev) byStudy.set(row.studyId, sample);
+  }
+  const brandSampleByName = new Map<string, number>();
+  for (const [brandName, byStudy] of brandStudySampleByName) {
+    const total = Array.from(byStudy.values()).reduce((sum, n) => sum + n, 0);
+    brandSampleByName.set(brandName, total);
   }
   const selectionSampleN = Array.from(studySampleById.values()).reduce((sum, n) => sum + n, 0);
   const selected = model.brandStageAggregates.filter(

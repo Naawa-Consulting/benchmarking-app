@@ -14,6 +14,11 @@ __pycache__/
 /data/
 *.parquet
 
+# Raw .sav source files dropped at repo root before ingestion (real respondent
+# data, never committed/pushed) — landing files under data/landing are already
+# covered by /data/ above; this covers ones staged at root before that move.
+/*.sav
+
 # Env
 .env
 .env.*
