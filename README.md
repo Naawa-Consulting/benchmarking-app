@@ -41,6 +41,22 @@ _Última actualización: 2026-08-31_
   affect real production access control (agent behavior, auth gating, role/scope permissions) —
   treat as sensitive and flag them clearly when made.
 
+## Versionado y tags
+
+Convención única para tags de release: **`vMAJOR.MINOR.PATCH`** (semver, `v` en minúscula).
+
+- `v1.0.0` — 2026-08-25, `29689a1` — project-os setup.
+- `v1.1.0` — 2026-09-01, `cf5e818` — taxonomía Automotriz y Teléfonos celulares en Market Lens.
+
+Reglas:
+- Siempre tag **anotado** (`git tag -a vX.Y.Z -m "..."`), nunca ligero — así el tag guarda autor,
+  fecha y mensaje propios, y `git describe` funciona de forma predecible.
+- No usar variantes como `V01`, `V1.0` ni `1.0.0` (sin `v`); los tags históricos que seguían ese
+  esquema ya fueron renombrados a esta convención.
+- Renombrar un tag es crear + borrar (`git tag NUEVO VIEJO && git tag -d VIEJO`). Si el tag ya se
+  pusheó, hay que además `git push origin NUEVO` y `git push origin --delete VIEJO`, y avisar al
+  equipo de correr `git fetch --prune --prune-tags`.
+
 ## Stack
 - Frontend: Next.js App Router + TypeScript + Tailwind + ECharts + Radix Popover
 - Backend: FastAPI + DuckDB + Parquet
