@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import duckdb
 from fastapi import APIRouter, Query
 
 from app.data.demographics import load_demographics_config, normalize_demographics_config, respondents_key, value_labels_key
 from app.data.market_lens import market_taxonomy_items_from_standard, resolve_classification
-from app.data.warehouse import blob_exists, list_study_ids, load_parquet_as_view, read_json_blob
+from app.data.warehouse import (
+    blob_exists,
+    list_study_ids,
+    load_parquet_as_view,
+    read_json_blob,
+    read_parquet_blob,
+)
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 def _normalize_gender_label(value: object) -> str:
     if value is None:
@@ -115,12 +126,115 @@ def filter_taxonomy_options(view: str = Query("market", description="market|stan
     return {"items": items, "sectors": sectors, "subsectors": subsectors, "categories": categories}
 
 
+_STORAGE_RETRY_DELAYS = (0.3, 0.9)
+
+
+def _retry_storage(fn, *args):
+    """Retry a Storage read a couple of times before giving up.
+
+    Reads carry a cache-busting query param (see app/storage/blob.py), so every one is a
+    CDN miss straight to origin; fanning 51 studies out across a thread pool is enough to
+    get HTTP 429 from Supabase Storage. Observed live while building this endpoint.
+    """
+    last: Exception | None = None
+    for delay in (*_STORAGE_RETRY_DELAYS, None):
+        try:
+            return fn(*args)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if delay is None:
+                break
+            time.sleep(delay)
+    raise last if last else RuntimeError("storage retry failed")
+
+
+def _year_from_study_id(study_id: str) -> int | None:
+    """Study ids start with YYYYMMDD; mirrors public.bbs_year_from_study in Postgres."""
+    prefix = study_id[:4]
+    if prefix.isdigit():
+        year = int(prefix)
+        if 1900 <= year <= 2100:
+            return year
+    return None
+
+
 def _parse_study_ids(raw: str | None) -> list[str]:
     discovered = _discover_curated_studies()
     if not raw:
         return discovered
     requested = [item.strip() for item in raw.split(",") if item.strip()]
     return [study_id for study_id in requested if study_id in discovered]
+
+
+@router.get("/filters/options/brands")
+def filter_brand_options(
+    study_ids: str | None = Query(None, description="Comma-separated study ids"),
+    years: str | None = Query(None, description="Comma-separated years"),
+) -> dict:
+    """Distinct (brand x taxonomy) tuples for the global Scope Bar's Brand filter.
+
+    Legacy counterpart of the `bbs_brand_options` RPC (supabase/sql/029). The Scope Bar
+    used to fill this dropdown by running a full touchpoints aggregation and keeping only
+    `row.brand`; this reads just the `brand` column out of each study's curated mart via
+    parquet column projection instead. Taxonomy columns travel with each brand because
+    the Next layer resolves the market lens and applies the market-view selection filter
+    itself, exactly as it already does for journey/touchpoints responses.
+    """
+    selected = _parse_study_ids(study_ids)
+    requested_years = {
+        int(item.strip())
+        for item in (years or "").split(",")
+        if item.strip().isdigit() and len(item.strip()) == 4
+    }
+
+    def brands_for_study(study_id: str) -> list[dict[str, str | None]]:
+        if requested_years:
+            year = _year_from_study_id(study_id)
+            if year is not None and year not in requested_years:
+                return []
+        key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
+        try:
+            if not blob_exists(key):
+                return []
+            df = read_parquet_blob(key, columns=["brand"])
+            classification = _retry_storage(_classification_for_study, study_id)
+        except Exception:
+            # One study failing (missing blob, transient Storage error, 429) must not take
+            # the whole dropdown down — the Brand filter degrades by that study only.
+            logger.warning("brand options: skipping study %s", study_id, exc_info=True)
+            return []
+        if classification is None:
+            return []
+        brands = sorted(
+            {
+                str(value).strip()
+                for value in df["brand"].dropna().unique()
+                if str(value).strip()
+            }
+        )
+        return [
+            {
+                "brand": brand,
+                "sector": classification.get("sector"),
+                "subsector": classification.get("subsector"),
+                "category": classification.get("category"),
+                "market_sector": classification.get("market_sector"),
+                "market_subsector": classification.get("market_subsector"),
+                "market_category": classification.get("market_category"),
+            }
+            for brand in brands
+        ]
+
+    # Each iteration is a Storage round trip, so threads help despite the GIL. Pool size
+    # matches the 4 used elsewhere in this service after the 2026-08-28 OOM on Render.
+    deduped: dict[tuple, dict[str, str | None]] = {}
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for study_brands in executor.map(brands_for_study, selected):
+            for item in study_brands:
+                deduped.setdefault(tuple(sorted(item.items(), key=lambda kv: kv[0])), item)
+
+    items = sorted(deduped.values(), key=lambda item: str(item.get("brand") or "").lower())
+    return {"items": items}
 
 
 @router.get("/filters/options/demographics")

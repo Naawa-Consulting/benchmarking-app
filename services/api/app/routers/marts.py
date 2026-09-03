@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import csv
-import io
 import logging
 import unicodedata
 
@@ -16,17 +14,12 @@ from app.data.warehouse import (
     read_parquet_blob,
     write_parquet_blob,
 )
-from app.storage.blob import StorageNotFoundError, get_storage
 from app.storage.question_map import question_map_path
 from app.models.schemas import MartBuildResponse
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _mapping_csv_key() -> str:
-    return "warehouse/mapping/question_map_v0.csv"
 
 
 def _normalize_match(value: object) -> str:
@@ -169,6 +162,8 @@ def _apply_catalog_brand_mode(study_id: str, df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_mapping_df(study_id: str) -> pd.DataFrame:
+    # The shared-CSV fallback that used to close this function is gone with the retired
+    # question_map_v0.csv; the per-study question map is the only mapping source now.
     map_key = question_map_path(study_id)
     if blob_exists(map_key):
         df = read_parquet_blob(map_key)
@@ -191,21 +186,7 @@ def _load_mapping_df(study_id: str) -> pd.DataFrame:
         df = _apply_brand_label_true_code_override(study_id, df)
         return df[["study_id", "var_code", "stage", "brand", "touchpoint", "value_true_codes", "true_codes"]]
 
-    csv_key = _mapping_csv_key()
-    try:
-        data = get_storage().read_bytes(csv_key)
-    except StorageNotFoundError:
-        return pd.DataFrame()
-    reader = csv.DictReader(io.StringIO(data.decode("utf-8")))
-    rows = [row for row in reader if row.get("study_id") == study_id]
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["value_true_codes"] = df["value_true_codes"].fillna("1")
-    df["true_codes"] = df["value_true_codes"].astype(str).str.split("|")
-    df = _apply_catalog_brand_mode(study_id, df)
-    df = _apply_brand_label_true_code_override(study_id, df)
-    return df
+    return pd.DataFrame()
 
 
 @router.post("/marts/journey/build", response_model=MartBuildResponse)

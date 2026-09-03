@@ -246,17 +246,6 @@ export function suggestMappingDetailed(studyId: string) {
   return requestDetailed(`/mapping/suggest?study_id=${encodeURIComponent(studyId)}`);
 }
 
-export function loadMappingDetailed(studyId: string) {
-  return requestDetailed(`/mapping?study_id=${encodeURIComponent(studyId)}`);
-}
-
-export function saveMappingDetailed(payload: unknown) {
-  return requestDetailed("/mapping/save", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
 export function buildJourneyMartDetailed(studyId: string) {
   return requestDetailed(`/marts/journey/build?study_id=${encodeURIComponent(studyId)}`, {
     method: "POST",
@@ -481,6 +470,20 @@ export function getFilterDemographicsOptionsDetailed(studyIds: string[] | null) 
   }
   const suffix = params.toString();
   return requestDetailed(`/filters/options/demographics${suffix ? `?${suffix}` : ""}`);
+}
+
+export function postFilterBrandOptionsDetailed(
+  payload: unknown,
+  options?: { signal?: AbortSignal }
+) {
+  // Dedicated lightweight endpoint. Previously the Brand dropdown was populated from a
+  // full touchpoints aggregation (limit_mode="all") with a full journey scan as fallback;
+  // see apps/web/src/app/api/filters/options/brands/route.ts.
+  return requestDetailed("/filters/options/brands", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    signal: options?.signal,
+  });
 }
 
 export function getFilterDateOptionsDetailed(studyIds: string[] | null) {

@@ -2,7 +2,7 @@
 
 Mapa completo de carpetas y archivos del proyecto. Se actualiza en automático — ver protocolo en [CLAUDE.md](CLAUDE.md).
 
-**Última actualización:** 2026-08-31
+**Última actualización:** 2026-09-02
 
 **Excluidos de este índice:** `node_modules/`, `.next/`, `.venv/`, `__pycache__/`, `.pytest_cache/`,
 `*.pyc`, `apps/web/tsconfig.tsbuildinfo`, archivos `.env*`. La carpeta **`data/`** completa está
@@ -67,6 +67,7 @@ Todo el frontend pasa por aquí; nunca se llama a FastAPI o Supabase directo des
 | `analytics/tracking/series/route.ts` | Gateway Tracking (mismo patrón). |
 | `network/route.ts` | Gateway del grafo `/network`. |
 | `filters/options/{studies,taxonomy,demographics,date}/route.ts` | Opciones para la Scope Bar. |
+| `filters/options/brands/route.ts` | Opciones de marca para la Scope Bar (POST). Reemplazó el patrón de pedir la agregación completa de touchpoints y quedarse solo con `row.brand`; aplica access-scope + market lens y devuelve solo nombres. |
 | `auth/me/route.ts` | Devuelve el `authz` resuelto del usuario actual (rol, permisos, scopes). |
 | `admin/users/route.ts` | Lista/crea usuarios (Supabase Auth admin). |
 | `admin/users/[userId]/route.ts` | Actualiza rol de un usuario. |
@@ -153,18 +154,18 @@ Todo el frontend pasa por aquí; nunca se llama a FastAPI o Supabase directo des
 | app/models/schemas.py | Modelos Pydantic (`Study`, etc.). |
 | app/routers/analytics.py | **Router central (~140KB)**: endpoints Journey/Network/Tracking (`GET`+`POST`, `response_mode` progresivo). Los 3 rate models de imputación cross-study (`_build_consideration_rate_model`/`_build_satisfaction_rate_model`/`_build_csat_gap_model`) entrenan vía RPC SQL (`bbs_rate_model_training_stats`) sobre `journey_metrics`, con fallback automático al escaneo de parquet (`BBS_RATE_MODEL_SOURCE`). |
 | app/routers/network.py | Endpoint `/network` — construye el grafo de demanda (touchpoints ↔ marcas/benchmark). |
-| app/routers/filters.py | Opciones de filtros (estudios, taxonomía, demografía, fecha) para la Scope Bar. |
+| app/routers/filters.py | Opciones de filtros (estudios, taxonomía, demografía, fecha, **marcas**) para la Scope Bar. `GET /filters/options/brands` es la contraparte `legacy` del RPC `bbs_brand_options`: lee solo la columna `brand` de cada mart curado por proyección de parquet, con `_retry_storage` porque el fan-out multi-estudio choca con el rate limit (429) de Storage. |
 | app/routers/demographics.py | Endpoints y config de dimensiones demográficas. |
 | app/routers/taxonomy.py | Endpoints de taxonomía de mercado (sector/subsector/categoría). |
-| app/routers/marts.py | Construcción/lectura de marts curados. |
+| app/routers/marts.py | Construcción/lectura de marts curados. Su única fuente de mapeo es el `question_map.parquet` por estudio (el fallback al CSV compartido se retiró el 2026-09-02). |
 | app/routers/studies.py | CRUD/listado de estudios y su estado en el pipeline. |
 | app/routers/study_config.py | Configuración por estudio (columnas base: respondent/weight). |
 | app/routers/ingest.py | Ingesta de archivos `.sav` desde `data/landing`. |
-| app/routers/mapping.py | Mapeo de preguntas/columnas del estudio a esquema canónico. |
+| app/routers/mapping.py | Mapeo de preguntas/columnas del estudio a esquema canónico. Solo quedan `/mapping/suggest` y `/mapping/template` (ambos derivan de `raw_variables`, no leen nada persistido); `GET /mapping` y `POST /mapping/save` se eliminaron con el CSV compartido el 2026-09-02. |
 | app/routers/pipeline.py | Orquesta el pipeline de ingesta→mapeo→curado. Incluye `_apply_consideration_from_purchase_override` — corrección per-estudio (gateada por `methodology_overrides.consideration_from_purchase`) para estudios donde consideración y compra se preguntaron simultáneamente. |
 | app/routers/questions.py | Endpoints de catálogo de preguntas. |
 | app/routers/question_map.py | CRUD del mapa de preguntas por estudio. |
-| app/routers/rules.py | Reglas de clasificación/taxonomía (motor de reglas). |
+| app/routers/rules.py | Reglas de clasificación/taxonomía (motor de reglas). `POST /rules/run` es reporte puro de cobertura desde el 2026-09-02: ya no persiste su salida (`output_path=None`). |
 | app/routers/health.py | Healthcheck. |
 | app/data/ingest_from_landing.py | Convierte `.sav` de `data/landing` a parquet crudo/curado. |
 | app/data/sav_reader.py | Lectura de archivos SPSS `.sav` (`pyreadstat`). |
@@ -210,9 +211,19 @@ no está trackeado en git.
 | 025_fix_consideration_source_mislabel_backfill.sql | Backfill de una fila con `brand_consideration_source` mal etiquetado (bug corregido en `analytics.py`). |
 | 026_capture_live_rpc_definitions.sql | Captura de gobernanza (no-op) del DDL real de `bbs_journey_table_multi`/`bbs_touchpoints_table_multi`/`bbs_tracking_series`/`bbs_network`, que solo vivían en el editor SQL de Supabase. |
 | 027_market_lens_footwear.sql | Agrega Calzado/Calzado deportivo a los fallbacks `bbs_market_subsector`/`bbs_market_category` (mismo patrón que 013 para bebidas). |
+| 029_brand_options_rpc.sql | `bbs_brand_options` — tuplas distintas (marca × taxonomía) uniendo `journey_metrics` y `touchpoint_metrics`, para el filtro de Brands de la Scope Bar. Sustituye el escaneo completo de touchpoints (5.01 MB → 82.7 kB en el peor caso). |
+| 030_journey_table_multi_honor_response_mode.sql | `bbs_journey_table_multi` ahora materializa solo el row-set que cada `response_mode` consume; antes devolvía los tres siempre (los 3 modos pesaban lo mismo, 2.74 MB). Paridad 7/7 verificada por hash antes de aplicar. |
 | 028_market_lens_automotive_and_smartphones.sql | Agrega Automotriz (Vehículos de pasajeros/híbridos) y Tecnología→Hardware→Teléfonos celulares a los fallbacks `bbs_market_sector`/`bbs_market_subsector`/`bbs_market_category` — primeras categorías con `market_sector` propio ("Automotive"/"Technology") en vez de heredar el genérico de su sector estándar. |
 
 ## [data/](data/) — warehouse local (no trackeado en git)
 Ver detalle en [CLAUDE.md](CLAUDE.md) § "Datos locales". Contiene `landing/` (`.sav` fuente),
 `warehouse/raw`, `warehouse/curated` (marts por `study_id=...`), `warehouse/demographics`,
 `warehouse/study_config`, `warehouse/taxonomy`, `warehouse/mapping`, y `warehouse.duckdb`.
+
+El mismo árbol vive en el bucket `bbs-pipeline` de Supabase Storage, que es lo que lee
+`services/api` en producción. Dos notas del 2026-09-02:
+- `warehouse/mapping/question_map_v0.csv` **ya no existe**: era un volcado derivado del
+  `question_map.parquet` de cada estudio que 4 rutas reescribían entero sin locking. Copia en
+  `warehouse/_archive/question_map_v0.2026-09-02.csv`.
+- `warehouse/_archive/` es el prefijo donde se guardan respaldos puntuales antes de un borrado
+  (hoy: el CSV retirado y la config del estudio `20230713_hdi_ddbb` eliminado).

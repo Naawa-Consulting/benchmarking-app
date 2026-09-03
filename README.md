@@ -8,8 +8,19 @@ Monorepo for the BBS product with three core analytics experiences:
 Plus Admin tools for data ingestion, validation, taxonomy, and rules.
 
 ## Estado actual
-_Última actualización: 2026-08-31_
+_Última actualización: 2026-09-02_
 
+- **v2 Fase 0 is done: diagnostic (BITACORA 2026-09-01 cont. 9) + all three P0 items shipped
+  (BITACORA 2026-09-02).** The framing that drove it: production runs in `supabase` mode, so the
+  analytics path never touches FastAPI/Storage, and the real cost was payload size, not the database.
+  Measured end to end through the gateway: a Journey page load dropped from **5.51 MB to 0.83 MB**
+  with a category selected, and from **12.05 MB to 2.25 MB** unscoped. The shared
+  `question_map_v0.csv` is retired (archived under `warehouse/_archive/`), which removes the root
+  cause of the Question Mapper race rather than mitigating it.
+- Still open from that phase: the demographic-filter gap (the user chose to fix it properly by adding
+  a demographic dimension to the marts — blocked on defining which cuts the business uses; the
+  filters stay visible and inert until then), the Agent's data access rework, and hardening
+  `analytics.py` against Storage's HTTP 429 on multi-study fan-out.
 - Vercel + Supabase deployment mode is live in read-only beta alongside the legacy FastAPI backend
   (`BBS_DATA_SOURCE` switches between them; see "Vercel + Supabase Deployment Mode" below).
 - Push no longer scans the full curated corpus per study pushed: the 3 cross-study imputation rate
@@ -22,9 +33,9 @@ _Última actualización: 2026-08-31_
   es/en response-language enforcement, and access control (`BBS_AGENT_OWNER_ONLY`).
 - In progress, not yet committed: trimming/compacting the row payloads sent to the Agent's LLM calls
   and making row/token limits configurable via env vars, to control cost/latency.
-- The P0–P2 optimization backlog further down this document (shared aggregation service, ScopeBar
-  brand-option cost, tracking query consolidation, etc.) is still open — treat it as the current
-  known-gaps list, not resolved history.
+- The optimization backlog further down this document is the current known-gaps list. Its "Done"
+  section records the 2026-09-02 P0 work; the pre-2026-09-01 P0 #1/#3 targeted `analytics.py`, which
+  production does not execute, and stay deferred.
 - See [BITACORA.md](BITACORA.md) for the chronological work log and [INDEX.md](INDEX.md) for a
   file-by-file map of the repo.
 
@@ -161,6 +172,8 @@ Example:
 - `GET /filters/options/studies`
 - `GET /filters/options/taxonomy`
 - `GET /filters/options/demographics`
+- `GET /filters/options/brands` (FastAPI) / `POST /api/filters/options/brands` (gateway)
+  - added 2026-09-02; backs the Scope Bar's Brand dropdown instead of a full touchpoints aggregation
 - `GET /filters/options/date`
 
 ### Journey
@@ -197,20 +210,53 @@ Example:
 ## Known Constraints
 - Some historical studies have incomplete stages; model handles missingness without zero imputation.
 - Taxonomy metadata gaps may produce `Unassigned` buckets.
-- Large scope selections can still be expensive in Tracking and Network due to respondent-level filtering.
+- **Demographic filters (Gender/NSE/State/Age) are a no-op in `supabase` mode (production).**
+  `journey_metrics`/`touchpoint_metrics` are aggregated at `study × brand [× touchpoint]` with no
+  demographic dimension, and none of the four analytics RPCs accept those parameters — the Next
+  gateway sends them and the RPC silently ignores them. They do work in `legacy` mode (respondent-level
+  filtering in DuckDB). This is the third known legacy→Supabase fidelity gap, alongside `bbs_network`
+  (no secondary links, no percentile scaling) and `bbs_tracking_series` (averages unweighted by
+  `base_n_population`). Confirmed 2026-09-01 — see BITACORA.md. **The filters are still shown in the
+  Scope Bar and still do nothing**: the agreed fix is to add the dimension to the marts, which needs
+  the business to define the cuts first.
+- Respondent-level filtering in Tracking/Network is expensive, **but only on the `legacy` path**,
+  which production does not execute. Do not treat it as a production bottleneck.
+- Supabase Storage answers **HTTP 429** when a request fans out reads across all ~51 studies, and
+  cache-busting (`app/storage/blob.py`) guarantees every read reaches origin. `filters.py`'s brand
+  endpoint retries and degrades per study; **`analytics.py` still has no handling and returns 500** —
+  this is the most likely cause of the "transient Render 500s that go away on retry" seen during the
+  LMB waves. Confirmed 2026-09-02.
 
 ## Next Steps (Optimization Backlog)
 
-### P0 (High Impact)
-1. Shared aggregation service in backend
-   - Create shared per-study scoped aggregators used by Journey, Network, and Tracking.
-   - Remove duplicated loops and repeated parquet scans across routers.
-2. Reduce ScopeBar brand option cost
-   - Stop using full touchpoints aggregation to populate brand options.
-   - Add lightweight brand-options endpoint (or cached derived index).
-3. Tracking query consolidation
-   - Move to one-pass per-study temporal aggregation for journey + touchpoints.
-   - Avoid period x study nested query patterns.
+_Reprioritized 2026-09-01 after the v2 Fase 0 diagnostic, then updated 2026-09-02 as the P0 items
+shipped (see BITACORA.md). The pre-2026-09-01 P0 #1 and #3 targeted `analytics.py`, which production
+does not run in `supabase` mode — they are deferred, not done._
+
+### Done (2026-09-02)
+- ~~Reduce ScopeBar brand option cost~~ — `bbs_brand_options` RPC (`supabase/sql/029`) +
+  `GET /filters/options/brands` (legacy) + `POST /api/filters/options/brands` (gateway). 4.41 MB → 3.3 kB
+  unscoped. It also fixed a real bug: the old touchpoints-then-journey fallback hid the 80 brands that
+  exist only in `journey_metrics` whenever touchpoints returned anything.
+- ~~Make `bbs_journey_table_multi` honor `response_mode`~~ — `supabase/sql/030`, parity verified 7/7 by
+  hashing the row-set each mode actually consumes.
+- ~~Retire `warehouse/mapping/question_map_v0.csv`~~ — 4 read-modify-write callers, the `marts.py`
+  fallback, `GET /mapping` and `POST /mapping/save` all removed; curated marts verified byte-for-byte
+  equivalent in content after a forced rebuild.
+
+### P0 (needs a product decision first)
+1. Close the demographic-filter gap by adding a demographic dimension to the marts (decided approach).
+   **Blocked on defining which demographic cuts the business actually uses** — that choice drives the
+   mart size and the Push redesign.
+2. Rework the Agent's data access — it calls the same `limit_mode=all` endpoints and picks the 45 rows
+   the LLM sees by string-matching brand names in JS, not by querying.
+3. Handle Storage's HTTP 429 in `analytics.py` (see Known Constraints) — today it surfaces as a 500.
+
+### Deferred (legacy-only, revisit only if production returns to `legacy`)
+- Shared per-study aggregation service in `analytics.py`.
+- One-pass per-study temporal aggregation for tracking (journey + touchpoints).
+- Memoization in front of `SupabaseStorage.read_bytes` (no cache today;
+  `respondents.parquet` is downloaded twice per `_respondent_filter_cte` call).
 
 ### P1 (Reliability + Latency)
 4. Cache key normalization + shared cache module

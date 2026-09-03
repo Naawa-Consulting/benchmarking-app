@@ -1,7 +1,7 @@
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from app.data.ingest_from_landing import ensure_raw_from_landing
-from app.data.warehouse import blob_exists, delete_blob, delete_prefix, read_csv_blob, write_csv_blob
+from app.data.warehouse import blob_exists, delete_blob, delete_prefix
 from app.models.schemas import IngestRunResponse
 
 router = APIRouter()
@@ -93,15 +93,9 @@ def delete_study_artifacts(
         else:
             missing.append(key)
 
-    mapping_key = "warehouse/mapping/question_map_v0.csv"
-    df = read_csv_blob(mapping_key)
-    if df is not None and "study_id" in df.columns:
-        before = len(df)
-        filtered = df[df["study_id"].astype(str) != normalized_study_id]
-        if len(filtered) != before:
-            write_csv_blob(mapping_key, filtered)
-            removed.append(mapping_key)
-
+    # Deleting a study used to also filter its rows out of the shared question_map_v0.csv.
+    # That file is retired; the study-scoped question_map.parquet lives under the
+    # warehouse/raw/study_id=*/ prefix already removed above.
     return {
         "ok": True,
         "study_id": normalized_study_id,

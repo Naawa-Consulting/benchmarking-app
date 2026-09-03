@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import csv
-import io
 import logging
 import unicodedata
 
@@ -20,7 +18,6 @@ from app.data.rule_engine import (
 )
 from app.data.study_config import load_methodology_overrides
 from app.data.warehouse import blob_exists, read_parquet_blob, write_parquet_blob
-from app.storage.blob import StorageNotFoundError, get_storage
 from app.storage.question_map import question_map_path
 
 logger = logging.getLogger(__name__)
@@ -29,32 +26,13 @@ router = APIRouter()
 IMPUTE_WARN_THRESHOLD = 0.40
 
 
-def _mapping_csv_key() -> str:
-    return "warehouse/mapping/question_map_v0.csv"
-
-
-def _read_mapping_csv() -> pd.DataFrame | None:
-    try:
-        data = get_storage().read_bytes(_mapping_csv_key())
-    except StorageNotFoundError:
-        return None
-    return pd.read_csv(io.BytesIO(data))
-
-
-def _write_mapping_csv(df: pd.DataFrame) -> None:
-    buf = io.StringIO()
-    df.to_csv(buf, index=False)
-    get_storage().write_bytes(_mapping_csv_key(), buf.getvalue().encode("utf-8"), content_type="text/csv")
-
-
-def _mapping_rows_for_study(study_id: str) -> list[dict]:
-    try:
-        data = get_storage().read_bytes(_mapping_csv_key())
-    except StorageNotFoundError:
-        return []
-    text = data.decode("utf-8")
-    reader = csv.DictReader(io.StringIO(text))
-    return [row for row in reader if row.get("study_id") == study_id]
+# The shared warehouse/mapping/question_map_v0.csv was retired on 2026-09-02. It was a
+# fully derived dump of each study's warehouse/raw/study_id=*/question_map.parquet (row
+# counts matched exactly across all 33 populated studies) that no curated build ever read,
+# yet four callers rewrote the whole 1.9 MB file with an unsynchronized read-modify-write —
+# the root cause of the Question Mapper race and of a real corrupt row in the live file.
+# A copy is archived at warehouse/_archive/question_map_v0.2026-09-02.csv.
+# See BITACORA.md 2026-09-02.
 
 
 def _normalize_match(value: object) -> str:
@@ -491,17 +469,6 @@ def ensure_journey_pipeline(
 
     question_map_df = _load_mapping_df_from_question_map(study_id, rules)
 
-    existing_df = _read_mapping_csv()
-    existing_rows = existing_df.to_dict(orient="records") if existing_df is not None else []
-    remaining = [row for row in existing_rows if row.get("study_id") != study_id]
-    if not question_map_df.empty:
-        merged_rows = remaining + question_map_df.to_dict(orient="records")
-    else:
-        mapped_rows = mapped_df.copy()
-        mapped_rows.insert(0, "study_id", study_id)
-        merged_rows = remaining + mapped_rows.to_dict(orient="records")
-    _write_mapping_csv(pd.DataFrame(merged_rows))
-
     curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
 
     curated_status = "skipped" if blob_exists(curated_key) and not force else "ok"
@@ -619,9 +586,11 @@ def journey_pipeline_status(study_id: str = Query(..., description="Study id")) 
     raw_ready = blob_exists(f"{raw_prefix}/raw_responses.parquet") and blob_exists(f"{raw_prefix}/raw_variables.parquet")
     demographics_ready = blob_exists(f"{raw_prefix}/respondents.parquet")
 
-    mapping_rows = _mapping_rows_for_study(study_id)
+    # Was `len(csv_rows_for_study) > 0 or question_map_exists`. The CSV only ever held
+    # rows derived from that same parquet, so "has CSV rows" implied "parquet exists"
+    # and the whole expression collapses to the parquet check — same result, no extra read.
     question_map_exists = blob_exists(question_map_path(study_id))
-    mapping_ready = len(mapping_rows) > 0 or question_map_exists
+    mapping_ready = question_map_exists
 
     curated_key = f"warehouse/curated/study_id={study_id}/fact_journey.parquet"
     curated_ready = blob_exists(curated_key)
@@ -646,7 +615,6 @@ def journey_pipeline_status(study_id: str = Query(..., description="Study id")) 
         "csat_imputation": csat_imputation,
         "paths": {
             "raw_dir": raw_prefix,
-            "mapping_csv": _mapping_csv_key(),
             "question_map": question_map_path(study_id),
             "curated_path": curated_key,
         },

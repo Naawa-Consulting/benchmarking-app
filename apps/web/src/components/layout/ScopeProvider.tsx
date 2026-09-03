@@ -7,8 +7,7 @@ import {
   getFilterDemographicsOptionsDetailed,
   getFilterStudyOptionsDetailed,
   getFilterTaxonomyOptionsByViewDetailed,
-  postJourneyTableMultiDetailed,
-  postTouchpointsTableMultiDetailed,
+  postFilterBrandOptionsDetailed,
 } from "../../lib/api";
 
 export type StudyOption = {
@@ -246,13 +245,12 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
       }
       const seq = brandsReqSeqRef.current + 1;
       brandsReqSeqRef.current = seq;
-      const result = await postTouchpointsTableMultiDetailed(
-        payload,
-        "all",
-        "recall",
-        "desc",
-        { signal: controller.signal }
-      );
+      // Dedicated brand-options endpoint. It unions journey + touchpoint brands server
+      // side, so the old "full touchpoints scan, then full journey scan as fallback"
+      // pair (5.01 MB + 2.74 MB measured, everything discarded except row.brand) is gone.
+      const result = await postFilterBrandOptionsDetailed(payload, {
+        signal: controller.signal,
+      });
       if (seq !== brandsReqSeqRef.current || controller.signal.aborted) {
         return;
       }
@@ -262,39 +260,16 @@ export function ScopeProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const responsePayload = result.data as {
-        rows?: Array<{ brand?: string }>;
-      };
-      const rows = Array.isArray(responsePayload.rows) ? responsePayload.rows : [];
-      let nextBrands = Array.from(
-        new Set(
-          rows
-            .map((row) => (typeof row.brand === "string" ? row.brand.trim() : ""))
-            .filter(Boolean)
-        )
-      ).sort((a, b) => a.localeCompare(b));
-
-      // Fallback: when touchpoints response is empty, use Journey rows so Brand filter does not stay disabled.
-      if (!nextBrands.length) {
-        const journeyResult = await postJourneyTableMultiDetailed(
-          payload,
-          "all",
-          "brand_awareness",
-          "desc",
-          { signal: controller.signal, responseMode: "full" }
-        );
-        if (!(seq !== brandsReqSeqRef.current || controller.signal.aborted) && journeyResult.ok && journeyResult.data) {
-          const journeyPayload = journeyResult.data as { rows?: Array<{ brand?: string }> };
-          const journeyRows = Array.isArray(journeyPayload.rows) ? journeyPayload.rows : [];
-          nextBrands = Array.from(
+      const responsePayload = result.data as { brands?: unknown };
+      const nextBrands = Array.isArray(responsePayload.brands)
+        ? Array.from(
             new Set(
-              journeyRows
-                .map((row) => (typeof row.brand === "string" ? row.brand.trim() : ""))
+              responsePayload.brands
+                .map((brand) => (typeof brand === "string" ? brand.trim() : ""))
                 .filter(Boolean)
             )
-          ).sort((a, b) => a.localeCompare(b));
-        }
-      }
+          ).sort((a, b) => a.localeCompare(b))
+        : [];
 
       brandsCacheRef.current.set(cacheKey, nextBrands);
       setBrands(nextBrands);

@@ -4,20 +4,13 @@ import csv
 import io
 import logging
 import re
-from typing import Any
-
 import duckdb
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from app.data.warehouse import blob_exists, load_parquet_as_view, read_parquet_blob
-from app.storage.blob import StorageNotFoundError, get_storage
 from app.models.schemas import (
     MappingCandidate,
-    MappingListResponse,
-    MappingRowInput,
-    MappingSaveRequest,
-    MappingSaveResponse,
     MappingSuggestResponse,
 )
 
@@ -30,29 +23,6 @@ RULES: dict[str, str] = {
     "consideration": r"(considera|consideraría|probable|intención|preferiría)",
     "purchase": r"(compr(ó|a)|adquir(ió|iría)|última\s+compra|purchase)",
 }
-
-
-def _mapping_csv_key() -> str:
-    return "warehouse/mapping/question_map_v0.csv"
-
-
-def _load_mapping_rows() -> list[dict[str, str]]:
-    try:
-        data = get_storage().read_bytes(_mapping_csv_key())
-    except StorageNotFoundError:
-        return []
-    text = data.decode("utf-8")
-    reader = csv.DictReader(io.StringIO(text))
-    return [row for row in reader]
-
-
-def _write_mapping_rows(rows: list[dict[str, str]]) -> None:
-    fieldnames = ["study_id", "var_code", "stage", "brand", "value_true_codes"]
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(rows)
-    get_storage().write_bytes(_mapping_csv_key(), buf.getvalue().encode("utf-8"), content_type="text/csv")
 
 
 def _variables_from_raw(study_id: str) -> pd.DataFrame:
@@ -141,34 +111,10 @@ def mapping_template(study_id: str = Query(..., description="Study id")) -> Resp
     return Response(content=output.getvalue(), media_type="text/csv")
 
 
-@router.get("/mapping", response_model=MappingListResponse)
-def get_mapping(study_id: str = Query(..., description="Study id")) -> MappingListResponse:
-    rows = [row for row in _load_mapping_rows() if row.get("study_id") == study_id]
-    return MappingListResponse(study_id=study_id, rows=rows)
+# GET /mapping and POST /mapping/save were removed on 2026-09-02 together with the shared
+# warehouse/mapping/question_map_v0.csv they read and rewrote. Neither had a caller in
+# apps/web, and /mapping/save was actively dangerous: it rewrote the whole file through a
+# 5-column writer, which would have silently dropped 4 columns from every OTHER study's
+# rows. Per-study question mapping lives in app/routers/question_map.py, which only ever
+# writes that one study's blob. See BITACORA.md 2026-09-02.
 
-
-@router.post("/mapping/save", response_model=MappingSaveResponse)
-def save_mapping(payload: MappingSaveRequest) -> MappingSaveResponse:
-    logger.info("Saving mapping rows for %s", payload.study_id)
-    existing_rows = _load_mapping_rows()
-    remaining = [row for row in existing_rows if row.get("study_id") != payload.study_id]
-
-    new_rows: list[dict[str, Any]] = []
-    for row in payload.rows:
-        new_rows.append(
-            {
-                "study_id": payload.study_id,
-                "var_code": row.var_code,
-                "stage": row.stage,
-                "brand": row.brand,
-                "value_true_codes": row.value_true_codes,
-            }
-        )
-
-    _write_mapping_rows(remaining + new_rows)
-    return MappingSaveResponse(
-        study_id=payload.study_id,
-        saved_rows=len(new_rows),
-        total_rows=len(remaining) + len(new_rows),
-        path=_mapping_csv_key(),
-    )

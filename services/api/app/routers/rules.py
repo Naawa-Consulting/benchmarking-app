@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import re
 
-import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.data.rule_engine import (
@@ -14,7 +13,7 @@ from app.data.rule_engine import (
     save_rules,
     save_study_rule_scope,
 )
-from app.data.warehouse import blob_exists, read_csv_blob, read_parquet_blob, write_csv_blob
+from app.data.warehouse import blob_exists, read_parquet_blob
 from app.models.schemas import RuleCoverageResponse, RuleSaveResponse
 
 logger = logging.getLogger(__name__)
@@ -24,10 +23,6 @@ router = APIRouter()
 
 def _raw_variables_key(study_id: str) -> str:
     return f"warehouse/raw/study_id={study_id}/raw_variables.parquet"
-
-
-def _mapping_csv_key() -> str:
-    return "warehouse/mapping/question_map_v0.csv"
 
 
 @router.get("/rules")
@@ -104,24 +99,16 @@ def run_rules(study_id: str = Query(..., description="Study id")) -> RuleCoverag
     except re.error as exc:  # type: ignore[name-defined]
         raise HTTPException(status_code=400, detail=f"Regex error: {exc}") from exc
 
-    mapping_key = _mapping_csv_key()
-    existing_df = read_csv_blob(mapping_key)
-    existing_rows = existing_df.to_dict(orient="records") if existing_df is not None else []
-
-    remaining = [row for row in existing_rows if row.get("study_id") != study_id]
-    mapped_rows = mapped_df.copy()
-    mapped_rows.insert(0, "study_id", study_id)
-
-    merged_rows = remaining + mapped_rows.to_dict(orient="records")
-    write_csv_blob(mapping_key, pd.DataFrame(merged_rows))
-
+    # Pure coverage/preview report now: the rule-engine output is no longer persisted.
+    # ensure_journey_pipeline re-derives the same mapped_df from the rules on every run,
+    # so nothing ever consumed the persisted copy.
     return RuleCoverageResponse(
         study_id=study_id,
         mapped_rows=stats["mapped_rows"],
         unmapped_rows=stats["unmapped_rows"],
         ignored_rows=stats["ignored_rows"],
         touchpoint_mapped_rows=stats.get("touchpoint_mapped_rows"),
-        output_path=mapping_key,
+        output_path=None,
         examples=stats["examples"],
     )
 

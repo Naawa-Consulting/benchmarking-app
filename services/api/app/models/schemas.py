@@ -74,30 +74,6 @@ class MappingSuggestResponse(BaseModel):
     candidates: list[MappingCandidate]
 
 
-class MappingRowInput(BaseModel):
-    var_code: str
-    stage: str
-    brand: str
-    value_true_codes: str
-
-
-class MappingListResponse(BaseModel):
-    study_id: str
-    rows: list[dict]
-
-
-class MappingSaveRequest(BaseModel):
-    study_id: str
-    rows: list[MappingRowInput]
-
-
-class MappingSaveResponse(BaseModel):
-    study_id: str
-    saved_rows: int
-    total_rows: int
-    path: str
-
-
 class MartBuildResponse(BaseModel):
     study_id: str
     respondents: int
